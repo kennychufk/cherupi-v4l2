@@ -660,6 +660,7 @@ class V4L2Device {
       }
 
       buffer_lengths[i] = buf.length;
+      std::cout<<"buf.length = "<<buf.length<<std::endl;
       buffer_starts[i] =
           mmap(nullptr, buffer_lengths[i], PROT_READ | PROT_WRITE, MAP_SHARED,
                fd, buf.m.offset);
@@ -724,6 +725,7 @@ class V4L2Device {
 
     // Copy frame data
     frame_data.data.resize(buf.bytesused);
+    std::cout<<"buf.bytesused"<<buf.bytesused<<std::endl;
     memcpy(frame_data.data.data(), buffer_starts[buf.index], buf.bytesused);
     frame_data.timestamp = std::chrono::steady_clock::now();
 

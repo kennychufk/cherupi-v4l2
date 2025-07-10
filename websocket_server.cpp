@@ -52,11 +52,8 @@ void WebSocketServer::run() {
                 has_client = true;
                 stream_manager->setWebSocket(ws);
 
-                // Set up frame callback for saving
-                camera_manager->setFrameCallback(
-                    [this](const FrameData& frame) {
-                      frame_saver->saveFrame(frame);
-                    });
+                // Don't set the frame callback here - it should be set
+                // after configuration and before starting cameras
               },
 
           .message =
@@ -210,8 +207,13 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     return;
   }
 
-  // Start frame saver
+  // Start frame saver first
   frame_saver->start();
+
+  // Set up frame callback for saving BEFORE starting cameras
+  // This ensures the callback is properly connected
+  camera_manager->setFrameCallback(
+      [this](const FrameData& frame) { frame_saver->saveFrame(frame); });
 
   // Start all cameras
   if (camera_manager->startAll()) {

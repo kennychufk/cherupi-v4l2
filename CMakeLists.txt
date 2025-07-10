@@ -137,6 +137,8 @@ target_compile_options(camera_ws_server PRIVATE
     -march=native
 )
 
+add_executable(v4l2_capture v4l2_capture.cpp)
+
 # Installation
 install(TARGETS camera_ws_server
     RUNTIME DESTINATION bin
