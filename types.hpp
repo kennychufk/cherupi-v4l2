@@ -15,6 +15,31 @@ struct FrameHeader {
   uint32_t height;
 } __attribute__((packed));
 
+// Chunked transfer structures
+struct ChunkStartMarker {
+  uint32_t magic = 0x4348554E;  // 'CHUN' in hex
+  uint32_t version = 1;
+} __attribute__((packed));
+
+struct ChunkHeader {
+  uint32_t frame_uuid;
+  uint32_t frame_id;
+  uint32_t camera_id;
+  uint32_t total_chunks;
+  uint32_t total_size;
+  uint32_t bytes_per_line;
+  uint32_t width;
+  uint32_t height;
+} __attribute__((packed));
+
+struct ChunkData {
+  uint32_t magic = 0x43484E4B;  // 'CHNK' in hex - magic for chunk data
+  uint32_t frame_uuid;
+  uint32_t chunk_index;
+  uint32_t chunk_size;
+  // Actual data follows
+} __attribute__((packed));
+
 // Frame data structure for internal use
 struct FrameData {
   std::vector<uint8_t> data;

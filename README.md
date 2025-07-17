@@ -11,6 +11,7 @@ A high-performance WebSocket server for streaming raw frames from multiple IMX29
 - Optional frame saving to SSD (buffer or batch mode)
 - Single WebSocket connection with multiplexed camera streams
 - Zero-copy frame transmission where possible
+- **Automatic chunked transfer for large frames**
 
 ## Dependencies
 
@@ -113,6 +114,10 @@ Text messages (JSON):
 ```
 
 Binary messages (for frames):
+
+The server automatically chooses between single-message and chunked transfer based on frame size.
+
+#### Single Frame Message (for frames ≤ 256KB)
 ```
 [FrameHeader (20 bytes)][Raw frame data (SRGGB10P)]
 
@@ -124,6 +129,39 @@ FrameHeader structure:
 - height (uint32_t): Frame height in pixels
 ```
 
+#### Chunked Transfer (for frames > 256KB)
+
+For large frames, the server splits the data into multiple chunks:
+
+1. **Chunk Start Message**:
+```
+[ChunkStartMarker (8 bytes)][ChunkHeader (28 bytes)]
+
+ChunkStartMarker:
+- magic (uint32_t): 0x4348554E ('CHUN')
+- version (uint32_t): 1
+
+ChunkHeader:
+- frame_id (uint32_t): Frame number
+- camera_id (uint32_t): Camera ID
+- total_chunks (uint32_t): Total number of chunks
+- total_size (uint32_t): Total frame data size in bytes
+- bytes_per_line (uint32_t): Stride of the frame
+- width (uint32_t): Frame width in pixels
+- height (uint32_t): Frame height in pixels
+```
+
+2. **Chunk Data Messages** (sent sequentially):
+```
+[ChunkData (8 bytes)][Chunk payload (up to 256KB)]
+
+ChunkData:
+- chunk_index (uint32_t): Chunk index (0-based)
+- chunk_size (uint32_t): Size of this chunk's payload
+```
+
+The default chunk size is 256KB (262,144 bytes). This provides a good balance between efficiency and network compatibility.
+
 ## Example Client (Python)
 
 ```python
@@ -134,6 +172,10 @@ import struct
 
 async def client():
     uri = "ws://localhost:9001"
+    
+    # For tracking chunked transfers
+    chunk_buffers = {}
+    CHUNK_MAGIC = 0x4348554E
     
     async with websockets.connect(uri) as websocket:
         # Discover cameras
@@ -172,17 +214,61 @@ async def client():
             message = await websocket.recv()
             
             if isinstance(message, bytes):
-                # Parse frame header
-                header = struct.unpack("<IIIII", message[:20])
-                frame_id, camera_id, bytes_per_line, width, height = header
+                # Check for chunked transfer
+                if len(message) >= 8:
+                    magic = struct.unpack("<I", message[:4])[0]
+                    
+                    if magic == CHUNK_MAGIC:
+                        # Handle chunk start
+                        version = struct.unpack("<I", message[4:8])[0]
+                        if version == 1 and len(message) >= 36:
+                            # Parse chunk header
+                            header = struct.unpack("<IIIIIII", message[8:36])
+                            frame_id, camera_id, total_chunks, total_size, bytes_per_line, width, height = header
+                            
+                            # Initialize chunk buffer
+                            key = f"{camera_id}_{frame_id}"
+                            chunk_buffers[key] = {
+                                'chunks': [None] * total_chunks,
+                                'received': 0,
+                                'total_chunks': total_chunks,
+                                'header': (frame_id, camera_id, bytes_per_line, width, height)
+                            }
+                            continue
                 
-                # Frame data starts after header
-                frame_data = message[20:]
-                
-                print(f"Frame {frame_id} from camera {camera_id}: "
-                      f"{width}x{height}, {len(frame_data)} bytes")
-                
-                frame_count += 1
+                # Check if this is chunk data
+                if len(message) >= 8:
+                    chunk_index, chunk_size = struct.unpack("<II", message[:8])
+                    
+                    # Find matching chunk buffer
+                    for key, buffer in chunk_buffers.items():
+                        if buffer['chunks'][chunk_index] is None:
+                            # Store chunk
+                            buffer['chunks'][chunk_index] = message[8:8+chunk_size]
+                            buffer['received'] += 1
+                            
+                            # Check if complete
+                            if buffer['received'] == buffer['total_chunks']:
+                                # Reassemble frame
+                                frame_data = b''.join(buffer['chunks'])
+                                frame_id, camera_id, bytes_per_line, width, height = buffer['header']
+                                
+                                print(f"Frame {frame_id} from camera {camera_id}: "
+                                      f"{width}x{height}, {len(frame_data)} bytes (chunked)")
+                                
+                                frame_count += 1
+                                del chunk_buffers[key]
+                            break
+                else:
+                    # Regular single-message frame
+                    header = struct.unpack("<IIIII", message[:20])
+                    frame_id, camera_id, bytes_per_line, width, height = header
+                    frame_data = message[20:]
+                    
+                    print(f"Frame {frame_id} from camera {camera_id}: "
+                          f"{width}x{height}, {len(frame_data)} bytes")
+                    
+                    frame_count += 1
         
         # Stop streaming
         await websocket.send(json.dumps({
@@ -203,6 +289,8 @@ asyncio.run(client())
 - Multiple cameras are handled in round-robin fashion
 - Frame saving runs independently of streaming
 - Use O_DIRECT for optimal SSD write performance in batch mode
+- **Chunked transfers automatically activate for frames larger than 256KB**
+- Small delays between chunks prevent network congestion
 
 ## Limitations
 

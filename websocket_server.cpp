@@ -48,7 +48,8 @@ void WebSocketServer::run() {
 
           .open =
               [this](auto* ws) {
-                std::cout << "Client connected" << std::endl;
+                std::cout << "Client connected from "
+                          << ws->getRemoteAddressAsText() << std::endl;
                 has_client = true;
                 stream_manager->setWebSocket(ws);
 
@@ -66,6 +67,8 @@ void WebSocketServer::run() {
                 try {
                   json msg = json::parse(message);
                   std::string cmd = msg["cmd"];
+
+                  std::cout << "Received command: " << cmd << std::endl;
 
                   if (cmd == Protocol::CMD_DISCOVER) {
                     handleDiscover(ws);
@@ -92,13 +95,45 @@ void WebSocketServer::run() {
           .drain =
               [this](auto* ws) {
                 // Handle backpressure
-                stream_manager->notifyBackpressure(ws->getBufferedAmount() > 0);
+                auto bufferedAmount = ws->getBufferedAmount();
+                bool hasPressure = bufferedAmount > 0;
+
+                if (hasPressure) {
+                  std::cout
+                      << "WebSocket backpressure detected: " << bufferedAmount
+                      << " bytes buffered" << std::endl;
+                }
+
+                stream_manager->notifyBackpressure(hasPressure);
               },
 
           .close =
               [this](auto* ws, int code, std::string_view message) {
-                std::cout << "Client disconnected with code " << code
-                          << std::endl;
+                std::cout << "Client disconnected with code " << code;
+                if (!message.empty()) {
+                  std::cout << ", message: " << message;
+                }
+                std::cout << std::endl;
+
+                // Log specific close codes
+                switch (code) {
+                  case 1000:
+                    std::cout << "Normal closure" << std::endl;
+                    break;
+                  case 1001:
+                    std::cout << "Going away" << std::endl;
+                    break;
+                  case 1006:
+                    std::cout << "Abnormal closure - no close frame received"
+                              << std::endl;
+                    break;
+                  case 1009:
+                    std::cout << "Message too big" << std::endl;
+                    break;
+                  default:
+                    std::cout << "Unexpected close code" << std::endl;
+                }
+
                 cleanupConnection();
               }})
       .listen(PORT, [this](auto* listen_socket) {

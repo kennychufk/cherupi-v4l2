@@ -29,6 +29,7 @@ class StreamManager {
   std::atomic<bool> has_backpressure{false};
 
   void streamingLoop();
+  void sendFrameChunked(const FrameData& frame);
 
  public:
   StreamManager(CameraManager* mgr);
@@ -45,4 +46,10 @@ class StreamManager {
   size_t getStreamingCameraCount();
 
   void notifyBackpressure(bool has_pressure);
+
+  // Allow chunk size to be configured for testing
+  void setChunkSize(size_t size) { CHUNK_SIZE = size; }
+
+ private:
+  size_t CHUNK_SIZE = 32768;  // Make it non-const so it can be changed
 };
