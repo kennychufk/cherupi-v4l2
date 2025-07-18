@@ -237,6 +237,18 @@ void StreamManager::sendFrameChunked(const FrameData& frame) {
   uint32_t chunk_index = 0;
 
   while (offset < frame.data.size() && ws_connection) {
+    // Check if this camera should still be streaming
+    {
+      std::lock_guard<std::mutex> lock(streaming_mutex);
+      if (streaming_cameras.find(frame.camera_id) == streaming_cameras.end()) {
+        // Camera was stopped mid-transfer, abort sending remaining chunks
+        std::cout << "Camera " << frame.camera_id
+                  << " stopped mid-transfer, aborting remaining chunks"
+                  << std::endl;
+        return;
+      }
+    }
+
     size_t chunk_size = std::min(CHUNK_SIZE, frame.data.size() - offset);
 
     // Create chunk message
