@@ -11,7 +11,21 @@
 
 FrameSaver::~FrameSaver() { stop(); }
 
-void FrameSaver::configure(const SaveConfig& cfg) { config = cfg; }
+void FrameSaver::configure(const SaveConfig& cfg) {
+  config = cfg;
+
+  // Initialize checkerboard detector if needed
+  if (config.mode == SaveMode::CHECKERBOARD) {
+    checkerboard_detector = std::make_unique<CheckerboardDetector>(
+        config.checkerboard_cols, config.checkerboard_rows);
+
+    // Configure detector for RPi5 optimization
+    checkerboard_detector->setAdaptiveThreshWinSize(11);
+    checkerboard_detector->setAdaptiveThreshC(2);
+    checkerboard_detector->setNormalizeImage(true);
+    checkerboard_detector->setFastCheck(true);
+  }
+}
 
 void FrameSaver::start() {
   if (config.mode == SaveMode::NONE) {
@@ -21,13 +35,16 @@ void FrameSaver::start() {
 
   enabled = true;
   stop_threads = false;
+  frames_checked = 0;
+  checkerboards_detected = 0;
 
   if (config.mode == SaveMode::BUFFER) {
     // Reserve space for buffered frames
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
     buffered_frames.reserve(10000);  // Reserve space for many frames
-  } else if (config.mode == SaveMode::BATCH) {
+  } else if (config.mode == SaveMode::BATCH ||
+             config.mode == SaveMode::CHECKERBOARD) {
     // Start writer threads
     for (size_t i = 0; i < config.writer_threads; i++) {
       writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
@@ -38,7 +55,7 @@ void FrameSaver::start() {
 void FrameSaver::stop() {
   enabled = false;
 
-  if (config.mode == SaveMode::BATCH) {
+  if (config.mode == SaveMode::BATCH || config.mode == SaveMode::CHECKERBOARD) {
     // Signal threads to stop
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -53,6 +70,14 @@ void FrameSaver::stop() {
       }
     }
     writer_threads.clear();
+  }
+
+  // Log checkerboard detection statistics
+  if (config.mode == SaveMode::CHECKERBOARD && frames_checked > 0) {
+    std::cout << "Checkerboard detection stats: " << checkerboards_detected
+              << " detected out of " << frames_checked << " checked ("
+              << (100.0 * checkerboards_detected / frames_checked) << "%)"
+              << std::endl;
   }
 }
 
@@ -72,7 +97,69 @@ void FrameSaver::saveFrame(const FrameData& frame) {
       write_queue.push(std::move(task));
     }
     queue_cv.notify_one();
+  } else if (config.mode == SaveMode::CHECKERBOARD) {
+    frames_checked++;
+
+    // Check if frame contains checkerboard
+    if (detectCheckerboard(frame)) {
+      checkerboards_detected++;
+
+      // Save the original raw frame
+      WriteTask task;
+      task.filename = generateFilename(frame.camera_id, frame.frame_id);
+      task.data = frame.data;
+
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        write_queue.push(std::move(task));
+      }
+      queue_cv.notify_one();
+    }
   }
+}
+
+bool FrameSaver::detectCheckerboard(const FrameData& frame) {
+  // Configure BayerConverter
+  Config bayer_config;
+  bayer_config.width = frame.width;
+  bayer_config.height = frame.height;
+  bayer_config.stride = frame.bytes_per_line;
+  bayer_config.full_res = config.checkerboard_full_res_detection;
+  bayer_config.num_threads = config.checkerboard_num_threads;
+  bayer_config.save_ppm = false;  // We don't need to save PPM
+
+  // Create BayerConverter instance
+  BayerConverter converter(bayer_config);
+
+  // Set the input data directly (avoiding file I/O)
+  // We need to modify BayerConverter to accept raw data, but for now,
+  // we'll create a temporary converter that processes the data
+
+  // Since BayerConverter expects packed 10-bit data and our frame.data
+  // is already in the correct format, we can process it directly
+
+  // Create a temporary processing pipeline
+  std::vector<uint16_t> bayer_data(frame.width * frame.height);
+
+  // Unpack 10-bit data
+  unpack_10bit_neon(frame.data.data(), bayer_data.data(), frame.width,
+                    frame.height, frame.bytes_per_line);
+
+  // Prepare output buffer
+  int out_width =
+      config.checkerboard_full_res_detection ? frame.width : frame.width / 2;
+  int out_height =
+      config.checkerboard_full_res_detection ? frame.height : frame.height / 2;
+  std::vector<uint8_t> grayscale_data(out_width * out_height);
+
+  // Demosaic
+  demosaic_threaded(bayer_data.data(), grayscale_data.data(), frame.width,
+                    frame.height, config.checkerboard_full_res_detection,
+                    config.checkerboard_num_threads);
+
+  // Detect checkerboard
+  return checkerboard_detector->detect(grayscale_data.data(), out_width,
+                                       out_height);
 }
 
 void FrameSaver::flushBufferedFrames() {

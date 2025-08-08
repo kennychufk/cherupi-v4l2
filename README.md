@@ -32,7 +32,8 @@ sudo apt-get install -y \
     build-essential \
     cmake \
     libssl-dev \
-    zlib1g-dev
+    zlib1g-dev \
+    libopencv-dev
 ```
 
 ### Build the Server
@@ -84,6 +85,51 @@ All commands are sent as JSON text messages:
     "batch_size": 10,
     "writer_threads": 4
 }}
+
+# Checkerboard Save Mode Addition
+
+Add this section to the existing README.md under the "Set frame saving mode" command documentation:
+
+## Frame Saving Modes
+
+### Checkerboard Mode
+
+The `checkerboard` mode automatically detects and saves only frames containing a checkerboard pattern. This mode:
+
+- Debayers each frame using the optimized BayerConverter
+- Detects checkerboard patterns using OpenCV
+- Saves only the original raw Bayer data of frames containing checkerboards
+- Preserves the original frame IDs in filenames
+
+Example command:
+
+```json
+// Set checkerboard detection mode with custom parameters
+{"cmd": "set_save_mode", "mode": "checkerboard", "params": {
+    "prefix": "calib",
+    "writer_threads": 4,
+    "checkerboard_rows": 8,        // Number of inner corners vertically
+    "checkerboard_cols": 11,       // Number of inner corners horizontally
+    "checkerboard_full_res_detection": false,  // Use half-res for faster detection
+    "checkerboard_num_threads": 4   // Threads for debayering
+}}
+```
+
+#### Checkerboard Mode Parameters
+
+- `checkerboard_rows` (default: 8): Number of inner corners in the checkerboard pattern vertically
+- `checkerboard_cols` (default: 11): Number of inner corners in the checkerboard pattern horizontally
+- `checkerboard_full_res_detection` (default: false): Whether to use full resolution for detection (slower but more accurate)
+- `checkerboard_num_threads` (default: 4): Number of threads for the debayering process
+
+#### Performance Notes for Checkerboard Mode
+
+- Processing is done sequentially in the capture thread to ensure no frames are missed
+- Half-resolution detection (default) provides a good balance between speed and accuracy
+- The debayering process uses NEON optimizations for ARM processors
+- Original raw Bayer data is saved, not the debayered grayscale image
+- Frame IDs are preserved - if frames 0, 2, and 5 contain checkerboards, they will be saved as `prefix_cam0_frame000000.raw`, `prefix_cam0_frame000002.raw`, and `prefix_cam0_frame000005.raw`
+
 
 // Start all cameras
 {"cmd": "start_cameras"}
@@ -190,10 +236,17 @@ async def client():
         }))
         await websocket.recv()
         
-        # Set save mode
+        # Set checkerboard detection mode
         await websocket.send(json.dumps({
             "cmd": "set_save_mode",
-            "mode": "none"
+            "mode": "checkerboard",
+            "params": {
+                "prefix": "calibration",
+                "checkerboard_rows": 6,
+                "checkerboard_cols": 9,
+                "checkerboard_full_res_detection": True,
+                "checkerboard_num_threads": 4
+            }
         }))
         await websocket.recv()
         

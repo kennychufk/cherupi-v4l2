@@ -64,7 +64,7 @@ struct CameraConfig {
 };
 
 // Frame saving modes
-enum class SaveMode { NONE, BUFFER, BATCH };
+enum class SaveMode { NONE, BUFFER, BATCH, CHECKERBOARD };
 
 // Camera state
 enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };
@@ -75,6 +75,12 @@ struct SaveConfig {
   std::string prefix = "camera";
   size_t batch_size = 10;
   size_t writer_threads = 4;
+
+  // Checkerboard detection parameters
+  int checkerboard_rows = 8;
+  int checkerboard_cols = 11;
+  bool checkerboard_full_res_detection = false;
+  int checkerboard_num_threads = 4;
 };
 
 // Message types for WebSocket protocol

@@ -2,11 +2,14 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <vector>
 
+#include "bayer_converter.h"
+#include "checkerboard_detector.h"
 #include "types.hpp"
 
 class FrameSaver {
@@ -18,7 +21,7 @@ class FrameSaver {
   std::vector<FrameData> buffered_frames;
   std::mutex buffer_mutex;
 
-  // For batch mode
+  // For batch and checkerboard modes
   struct WriteTask {
     std::string filename;
     std::vector<uint8_t> data;
@@ -32,9 +35,15 @@ class FrameSaver {
 
   std::atomic<size_t> frames_saved{0};
   std::atomic<size_t> bytes_written{0};
+  std::atomic<size_t> frames_checked{0};
+  std::atomic<size_t> checkerboards_detected{0};
+
+  // For checkerboard detection
+  std::unique_ptr<CheckerboardDetector> checkerboard_detector;
 
   void writerThreadFunc();
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
+  bool detectCheckerboard(const FrameData& frame);
 
  public:
   FrameSaver() = default;
@@ -52,6 +61,8 @@ class FrameSaver {
 
   size_t getFramesSaved() const { return frames_saved; }
   size_t getBytesWritten() const { return bytes_written; }
+  size_t getFramesChecked() const { return frames_checked; }
+  size_t getCheckerboardsDetected() const { return checkerboards_detected; }
   bool isEnabled() const { return enabled; }
   SaveMode getMode() const { return config.mode; }
 };

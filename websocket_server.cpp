@@ -218,6 +218,8 @@ void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
     config.mode = SaveMode::BUFFER;
   } else if (mode == "batch") {
     config.mode = SaveMode::BATCH;
+  } else if (mode == "checkerboard") {
+    config.mode = SaveMode::CHECKERBOARD;
   } else {
     sendError(ws, "Invalid save mode: " + mode);
     return;
@@ -230,6 +232,17 @@ void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
     if (params.contains("batch_size")) config.batch_size = params["batch_size"];
     if (params.contains("writer_threads"))
       config.writer_threads = params["writer_threads"];
+
+    // Checkerboard-specific parameters
+    if (params.contains("checkerboard_rows"))
+      config.checkerboard_rows = params["checkerboard_rows"];
+    if (params.contains("checkerboard_cols"))
+      config.checkerboard_cols = params["checkerboard_cols"];
+    if (params.contains("checkerboard_full_res_detection"))
+      config.checkerboard_full_res_detection =
+          params["checkerboard_full_res_detection"];
+    if (params.contains("checkerboard_num_threads"))
+      config.checkerboard_num_threads = params["checkerboard_num_threads"];
   }
 
   frame_saver->configure(config);

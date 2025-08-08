@@ -11,6 +11,7 @@ include(FetchContent)
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # Set FetchContent properties
 set(FETCHCONTENT_QUIET OFF)
@@ -74,6 +75,7 @@ set_property(TARGET uSockets PROPERTY C_STANDARD 11)
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${usockets_SOURCE_DIR}/src
+    ${OpenCV_INCLUDE_DIRS}
 )
 
 # Create a proper include structure for uWebSockets
@@ -101,6 +103,8 @@ set(SOURCES
     camera_manager.cpp
     frame_saver.cpp
     stream_manager.cpp
+    bayer_converter.cpp
+    checkerboard_detector.cpp
 )
 
 # Header files
@@ -113,6 +117,8 @@ set(HEADERS
     camera_manager.hpp
     frame_saver.hpp
     stream_manager.hpp
+    bayer_converter.h
+    checkerboard_detector.h
 )
 
 # Create executable
@@ -127,14 +133,19 @@ target_link_libraries(camera_ws_server
     ZLIB::ZLIB
     uSockets
     nlohmann_json::nlohmann_json
+    ${OpenCV_LIBS}
 )
 
-# Compiler flags
+# Compiler flags - optimize for Raspberry Pi 5 (Cortex-A76)
 target_compile_options(camera_ws_server PRIVATE
     -Wall
     -Wextra
-    -O2
-    -march=native
+    -O3
+    -march=armv8.2-a+fp16+simd
+    -mtune=cortex-a76
+    -ffast-math
+    -funroll-loops
+    -ftree-vectorize
 )
 
 add_executable(v4l2_capture v4l2_capture.cpp)
