@@ -2,55 +2,65 @@
 
 #include <uWS/App.h>
 
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
 #include <random>
-
-uint32_t generate_random_uint32() {
-  static std::random_device rd;
-  static std::mt19937 engine(rd());
-  static std::uniform_int_distribution<uint32_t> dist(
-      std::numeric_limits<uint32_t>::min(),
-      std::numeric_limits<uint32_t>::max());
-  return dist(engine);
-}
+#include <sstream>
 
 StreamManager::StreamManager(CameraManager* mgr) : camera_manager(mgr) {
-  // Set chunk size based on environment variable or use default
-  const char* chunk_size_env = std::getenv("CHUNK_SIZE");
-  if (chunk_size_env) {
-    CHUNK_SIZE = std::stoul(chunk_size_env);
-    std::cout << "Using chunk size from environment: " << CHUNK_SIZE << " bytes"
-              << std::endl;
-  } else {
-    std::cout << "Using default chunk size: " << CHUNK_SIZE << " bytes"
-              << std::endl;
-  }
+  LOG_INFO("StreamManager", "Initialized with fixed chunk size: " +
+                                std::to_string(CHUNK_SIZE) + " bytes");
 }
 
-StreamManager::~StreamManager() { stopAllStreaming(); }
+StreamManager::~StreamManager() {
+  LOG_INFO("StreamManager", "Shutting down");
+  stopAllStreaming();
+
+  // Wait for any in-progress sends to complete
+  auto start = std::chrono::steady_clock::now();
+  while (send_in_progress.load() &&
+         std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  logStats();
+}
 
 void StreamManager::setWebSocket(uWS::WebSocket<false, true, int>* ws) {
+  std::lock_guard<std::mutex> lock(ws_mutex);
   ws_connection = ws;
   has_backpressure = false;
 
+  LOG_INFO("StreamManager", "WebSocket connection set");
+
+  // Start streaming thread if we have cameras to stream
   if (!streaming_active && !streaming_cameras.empty()) {
-    // Start streaming thread if we have cameras to stream
+    should_stop = false;
     streaming_active = true;
     streaming_thread =
         std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
+    LOG_INFO("StreamManager", "Streaming thread started");
   }
 }
 
 void StreamManager::clearWebSocket() {
-  ws_connection = nullptr;
+  LOG_INFO("StreamManager", "Clearing WebSocket connection");
+
+  // Stop streaming first
   stopAllStreaming();
+
+  // Clear the WebSocket connection
+  {
+    std::lock_guard<std::mutex> lock(ws_mutex);
+    ws_connection = nullptr;
+  }
+
+  // Clean up any in-progress transfer
+  cleanupTransfer();
 }
 
 bool StreamManager::startStreamingCamera(uint32_t camera_id) {
   if (camera_id >= camera_manager->getCameraCount()) {
+    LOG_ERROR("StreamManager",
+              "Invalid camera ID: " + std::to_string(camera_id));
     return false;
   }
 
@@ -59,22 +69,51 @@ bool StreamManager::startStreamingCamera(uint32_t camera_id) {
     streaming_cameras.insert(camera_id);
   }
 
+  LOG_INFO("StreamManager",
+           "Started streaming camera " + std::to_string(camera_id));
+
   // Start streaming thread if not already running
-  if (!streaming_active && ws_connection) {
-    streaming_active = true;
-    streaming_thread =
-        std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
+  if (!streaming_active) {
+    std::lock_guard<std::mutex> lock(ws_mutex);
+    if (ws_connection) {
+      should_stop = false;
+      streaming_active = true;
+      streaming_thread =
+          std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
+      LOG_INFO("StreamManager", "Streaming thread started");
+    }
   }
 
   return true;
 }
 
 bool StreamManager::stopStreamingCamera(uint32_t camera_id) {
-  std::lock_guard<std::mutex> lock(streaming_mutex);
-  return streaming_cameras.erase(camera_id) > 0;
+  bool removed = false;
+  {
+    std::lock_guard<std::mutex> lock(streaming_mutex);
+    removed = streaming_cameras.erase(camera_id) > 0;
+  }
+
+  if (removed) {
+    LOG_INFO("StreamManager",
+             "Stopped streaming camera " + std::to_string(camera_id));
+
+    // If this camera is currently being transferred, mark it for cleanup
+    {
+      std::lock_guard<std::mutex> lock(transfer_mutex);
+      if (current_transfer && current_transfer->frame.camera_id == camera_id) {
+        current_transfer->in_progress = false;
+      }
+    }
+  }
+
+  return removed;
 }
 
 void StreamManager::stopAllStreaming() {
+  LOG_INFO("StreamManager", "Stopping all streaming");
+
+  // Clear streaming cameras
   {
     std::lock_guard<std::mutex> lock(streaming_mutex);
     streaming_cameras.clear();
@@ -82,11 +121,21 @@ void StreamManager::stopAllStreaming() {
 
   // Stop streaming thread
   if (streaming_active) {
-    streaming_active = false;
+    should_stop = true;
+    frame_available_cv.notify_all();  // Wake up the streaming thread
+
     if (streaming_thread && streaming_thread->joinable()) {
+      LOG_DEBUG("StreamManager", "Waiting for streaming thread to finish");
       streaming_thread->join();
     }
+
+    streaming_active = false;
   }
+
+  // Clean up any in-progress transfer
+  cleanupTransfer();
+
+  LOG_INFO("StreamManager", "All streaming stopped");
 }
 
 bool StreamManager::isStreamingCamera(uint32_t camera_id) {
@@ -100,25 +149,51 @@ size_t StreamManager::getStreamingCameraCount() {
 }
 
 void StreamManager::notifyBackpressure(bool has_pressure) {
-  has_backpressure = has_pressure;
+  bool prev = has_backpressure.exchange(has_pressure);
+  if (has_pressure && !prev) {
+    stats.backpressure_pauses++;
+    LOG_WARN("StreamManager", "Backpressure detected - pausing streaming");
+  } else if (!has_pressure && prev) {
+    LOG_INFO("StreamManager", "Backpressure cleared - resuming streaming");
+    frame_available_cv.notify_one();  // Wake up streaming thread
+  }
 }
 
 void StreamManager::streamingLoop() {
+  LOG_INFO("StreamManager", "Streaming loop started");
+
   std::vector<uint32_t> camera_order;
   size_t current_index = 0;
 
-  while (streaming_active) {
-    // If no WebSocket connection or backpressure, wait
-    if (!ws_connection || has_backpressure) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  while (!should_stop) {
+    // Check if we have backpressure
+    if (has_backpressure) {
+      LOG_DEBUG("StreamManager", "Waiting for backpressure to clear");
+      std::unique_lock<std::mutex> lock(frame_wait_mutex);
+      frame_available_cv.wait_for(lock, std::chrono::milliseconds(100), [this] {
+        return !has_backpressure || should_stop.load();
+      });
       continue;
+    }
+
+    // Check WebSocket connection
+    {
+      std::lock_guard<std::mutex> lock(ws_mutex);
+      if (!ws_connection) {
+        LOG_DEBUG("StreamManager", "No WebSocket connection, waiting");
+        std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
+        frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
+        continue;
+      }
     }
 
     // Update camera list if needed
     {
       std::lock_guard<std::mutex> lock(streaming_mutex);
       if (streaming_cameras.empty()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        LOG_DEBUG("StreamManager", "No cameras streaming, waiting");
+        std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
+        frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
         continue;
       }
 
@@ -129,168 +204,288 @@ void StreamManager::streamingLoop() {
           camera_order.push_back(cam_id);
         }
         current_index = 0;
+        LOG_DEBUG("StreamManager", "Updated camera order, " +
+                                       std::to_string(camera_order.size()) +
+                                       " cameras");
       }
     }
 
-    // Round-robin through cameras
-    uint32_t camera_id = camera_order[current_index];
-    current_index = (current_index + 1) % camera_order.size();
+    // Check for timeout on current transfer
+    if (isTransferTimedOut()) {
+      LOG_WARN("StreamManager", "Transfer timed out, cleaning up");
+      cleanupTransfer();
+    }
 
-    Camera* camera = camera_manager->getCamera(camera_id);
-    if (!camera) continue;
+    // Skip to next camera if transfer is in progress
+    {
+      std::lock_guard<std::mutex> lock(transfer_mutex);
+      if (current_transfer && current_transfer->in_progress) {
+        LOG_DEBUG("StreamManager",
+                  "Transfer in progress, skipping frame check");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        continue;
+      }
+    }
 
-    FrameData frame;
-    if (camera->getLatestFrame(frame)) {
-      // Send frame with chunking if necessary
-      sendFrameChunked(frame);
-    } else {
-      // No new frame from this camera, continue to next
-      // Small delay to avoid busy loop when no frames are available
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    // Try to get a frame from cameras (round-robin with skipping)
+    bool found_frame = false;
+    size_t cameras_checked = 0;
+
+    while (cameras_checked < camera_order.size() && !found_frame &&
+           !should_stop) {
+      uint32_t camera_id = camera_order[current_index];
+      current_index = (current_index + 1) % camera_order.size();
+      cameras_checked++;
+
+      // Double-check camera is still streaming
+      if (!isStreamingCamera(camera_id)) {
+        continue;
+      }
+
+      Camera* camera = camera_manager->getCamera(camera_id);
+      if (!camera) {
+        LOG_WARN("StreamManager",
+                 "Camera " + std::to_string(camera_id) + " not found");
+        continue;
+      }
+
+      FrameData frame;
+      if (camera->getFrameForStreaming(frame)) {
+        LOG_DEBUG("StreamManager",
+                  "Got frame " + std::to_string(frame.frame_id) +
+                      " from camera " + std::to_string(camera_id));
+
+        // Send the frame
+        if (sendChunkedFrame(frame, camera_id)) {
+          found_frame = true;
+          stats.frames_sent++;
+
+          // Release the streaming frame after successful send
+          camera->releaseStreamingFrame();
+        } else {
+          stats.frames_dropped++;
+          camera->releaseStreamingFrame();
+          LOG_WARN("StreamManager", "Failed to send frame from camera " +
+                                        std::to_string(camera_id));
+        }
+      }
+    }
+
+    // If no frames found, wait efficiently for new frames
+    if (!found_frame && !should_stop) {
+      LOG_DEBUG("StreamManager", "No frames available, waiting");
+
+      // Wait for any camera to signal new frame available
+      std::unique_lock<std::mutex> lock(frame_wait_mutex);
+      frame_available_cv.wait_for(lock, std::chrono::milliseconds(10),
+                                  [this] { return should_stop.load(); });
     }
   }
+
+  LOG_INFO("StreamManager", "Streaming loop ended");
 }
 
-void StreamManager::sendFrameChunked(const FrameData& frame) {
-  if (!ws_connection) return;
-
-  // Prepare frame header
-  FrameHeader header;
-  header.frame_id = frame.frame_id;
-  header.camera_id = frame.camera_id;
-  header.bytes_per_line = frame.bytes_per_line;
-  header.width = frame.width;
-  header.height = frame.height;
-
-  // Calculate total message size
-  size_t header_size = sizeof(FrameHeader);
-  size_t total_size = header_size + frame.data.size();
-
-  // If frame is small enough, send as single message
-  if (total_size <= CHUNK_SIZE) {
-    // Create a single buffer with header + data
-    std::vector<uint8_t> message;
-    message.reserve(total_size);
-
-    // Copy header
-    const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
-    message.insert(message.end(), header_bytes, header_bytes + header_size);
-
-    // Copy frame data
-    message.insert(message.end(), frame.data.begin(), frame.data.end());
-
-    // Send as binary message
-    try {
-      std::string_view message_view(
-          reinterpret_cast<const char*>(message.data()), message.size());
-      ws_connection->send(message_view, uWS::OpCode::BINARY);
-    } catch (...) {
-      // WebSocket might have disconnected
-      ws_connection = nullptr;
-    }
-    return;
+bool StreamManager::sendChunkedFrame(const FrameData& frame,
+                                     uint32_t camera_id) {
+  // Prepare chunked transfer
+  {
+    std::lock_guard<std::mutex> lock(transfer_mutex);
+    current_transfer = std::make_unique<ChunkedTransfer>();
+    current_transfer->frame = frame;  // Deep copy
+    current_transfer->frame_uuid = generateFrameUUID();
+    current_transfer->total_chunks =
+        (frame.data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    current_transfer->current_chunk = 0;
+    current_transfer->start_time = std::chrono::steady_clock::now();
+    current_transfer->in_progress = true;
   }
 
-  // Frame is too large, use chunked transfer
-  std::cout << "Frame " << frame.frame_id << " from camera " << frame.camera_id
-            << " is " << frame.data.size()
-            << " bytes, using chunked transfer with " << CHUNK_SIZE
-            << " byte chunks" << std::endl;
+  LOG_DEBUG("StreamManager",
+            "Starting chunked transfer for frame " +
+                std::to_string(frame.frame_id) + " from camera " +
+                std::to_string(camera_id) + ", " +
+                std::to_string(current_transfer->total_chunks) + " chunks");
 
-  uint32_t frame_uuid = generate_random_uint32();
-  // Send chunk header first
-  ChunkHeader chunk_header;
-  chunk_header.frame_uuid = frame_uuid;
-  chunk_header.frame_id = frame.frame_id;
-  chunk_header.camera_id = frame.camera_id;
-  chunk_header.total_chunks = (frame.data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-  chunk_header.total_size = frame.data.size();
-  chunk_header.bytes_per_line = frame.bytes_per_line;
-  chunk_header.width = frame.width;
-  chunk_header.height = frame.height;
+  // Send chunk header
+  if (!sendChunkHeader(*current_transfer)) {
+    LOG_ERROR("StreamManager", "Failed to send chunk header");
+    cleanupTransfer();
+    return false;
+  }
 
-  // Send initial chunk header message
-  std::vector<uint8_t> chunk_start_msg;
-  chunk_start_msg.reserve(sizeof(ChunkStartMarker) + sizeof(ChunkHeader));
+  // Send all chunks
+  for (size_t chunk_idx = 0; chunk_idx < current_transfer->total_chunks;
+       chunk_idx++) {
+    // Check if we should stop or if transfer was cancelled
+    if (should_stop) {
+      cleanupTransfer();
+      return false;
+    }
+
+    // Check if camera is still streaming
+    if (!isStreamingCamera(camera_id)) {
+      LOG_INFO("StreamManager", "Camera " + std::to_string(camera_id) +
+                                    " stopped during transfer");
+      cleanupTransfer();
+      return false;
+    }
+
+    // Check for backpressure
+    if (has_backpressure) {
+      LOG_DEBUG("StreamManager", "Backpressure during chunk send, waiting");
+      std::unique_lock<std::mutex> lock(frame_wait_mutex);
+      bool resumed = frame_available_cv.wait_for(
+          lock, std::chrono::seconds(1),
+          [this] { return !has_backpressure || should_stop.load(); });
+
+      if (!resumed || should_stop) {
+        cleanupTransfer();
+        return false;
+      }
+    }
+
+    // Send chunk
+    if (!sendChunkData(*current_transfer, chunk_idx)) {
+      LOG_ERROR("StreamManager",
+                "Failed to send chunk " + std::to_string(chunk_idx) + "/" +
+                    std::to_string(current_transfer->total_chunks));
+      cleanupTransfer();
+      return false;
+    }
+
+    current_transfer->current_chunk = chunk_idx + 1;
+    stats.chunks_sent++;
+  }
+
+  LOG_DEBUG("StreamManager",
+            "Successfully sent frame " + std::to_string(frame.frame_id) +
+                " in " + std::to_string(current_transfer->total_chunks) +
+                " chunks");
+
+  // Clean up completed transfer
+  cleanupTransfer();
+  return true;
+}
+
+bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer) {
+  std::lock_guard<std::mutex> lock(ws_mutex);
+  if (!ws_connection) return false;
+
+  // Prepare chunk header message
+  std::vector<uint8_t> message;
+  message.reserve(sizeof(ChunkStartMarker) + sizeof(ChunkHeader));
 
   ChunkStartMarker start_marker;
   const uint8_t* start_bytes = reinterpret_cast<const uint8_t*>(&start_marker);
-  chunk_start_msg.insert(chunk_start_msg.end(), start_bytes,
-                         start_bytes + sizeof(ChunkStartMarker));
+  message.insert(message.end(), start_bytes,
+                 start_bytes + sizeof(ChunkStartMarker));
 
-  const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&chunk_header);
-  chunk_start_msg.insert(chunk_start_msg.end(), header_bytes,
-                         header_bytes + sizeof(ChunkHeader));
+  ChunkHeader header;
+  header.frame_uuid = transfer.frame_uuid;
+  header.frame_id = transfer.frame.frame_id;
+  header.camera_id = transfer.frame.camera_id;
+  header.total_chunks = transfer.total_chunks;
+  header.total_size = transfer.frame.data.size();
+  header.bytes_per_line = transfer.frame.bytes_per_line;
+  header.width = transfer.frame.width;
+  header.height = transfer.frame.height;
+
+  const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
+  message.insert(message.end(), header_bytes,
+                 header_bytes + sizeof(ChunkHeader));
 
   try {
-    std::string_view start_view(
-        reinterpret_cast<const char*>(chunk_start_msg.data()),
-        chunk_start_msg.size());
-    ws_connection->send(start_view, uWS::OpCode::BINARY);
+    send_in_progress = true;
+    std::string_view message_view(reinterpret_cast<const char*>(message.data()),
+                                  message.size());
+    ws_connection->send(message_view, uWS::OpCode::BINARY);
+    send_in_progress = false;
+
+    stats.bytes_sent += message.size();
+    return true;
   } catch (...) {
-    ws_connection = nullptr;
-    return;
+    send_in_progress = false;
+    LOG_ERROR("StreamManager", "Exception while sending chunk header");
+    return false;
+  }
+}
+
+bool StreamManager::sendChunkData(const ChunkedTransfer& transfer,
+                                  size_t chunk_index) {
+  std::lock_guard<std::mutex> lock(ws_mutex);
+  if (!ws_connection) return false;
+
+  size_t offset = chunk_index * CHUNK_SIZE;
+  size_t chunk_size = std::min(CHUNK_SIZE, transfer.frame.data.size() - offset);
+
+  // Prepare chunk data message
+  std::vector<uint8_t> message;
+  message.reserve(sizeof(ChunkData) + chunk_size);
+
+  ChunkData chunk_data;
+  chunk_data.frame_uuid = transfer.frame_uuid;
+  chunk_data.chunk_index = chunk_index;
+  chunk_data.chunk_size = chunk_size;
+
+  const uint8_t* chunk_header_bytes =
+      reinterpret_cast<const uint8_t*>(&chunk_data);
+  message.insert(message.end(), chunk_header_bytes,
+                 chunk_header_bytes + sizeof(ChunkData));
+
+  // Add chunk payload
+  message.insert(message.end(), transfer.frame.data.begin() + offset,
+                 transfer.frame.data.begin() + offset + chunk_size);
+
+  try {
+    send_in_progress = true;
+    std::string_view message_view(reinterpret_cast<const char*>(message.data()),
+                                  message.size());
+    ws_connection->send(message_view, uWS::OpCode::BINARY);
+    send_in_progress = false;
+
+    stats.bytes_sent += message.size();
+    return true;
+  } catch (...) {
+    send_in_progress = false;
+    LOG_ERROR("StreamManager", "Exception while sending chunk data");
+    return false;
+  }
+}
+
+void StreamManager::cleanupTransfer() {
+  std::lock_guard<std::mutex> lock(transfer_mutex);
+  if (current_transfer) {
+    current_transfer->in_progress = false;
+    current_transfer.reset();
+    LOG_DEBUG("StreamManager", "Cleaned up transfer");
+  }
+}
+
+bool StreamManager::isTransferTimedOut() {
+  std::lock_guard<std::mutex> lock(transfer_mutex);
+  if (!current_transfer || !current_transfer->in_progress) {
+    return false;
   }
 
-  // Send data chunks
-  size_t offset = 0;
-  uint32_t chunk_index = 0;
+  auto elapsed =
+      std::chrono::steady_clock::now() - current_transfer->start_time;
+  return elapsed > CHUNK_TIMEOUT;
+}
 
-  while (offset < frame.data.size() && ws_connection) {
-    // Check if this camera should still be streaming
-    {
-      std::lock_guard<std::mutex> lock(streaming_mutex);
-      if (streaming_cameras.find(frame.camera_id) == streaming_cameras.end()) {
-        // Camera was stopped mid-transfer, abort sending remaining chunks
-        std::cout << "Camera " << frame.camera_id
-                  << " stopped mid-transfer, aborting remaining chunks"
-                  << std::endl;
-        return;
-      }
-    }
+uint32_t StreamManager::generateFrameUUID() {
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_int_distribution<uint32_t> dis;
+  return dis(gen);
+}
 
-    size_t chunk_size = std::min(CHUNK_SIZE, frame.data.size() - offset);
-
-    // Create chunk message
-    std::vector<uint8_t> chunk_msg;
-    chunk_msg.reserve(sizeof(ChunkData) + chunk_size);
-
-    ChunkData chunk_data;
-    chunk_data.frame_uuid = frame_uuid;
-    chunk_data.chunk_index = chunk_index;
-    chunk_data.chunk_size = chunk_size;
-
-    // Debug: Log chunk details
-    if (chunk_index == 0) {
-      std::cout << "Sending chunk " << chunk_index << " with magic 0x"
-                << std::hex << chunk_data.magic << std::dec << " for frame "
-                << frame.frame_id << " camera " << frame.camera_id << std::endl;
-    }
-
-    const uint8_t* chunk_header_bytes =
-        reinterpret_cast<const uint8_t*>(&chunk_data);
-    chunk_msg.insert(chunk_msg.end(), chunk_header_bytes,
-                     chunk_header_bytes + sizeof(ChunkData));
-
-    // Add chunk data
-    chunk_msg.insert(chunk_msg.end(), frame.data.begin() + offset,
-                     frame.data.begin() + offset + chunk_size);
-
-    try {
-      std::string_view chunk_view(
-          reinterpret_cast<const char*>(chunk_msg.data()), chunk_msg.size());
-      ws_connection->send(chunk_view, uWS::OpCode::BINARY);
-    } catch (...) {
-      ws_connection = nullptr;
-      return;
-    }
-
-    offset += chunk_size;
-    chunk_index++;
-
-    // Add small delay between chunks to avoid overwhelming the connection
-    if (chunk_index < chunk_header.total_chunks) {
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-  }
+void StreamManager::logStats() const {
+  std::stringstream ss;
+  ss << "StreamManager Statistics:\n"
+     << "  Frames sent: " << stats.frames_sent.load() << "\n"
+     << "  Frames dropped: " << stats.frames_dropped.load() << "\n"
+     << "  Chunks sent: " << stats.chunks_sent.load() << "\n"
+     << "  Bytes sent: " << stats.bytes_sent.load() << "\n"
+     << "  Backpressure pauses: " << stats.backpressure_pauses.load();
+  LOG_INFO("StreamManager", ss.str());
 }

@@ -13,14 +13,14 @@ Camera::~Camera() { stop(); }
 
 bool Camera::configure(size_t buffer_count) {
   if (state != CameraState::IDLE) {
-    std::cerr << "Camera " << camera_id << " is not idle" << std::endl;
+    LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) + " is not idle");
     return false;
   }
 
   // Reset all links
   if (!media_device->reset()) {
-    std::cerr << "Failed to reset media device for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to reset media device for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
@@ -28,8 +28,8 @@ bool Camera::configure(size_t buffer_count) {
   if (!media_device->setCrop(config.sensor_entity, 0, config.crop_left,
                              config.crop_top, config.crop_width,
                              config.crop_height)) {
-    std::cerr << "Failed to set sensor crop for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to set sensor crop for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
@@ -37,39 +37,39 @@ bool Camera::configure(size_t buffer_count) {
   if (!media_device->setFormat(config.sensor_entity, 0, config.crop_width,
                                config.crop_height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
-    std::cerr << "Failed to set sensor format for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to set sensor format for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   if (!media_device->setFormat(config.csi2_entity, 0, config.crop_width,
                                config.crop_height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
-    std::cerr << "Failed to set CSI2 pad0 format for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to set CSI2 pad0 format for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   if (!media_device->setFormat(config.csi2_entity, 4, config.crop_width,
                                config.crop_height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
-    std::cerr << "Failed to set CSI2 pad4 format for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to set CSI2 pad4 format for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   // Enable links
   if (!media_device->setLink(config.sensor_entity, 0, config.csi2_entity, 0,
                              true)) {
-    std::cerr << "Failed to enable sensor to CSI2 link for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to enable sensor to CSI2 link for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   if (!media_device->setLink(config.csi2_entity, 4, config.video_entity, 0,
                              true)) {
-    std::cerr << "Failed to enable CSI2 to video link for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to enable CSI2 to video link for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
@@ -77,45 +77,48 @@ bool Camera::configure(size_t buffer_count) {
   std::string video_path =
       media_device->getVideoDevicePath(config.video_entity);
   if (video_path.empty()) {
-    std::cerr << "Failed to get video device path for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to get video device path for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   // Open video device
   video_device = std::make_unique<V4L2Device>();
   if (!video_device->open(video_path)) {
-    std::cerr << "Failed to open video device for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to open video device for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   if (!video_device->setFormat(config.crop_width, config.crop_height,
                                V4L2_PIX_FMT_SRGGB10P)) {
-    std::cerr << "Failed to set video format for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to set video format for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   if (!video_device->setupBuffers(buffer_count)) {
-    std::cerr << "Failed to setup buffers for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to setup buffers for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
   state = CameraState::CONFIGURED;
+  LOG_INFO("Camera",
+           "Camera " + std::to_string(camera_id) + " configured successfully");
   return true;
 }
 
 bool Camera::start() {
   if (state != CameraState::CONFIGURED) {
-    std::cerr << "Camera " << camera_id << " is not configured" << std::endl;
+    LOG_ERROR("Camera",
+              "Camera " + std::to_string(camera_id) + " is not configured");
     return false;
   }
 
   if (!video_device->startStreaming()) {
-    std::cerr << "Failed to start streaming for camera " << camera_id
-              << std::endl;
+    LOG_ERROR("Camera", "Failed to start streaming for camera " +
+                            std::to_string(camera_id));
     return false;
   }
 
@@ -123,6 +126,8 @@ bool Camera::start() {
   capture_thread = std::make_unique<std::thread>(&Camera::captureLoop, this);
 
   state = CameraState::RUNNING;
+  LOG_INFO("Camera",
+           "Camera " + std::to_string(camera_id) + " started successfully");
   return true;
 }
 
@@ -131,7 +136,11 @@ bool Camera::stop() {
     return true;
   }
 
+  LOG_INFO("Camera", "Stopping camera " + std::to_string(camera_id));
   should_stop = true;
+
+  // Wake up any waiting threads
+  new_frame_cv.notify_all();
 
   if (capture_thread && capture_thread->joinable()) {
     capture_thread->join();
@@ -140,10 +149,18 @@ bool Camera::stop() {
   video_device->stopStreaming();
 
   state = CameraState::CONFIGURED;
+  LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " stopped");
   return true;
 }
 
 void Camera::captureLoop() {
+  LOG_DEBUG("Camera",
+            "Camera " + std::to_string(camera_id) + " capture loop started");
+
+  // Track capture failures for logging
+  int consecutive_failures = 0;
+  bool first_frame = true;
+
   while (!should_stop) {
     FrameData frame;
     frame.camera_id = camera_id;
@@ -151,32 +168,104 @@ void Camera::captureLoop() {
 
     if (video_device->captureFrame(frame)) {
       frame_counter++;
+      consecutive_failures = 0;  // Reset failure counter
 
-      // Store latest frame for streaming
+      if (first_frame) {
+        LOG_INFO("Camera",
+                 "Camera " + std::to_string(camera_id) + " got first frame");
+        first_frame = false;
+      }
+
+      // Update latest frame for streaming
       {
         std::lock_guard<std::mutex> lock(latest_frame_mutex);
-        latest_frame = frame;
+        latest_frame = frame;  // Deep copy
         has_new_frame = true;
       }
 
-      // Notify frame saver if callback is set
+      // Notify streaming thread that new frame is available
+      new_frame_cv.notify_one();
+
+      // Also notify through the callback if set
+      if (onFrameAvailable) {
+        onFrameAvailable();
+      }
+
+      // Notify frame saver if callback is set and saving is enabled
       if (onFrameCaptured) {
         onFrameCaptured(frame);
       }
+
+      LOG_DEBUG("Camera", "Camera " + std::to_string(camera_id) +
+                              " captured frame " +
+                              std::to_string(frame.frame_id));
     } else {
+      consecutive_failures++;
+
+      // Log warnings for extended capture failures
+      if (consecutive_failures == 10) {
+        LOG_WARN("Camera", "Camera " + std::to_string(camera_id) +
+                               " has failed to capture 10 consecutive frames");
+      } else if (consecutive_failures == 100) {
+        LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) +
+                                " has failed to capture 100 consecutive frames "
+                                "- check camera hardware");
+      }
+
       // Small delay on capture failure to avoid busy loop
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
+
+  LOG_DEBUG("Camera",
+            "Camera " + std::to_string(camera_id) + " capture loop ended");
 }
 
-bool Camera::getLatestFrame(FrameData& frame) {
-  std::lock_guard<std::mutex> lock(latest_frame_mutex);
-  if (!has_new_frame) {
-    return false;
+bool Camera::getFrameForStreaming(FrameData& frame) {
+  // First, check if streaming frame is still in use
+  {
+    std::lock_guard<std::mutex> stream_lock(streaming_frame_mutex);
+    if (streaming_frame_in_use) {
+      LOG_DEBUG("Camera", "Camera " + std::to_string(camera_id) +
+                              " streaming frame still in use");
+      return false;
+    }
   }
 
-  frame = latest_frame;
-  has_new_frame = false;
+  // Copy latest frame to streaming buffer
+  {
+    std::lock_guard<std::mutex> latest_lock(latest_frame_mutex);
+    if (!has_new_frame) {
+      return false;
+    }
+
+    // Copy to streaming buffer
+    {
+      std::lock_guard<std::mutex> stream_lock(streaming_frame_mutex);
+      streaming_frame = latest_frame;  // Deep copy
+      streaming_frame_in_use = true;
+      frame = streaming_frame;  // Copy to output
+    }
+
+    has_new_frame = false;
+  }
+
   return true;
+}
+
+bool Camera::waitForNewFrame(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(latest_frame_mutex);
+  return new_frame_cv.wait_for(
+      lock, timeout, [this] { return has_new_frame || should_stop.load(); });
+}
+
+void Camera::releaseStreamingFrame() {
+  std::lock_guard<std::mutex> lock(streaming_frame_mutex);
+  streaming_frame_in_use = false;
+  LOG_DEBUG("Camera", "Camera " + std::to_string(camera_id) +
+                          " streaming frame released");
+}
+
+void Camera::setFrameAvailableCallback(std::function<void()> callback) {
+  onFrameAvailable = callback;
 }

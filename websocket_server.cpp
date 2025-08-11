@@ -10,13 +10,23 @@ WebSocketServer::WebSocketServer() {
   camera_manager = std::make_unique<CameraManager>();
   frame_saver = std::make_unique<FrameSaver>();
   stream_manager = std::make_unique<StreamManager>(camera_manager.get());
+
+  // Set up the callback for frame notifications
+  camera_manager->setStreamManagerNotify([this]() {
+    if (stream_manager) {
+      stream_manager->notifyFrameAvailable();
+    }
+  });
 }
 
-WebSocketServer::~WebSocketServer() { stop(); }
+WebSocketServer::~WebSocketServer() {
+  LOG_INFO("WebSocketServer", "Shutting down server");
+  stop();
+}
 
 void WebSocketServer::run() {
-  std::cout << "Starting WebSocket server on port " << PORT << "..."
-            << std::endl;
+  LOG_INFO("WebSocketServer",
+           "Starting WebSocket server on port " + std::to_string(PORT));
 
   app = new uWS::App();
 
@@ -33,6 +43,9 @@ void WebSocketServer::run() {
               [this](auto* res, auto* req, auto* context) {
                 // Block if we already have a client
                 if (has_client.load()) {
+                  LOG_WARN(
+                      "WebSocketServer",
+                      "Rejecting connection - server already has a client");
                   res->writeStatus("503 Service Unavailable");
                   res->writeHeader("Content-Type", "text/plain");
                   res->end("Server already has an active connection");
@@ -48,13 +61,11 @@ void WebSocketServer::run() {
 
           .open =
               [this](auto* ws) {
-                std::cout << "Client connected from "
-                          << ws->getRemoteAddressAsText() << std::endl;
+                LOG_INFO("WebSocketServer",
+                         "Client connected from " +
+                             std::string(ws->getRemoteAddressAsText()));
                 has_client = true;
                 stream_manager->setWebSocket(ws);
-
-                // Don't set the frame callback here - it should be set
-                // after configuration and before starting cameras
               },
 
           .message =
@@ -68,7 +79,7 @@ void WebSocketServer::run() {
                   json msg = json::parse(message);
                   std::string cmd = msg["cmd"];
 
-                  std::cout << "Received command: " << cmd << std::endl;
+                  LOG_DEBUG("WebSocketServer", "Received command: " + cmd);
 
                   if (cmd == Protocol::CMD_DISCOVER) {
                     handleDiscover(ws);
@@ -88,7 +99,13 @@ void WebSocketServer::run() {
                     sendError(ws, "Unknown command: " + cmd);
                   }
                 } catch (json::exception& e) {
+                  LOG_ERROR("WebSocketServer",
+                            "JSON parse error: " + std::string(e.what()));
                   sendError(ws, std::string("JSON parse error: ") + e.what());
+                } catch (std::exception& e) {
+                  LOG_ERROR("WebSocketServer",
+                            "Command handler error: " + std::string(e.what()));
+                  sendError(ws, std::string("Error: ") + e.what());
                 }
               },
 
@@ -99,9 +116,10 @@ void WebSocketServer::run() {
                 bool hasPressure = bufferedAmount > 0;
 
                 if (hasPressure) {
-                  std::cout
-                      << "WebSocket backpressure detected: " << bufferedAmount
-                      << " bytes buffered" << std::endl;
+                  LOG_DEBUG("WebSocketServer",
+                            "Backpressure detected: " +
+                                std::to_string(bufferedAmount) +
+                                " bytes buffered");
                 }
 
                 stream_manager->notifyBackpressure(hasPressure);
@@ -109,39 +127,42 @@ void WebSocketServer::run() {
 
           .close =
               [this](auto* ws, int code, std::string_view message) {
-                std::cout << "Client disconnected with code " << code;
-                if (!message.empty()) {
-                  std::cout << ", message: " << message;
-                }
-                std::cout << std::endl;
+                LOG_INFO("WebSocketServer",
+                         "Client disconnected with code " +
+                             std::to_string(code) +
+                             (message.empty()
+                                  ? ""
+                                  : ", message: " + std::string(message)));
 
                 // Log specific close codes
                 switch (code) {
                   case 1000:
-                    std::cout << "Normal closure" << std::endl;
+                    LOG_INFO("WebSocketServer", "Normal closure");
                     break;
                   case 1001:
-                    std::cout << "Going away" << std::endl;
+                    LOG_INFO("WebSocketServer", "Going away");
                     break;
                   case 1006:
-                    std::cout << "Abnormal closure - no close frame received"
-                              << std::endl;
+                    LOG_WARN("WebSocketServer",
+                             "Abnormal closure - no close frame received");
                     break;
                   case 1009:
-                    std::cout << "Message too big" << std::endl;
+                    LOG_ERROR("WebSocketServer", "Message too big");
                     break;
                   default:
-                    std::cout << "Unexpected close code" << std::endl;
+                    LOG_WARN("WebSocketServer",
+                             "Unexpected close code: " + std::to_string(code));
                 }
 
                 cleanupConnection();
               }})
       .listen(PORT, [this](auto* listen_socket) {
         if (listen_socket) {
-          std::cout << "WebSocket server listening on port " << PORT
-                    << std::endl;
+          LOG_INFO("WebSocketServer",
+                   "Server listening on port " + std::to_string(PORT));
         } else {
-          std::cerr << "Failed to listen on port " << PORT << std::endl;
+          LOG_ERROR("WebSocketServer",
+                    "Failed to listen on port " + std::to_string(PORT));
         }
       });
 
@@ -151,6 +172,11 @@ void WebSocketServer::run() {
 }
 
 void WebSocketServer::stop() {
+  LOG_INFO("WebSocketServer", "Stopping server");
+
+  // Clean up any active connection
+  cleanupConnection();
+
   if (app) {
     app->close();
     delete app;
@@ -172,6 +198,8 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
     response["cameras"].push_back(cam_info);
   }
 
+  LOG_INFO("WebSocketServer",
+           "Discovered " + std::to_string(count) + " cameras");
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
@@ -182,7 +210,6 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
     return;
   }
 
-  // For now, use default configuration
   CameraConfig config;
 
   // Override with any provided parameters
@@ -194,6 +221,10 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
   if (params.contains("crop_left")) config.crop_left = params["crop_left"];
   if (params.contains("crop_top")) config.crop_top = params["crop_top"];
 
+  LOG_INFO("WebSocketServer", "Configuring cameras with resolution " +
+                                  std::to_string(config.width) + "x" +
+                                  std::to_string(config.height));
+
   if (camera_manager->configureAll(config)) {
     system_state = CameraState::CONFIGURED;
     sendStatus(ws, "All cameras configured successfully");
@@ -204,11 +235,6 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
 
 void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
                                         const json& msg) {
-  if (system_state == CameraState::RUNNING) {
-    sendError(ws, "Cannot change save mode while cameras are running");
-    return;
-  }
-
   SaveConfig config;
   std::string mode = msg["mode"];
 
@@ -246,6 +272,7 @@ void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
   }
 
   frame_saver->configure(config);
+  LOG_INFO("WebSocketServer", "Save mode configured: " + mode);
   sendStatus(ws, "Save mode configured: " + mode);
 }
 
@@ -255,13 +282,18 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     return;
   }
 
-  // Start frame saver first
+  // Start frame saver first (if not NONE mode)
   frame_saver->start();
 
-  // Set up frame callback for saving BEFORE starting cameras
-  // This ensures the callback is properly connected
-  camera_manager->setFrameCallback(
-      [this](const FrameData& frame) { frame_saver->saveFrame(frame); });
+  // Set up frame callback only if saving is enabled
+  if (frame_saver->getMode() != SaveMode::NONE) {
+    LOG_INFO("WebSocketServer", "Frame saving enabled, setting up callback");
+    camera_manager->setFrameCallback(
+        [this](const FrameData& frame) { frame_saver->saveFrame(frame); });
+  } else {
+    LOG_INFO("WebSocketServer", "Frame saving disabled, no callback set");
+    camera_manager->setFrameCallback(nullptr);
+  }
 
   // Start all cameras
   if (camera_manager->startAll()) {
@@ -283,6 +315,8 @@ void WebSocketServer::handleStartStream(uWS::WebSocket<false, true, int>* ws,
   uint32_t camera_id = msg["camera_id"];
 
   if (stream_manager->startStreamingCamera(camera_id)) {
+    LOG_INFO("WebSocketServer",
+             "Started streaming camera " + std::to_string(camera_id));
     sendStatus(ws, "Started streaming camera " + std::to_string(camera_id));
   } else {
     sendError(ws,
@@ -295,6 +329,8 @@ void WebSocketServer::handleStopStream(uWS::WebSocket<false, true, int>* ws,
   uint32_t camera_id = msg["camera_id"];
 
   if (stream_manager->stopStreamingCamera(camera_id)) {
+    LOG_INFO("WebSocketServer",
+             "Stopped streaming camera " + std::to_string(camera_id));
     sendStatus(ws, "Stopped streaming camera " + std::to_string(camera_id));
   } else {
     sendError(ws, "Camera " + std::to_string(camera_id) + " was not streaming");
@@ -307,6 +343,8 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
     return;
   }
 
+  LOG_INFO("WebSocketServer", "Stopping all cameras");
+
   // Stop streaming first
   stream_manager->stopAllStreaming();
 
@@ -315,6 +353,7 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
 
   // Flush buffered frames if in buffer mode
   if (frame_saver->getMode() == SaveMode::BUFFER) {
+    LOG_INFO("WebSocketServer", "Flushing buffered frames");
     frame_saver->flushBufferedFrames();
   }
 
@@ -342,6 +381,7 @@ void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,
 
 void WebSocketServer::sendError(uWS::WebSocket<false, true, int>* ws,
                                 const std::string& message) {
+  LOG_ERROR("WebSocketServer", "Sending error: " + message);
   json response;
   response["type"] = Protocol::TYPE_ERROR;
   response["message"] = message;
@@ -349,22 +389,20 @@ void WebSocketServer::sendError(uWS::WebSocket<false, true, int>* ws,
 }
 
 void WebSocketServer::cleanupConnection() {
-  // Stop streaming
+  LOG_INFO("WebSocketServer", "Cleaning up connection");
+
+  // Stop streaming but keep cameras running
   stream_manager->clearWebSocket();
 
-  // Stop cameras if running
+  // Note: We do NOT stop cameras here to allow frame saving to continue
+  // Cameras will only be stopped by explicit stop_cameras command
+
+  // Log current state
   if (system_state == CameraState::RUNNING) {
-    camera_manager->stopAll();
-
-    // Flush buffered frames if needed
-    if (frame_saver->getMode() == SaveMode::BUFFER) {
-      frame_saver->flushBufferedFrames();
-    }
-
-    frame_saver->stop();
+    LOG_INFO("WebSocketServer",
+             "Cameras still running for potential frame saving");
   }
 
-  // Reset state
-  system_state = CameraState::IDLE;
+  // Reset client flag
   has_client = false;
 }

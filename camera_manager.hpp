@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -13,11 +14,14 @@ class CameraManager {
   std::vector<std::unique_ptr<Camera>> cameras;
   CameraConfig default_config;
 
- public:
-  CameraManager() = default;
-  ~CameraManager() = default;
+  // Callback to notify stream manager of new frames
+  std::function<void()> stream_manager_notify;
 
-  // Discover all IMX296 cameras
+ public:
+  CameraManager();
+  ~CameraManager();
+
+  // Discover all IMX296 cameras (won't re-discover if already done)
   size_t discoverCameras();
 
   // Configure all cameras with the same config
@@ -37,4 +41,10 @@ class CameraManager {
 
   // Set callback for frame saving
   void setFrameCallback(std::function<void(const FrameData&)> callback);
+
+  // Set callback to notify stream manager when frames are available
+  void setStreamManagerNotify(std::function<void()> callback);
+
+  // Check if any cameras are running
+  bool areAnyRunning() const;
 };

@@ -22,10 +22,15 @@ class Camera {
   std::atomic<uint32_t> frame_counter{0};
   std::atomic<uint32_t> frames_dropped{0};
 
-  // Latest frame for streaming
+  // Dual buffer system for streaming
+  std::mutex streaming_frame_mutex;
+  FrameData streaming_frame;  // Frame currently being streamed
+  bool streaming_frame_in_use = false;
+
   std::mutex latest_frame_mutex;
-  FrameData latest_frame;
+  FrameData latest_frame;  // Most recent frame available for streaming
   bool has_new_frame = false;
+  std::condition_variable new_frame_cv;
 
   // Capture thread
   std::unique_ptr<std::thread> capture_thread;
@@ -41,11 +46,24 @@ class Camera {
   bool start();
   bool stop();
 
-  // Get latest frame for streaming (returns false if no new frame)
-  bool getLatestFrame(FrameData& frame);
+  // Get frame for streaming (returns false if no new frame)
+  // This will copy the latest frame to streaming buffer if available
+  bool getFrameForStreaming(FrameData& frame);
 
-  // For frame saving - get a copy of every captured frame
+  // Wait for new frame with timeout (for efficient notification)
+  bool waitForNewFrame(std::chrono::milliseconds timeout);
+
+  // Mark streaming frame as no longer in use
+  void releaseStreamingFrame();
+
+  // For frame saving - callback for every captured frame
   std::function<void(const FrameData&)> onFrameCaptured;
+
+  // For streaming notification - called when new frame available
+  std::function<void()> onFrameAvailable;
+
+  // Set the frame available callback
+  void setFrameAvailableCallback(std::function<void()> callback);
 
   uint32_t getId() const { return camera_id; }
   CameraState getState() const { return state; }
