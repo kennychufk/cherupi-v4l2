@@ -50,6 +50,7 @@ class Logger {
 
  public:
   static void setLevel(LogLevel level) { current_level = level; }
+  static LogLevel getLevel() { return current_level; }
 
   static void log(LogLevel level, const std::string& component,
                   const std::string& message) {

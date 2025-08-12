@@ -119,6 +119,10 @@ void FrameSaver::saveFrame(const FrameData& frame) {
 }
 
 bool FrameSaver::detectCheckerboard(const FrameData& frame) {
+  std::chrono::steady_clock::time_point start_tp =
+      std::chrono::steady_clock::now();
+  std::chrono::steady_clock::now();
+
   // Configure BayerConverter
   Config bayer_config;
   bayer_config.width = frame.width;
@@ -144,6 +148,8 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
   // Unpack 10-bit data
   unpack_10bit_neon(frame.data.data(), bayer_data.data(), frame.width,
                     frame.height, frame.bytes_per_line);
+  std::chrono::steady_clock::time_point unpack_tp =
+      std::chrono::steady_clock::now();
 
   // Prepare output buffer
   int out_width =
@@ -156,10 +162,33 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
   demosaic_threaded(bayer_data.data(), grayscale_data.data(), frame.width,
                     frame.height, config.checkerboard_full_res_detection,
                     config.checkerboard_num_threads);
+  std::chrono::steady_clock::time_point demosaic_tp =
+      std::chrono::steady_clock::now();
 
   // Detect checkerboard
-  return checkerboard_detector->detect(grayscale_data.data(), out_width,
-                                       out_height);
+  bool detected = checkerboard_detector->detect(grayscale_data.data(),
+                                                out_width, out_height);
+
+  std::chrono::steady_clock::time_point end_tp =
+      std::chrono::steady_clock::now();
+  auto total_time =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
+          .count();
+  auto unpack_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         unpack_tp - start_tp)
+                         .count();
+  auto demosaic_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           demosaic_tp - unpack_tp)
+                           .count();
+  auto detect_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         end_tp - demosaic_tp)
+                         .count();
+  LOG_INFO("FrameSaver", "Checkerboard detected: " + std::to_string(detected) +
+                             " Total: " + std::to_string(total_time) +
+                             "ms (Unpack " + std::to_string(unpack_time) +
+                             " Demosaic " + std::to_string(demosaic_time) +
+                             " Detect " + std::to_string(detect_time) + ")");
+  return detected;
 }
 
 void FrameSaver::flushBufferedFrames() {
