@@ -1,3 +1,5 @@
+// a monolithic capture program that demonstrates how cameras can be controlled
+// using v4l2. camera_ws_server is built upon this program
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -660,7 +662,7 @@ class V4L2Device {
       }
 
       buffer_lengths[i] = buf.length;
-      std::cout<<"buf.length = "<<buf.length<<std::endl;
+      std::cout << "buf.length = " << buf.length << std::endl;
       buffer_starts[i] =
           mmap(nullptr, buffer_lengths[i], PROT_READ | PROT_WRITE, MAP_SHARED,
                fd, buf.m.offset);
@@ -725,7 +727,7 @@ class V4L2Device {
 
     // Copy frame data
     frame_data.data.resize(buf.bytesused);
-    std::cout<<"buf.bytesused"<<buf.bytesused<<std::endl;
+    std::cout << "buf.bytesused" << buf.bytesused << std::endl;
     memcpy(frame_data.data.data(), buffer_starts[buf.index], buf.bytesused);
     frame_data.timestamp = std::chrono::steady_clock::now();
 
@@ -934,8 +936,7 @@ void captureThread(PreparedCamera& cam, std::atomic<bool>& stop_capture,
           // Submit batch to writer pool
           for (auto& f : batch) {
             std::stringstream filename;
-            filename << cam.output_prefix << "_cam" << f.camera_index
-                     << "_frame" << std::setfill('0') << std::setw(6)
+            filename << cam.output_prefix << "cam" << f.camera_index << "-"
                      << f.frame_number << ".raw";
 
             WriteTask task;
@@ -960,8 +961,8 @@ void captureThread(PreparedCamera& cam, std::atomic<bool>& stop_capture,
   if (mode == CaptureMode::BATCH_WRITE && !batch.empty()) {
     for (auto& f : batch) {
       std::stringstream filename;
-      filename << cam.output_prefix << "_cam" << f.camera_index << "_frame"
-               << std::setfill('0') << std::setw(6) << f.frame_number << ".raw";
+      filename << cam.output_prefix << "cam" << f.camera_index << "-"
+               << f.frame_number << ".raw";
 
       WriteTask task;
       task.filename = filename.str();
@@ -1097,10 +1098,6 @@ int main(int argc, char* argv[]) {
     CameraConfig config;
     config.sensor_entity = media.findIMX296SensorEntity();
 
-    // Generate output prefix for this camera
-    std::stringstream ss;
-    ss << output_prefix << "_" << i;
-
     // Configure camera and prepare video device
     std::unique_ptr<V4L2Device> video_device;
     if (!configureCamera(media, config, video_device, v4l2_buffers)) {
@@ -1113,7 +1110,7 @@ int main(int argc, char* argv[]) {
     prep_cam.media_device = &media;
     prep_cam.video_device = std::move(video_device);
     prep_cam.config = config;
-    prep_cam.output_prefix = ss.str();
+    prep_cam.output_prefix = output_prefix;
     prep_cam.camera_index = i;
 
     if (mode == CaptureMode::BUFFER_ALL) {
@@ -1231,8 +1228,7 @@ int main(int argc, char* argv[]) {
 
       for (const auto& frame : cam.captured_frames) {
         std::stringstream filename;
-        filename << cam.output_prefix << "_frame" << std::setfill('0')
-                 << std::setw(6) << frame.frame_number << ".raw";
+        filename << cam.output_prefix << "-" << frame.frame_number << ".raw";
 
         std::ofstream file(filename.str(), std::ios::binary);
         if (file) {
