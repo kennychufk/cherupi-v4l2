@@ -256,7 +256,6 @@ void FrameSaver::writerThreadFunc() {
 std::string FrameSaver::generateFilename(uint32_t camera_id,
                                          uint32_t frame_id) {
   std::stringstream ss;
-  ss << config.prefix << "_cam" << camera_id << "_frame" << std::setfill('0')
-     << std::setw(6) << frame_id << ".raw";
+  ss << config.prefix << "cam" << camera_id << "-" << frame_id << ".raw";
   return ss.str();
 }
