@@ -111,18 +111,66 @@ void WebSocketServer::run() {
 
           .drain =
               [this](auto* ws) {
-                // Handle backpressure
+                // Handle backpressure with hysteresis to prevent oscillation
                 auto bufferedAmount = ws->getBufferedAmount();
-                bool hasPressure = bufferedAmount > 0;
 
-                if (hasPressure) {
-                  LOG_DEBUG("WebSocketServer",
-                            "Backpressure detected: " +
-                                std::to_string(bufferedAmount) +
-                                " bytes buffered");
+                // Use different thresholds for entering and leaving
+                // backpressure This prevents rapid oscillation between states
+                static constexpr size_t BACKPRESSURE_HIGH_WATER =
+                    512 * 1024;  // 512KB
+                static constexpr size_t BACKPRESSURE_LOW_WATER =
+                    128 * 1024;  // 128KB
+
+                // Track backpressure state per connection (using static for
+                // simplicity) In production, this should be stored per
+                // WebSocket connection
+                static bool wasInBackpressure = false;
+                bool hasPressure = false;
+
+                if (!wasInBackpressure) {
+                  // Not in backpressure - use high water mark to enter
+                  hasPressure = bufferedAmount > BACKPRESSURE_HIGH_WATER;
+                } else {
+                  // Already in backpressure - use low water mark to exit
+                  // (hysteresis)
+                  hasPressure = bufferedAmount > BACKPRESSURE_LOW_WATER;
                 }
 
-                stream_manager->notifyBackpressure(hasPressure);
+                // Only log and notify on state changes
+                if (hasPressure != wasInBackpressure) {
+                  if (hasPressure) {
+                    LOG_DEBUG("WebSocketServer",
+                              "Entering backpressure state: " +
+                                  std::to_string(bufferedAmount) +
+                                  " bytes buffered (threshold: " +
+                                  std::to_string(BACKPRESSURE_HIGH_WATER) +
+                                  ")");
+                  } else {
+                    LOG_DEBUG("WebSocketServer",
+                              "Exiting backpressure state: " +
+                                  std::to_string(bufferedAmount) +
+                                  " bytes buffered (threshold: " +
+                                  std::to_string(BACKPRESSURE_LOW_WATER) + ")");
+                  }
+                  wasInBackpressure = hasPressure;
+
+                  // Notify stream manager of backpressure state change
+                  stream_manager->notifyBackpressure(hasPressure);
+                }
+
+                // Optional: Log periodic status if buffer is very high
+                if (bufferedAmount > 1024 * 1024) {  // 1MB
+                  static auto lastHighBufferLog =
+                      std::chrono::steady_clock::now();
+                  auto now = std::chrono::steady_clock::now();
+                  if (now - lastHighBufferLog > std::chrono::seconds(1)) {
+                    LOG_WARN("WebSocketServer",
+                             "High buffer warning: " +
+                                 std::to_string(bufferedAmount / 1024) +
+                                 " KB buffered");
+                    lastHighBufferLog = now;
+                  }
+                }
               },
 
           .close =

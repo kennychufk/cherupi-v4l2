@@ -1,3 +1,5 @@
+// stream_manager.cpp - Fixed implementation without blocking flow control
+
 #include "stream_manager.hpp"
 
 #include <uWS/App.h>
@@ -6,8 +8,9 @@
 #include <sstream>
 
 StreamManager::StreamManager(CameraManager* mgr) : camera_manager(mgr) {
-  LOG_INFO("StreamManager", "Initialized with fixed chunk size: " +
-                                std::to_string(CHUNK_SIZE) + " bytes");
+  LOG_INFO("StreamManager",
+           "Initialized with adaptive rate control, chunk size: " +
+               std::to_string(CHUNK_SIZE) + " bytes");
 }
 
 StreamManager::~StreamManager() {
@@ -28,6 +31,7 @@ void StreamManager::setWebSocket(uWS::WebSocket<false, true, int>* ws) {
   std::lock_guard<std::mutex> lock(ws_mutex);
   ws_connection = ws;
   has_backpressure = false;
+  rate_controller.reset();
 
   LOG_INFO("StreamManager", "WebSocket connection set");
 
@@ -55,6 +59,9 @@ void StreamManager::clearWebSocket() {
 
   // Clean up any in-progress transfer
   cleanupTransfer();
+
+  // Reset rate controller
+  rate_controller.reset();
 }
 
 bool StreamManager::startStreamingCamera(uint32_t camera_id) {
@@ -152,9 +159,16 @@ void StreamManager::notifyBackpressure(bool has_pressure) {
   bool prev = has_backpressure.exchange(has_pressure);
   if (has_pressure && !prev) {
     stats.backpressure_pauses++;
-    LOG_WARN("StreamManager", "Backpressure detected - pausing streaming");
+    rate_controller.recordBackpressure();
+    LOG_WARN("StreamManager",
+             "Backpressure detected - adjusting rate to " +
+                 std::to_string(rate_controller.getCurrentRate()) +
+                 " chunks/sec");
   } else if (!has_pressure && prev) {
-    LOG_INFO("StreamManager", "Backpressure cleared - resuming streaming");
+    LOG_INFO("StreamManager",
+             "Backpressure cleared - current rate: " +
+                 std::to_string(rate_controller.getCurrentRate()) +
+                 " chunks/sec");
     frame_available_cv.notify_one();  // Wake up streaming thread
   }
 }
@@ -313,7 +327,10 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
     return false;
   }
 
-  // Send all chunks
+  // Track timing for adaptive rate control
+  auto last_chunk_time = std::chrono::steady_clock::now();
+
+  // Send all chunks with adaptive pacing
   for (size_t chunk_idx = 0; chunk_idx < current_transfer->total_chunks;
        chunk_idx++) {
     // Check if we should stop or if transfer was cancelled
@@ -330,19 +347,38 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
       return false;
     }
 
-    // Check for backpressure
-    if (has_backpressure) {
-      LOG_DEBUG("StreamManager", "Backpressure during chunk send, waiting");
-      std::unique_lock<std::mutex> lock(frame_wait_mutex);
-      bool resumed = frame_available_cv.wait_for(
-          lock, std::chrono::seconds(1),
-          [this] { return !has_backpressure || should_stop.load(); });
+    // Check for backpressure and wait if necessary
+    int backpressure_wait_count = 0;
+    while (has_backpressure && backpressure_wait_count < 50) {  // Max 5 seconds
+      LOG_DEBUG("StreamManager", "Backpressure during chunk " +
+                                     std::to_string(chunk_idx) + ", waiting");
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      backpressure_wait_count++;
 
-      if (!resumed || should_stop) {
+      if (should_stop) {
         cleanupTransfer();
         return false;
       }
     }
+
+    if (has_backpressure) {
+      LOG_ERROR("StreamManager", "Backpressure timeout at chunk " +
+                                     std::to_string(chunk_idx) +
+                                     ", aborting transfer");
+      cleanupTransfer();
+      return false;
+    }
+
+    // Apply adaptive delay based on rate controller
+    auto chunk_delay = rate_controller.getChunkDelay();
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - last_chunk_time;
+
+    if (elapsed < chunk_delay) {
+      std::this_thread::sleep_for(chunk_delay - elapsed);
+    }
+
+    last_chunk_time = std::chrono::steady_clock::now();
 
     // Send chunk
     if (!sendChunkData(*current_transfer, chunk_idx)) {
@@ -355,12 +391,28 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
 
     current_transfer->current_chunk = chunk_idx + 1;
     stats.chunks_sent++;
+
+    // Record successful chunk send for rate adaptation
+    if (!has_backpressure) {
+      rate_controller.recordChunkSent();
+    }
+
+    // Log progress periodically for debugging
+    if ((chunk_idx + 1) % 20 == 0 ||
+        chunk_idx == current_transfer->total_chunks - 1) {
+      LOG_DEBUG(
+          "StreamManager",
+          "Sent chunk " + std::to_string(chunk_idx + 1) + "/" +
+              std::to_string(current_transfer->total_chunks) + " at rate: " +
+              std::to_string(rate_controller.getCurrentRate()) + " chunks/sec");
+    }
   }
 
-  LOG_DEBUG("StreamManager",
-            "Successfully sent frame " + std::to_string(frame.frame_id) +
-                " in " + std::to_string(current_transfer->total_chunks) +
-                " chunks");
+  LOG_DEBUG(
+      "StreamManager",
+      "Successfully sent frame " + std::to_string(frame.frame_id) + " in " +
+          std::to_string(current_transfer->total_chunks) + " chunks at rate: " +
+          std::to_string(rate_controller.getCurrentRate()) + " chunks/sec");
 
   // Clean up completed transfer
   cleanupTransfer();
@@ -486,6 +538,8 @@ void StreamManager::logStats() const {
      << "  Frames dropped: " << stats.frames_dropped.load() << "\n"
      << "  Chunks sent: " << stats.chunks_sent.load() << "\n"
      << "  Bytes sent: " << stats.bytes_sent.load() << "\n"
-     << "  Backpressure pauses: " << stats.backpressure_pauses.load();
+     << "  Backpressure pauses: " << stats.backpressure_pauses.load() << "\n"
+     << "  Final chunk rate: " << rate_controller.getCurrentRate()
+     << " chunks/sec";
   LOG_INFO("StreamManager", ss.str());
 }
