@@ -157,7 +157,8 @@ enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };
 // Save configuration
 struct SaveConfig {
   SaveMode mode = SaveMode::NONE;
-  std::string prefix = "camera";
+  std::string output_dir = ".";
+  bool prepend_timestamp_to_dir = false;
   size_t batch_size = 10;
   size_t writer_threads = 4;
 

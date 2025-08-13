@@ -79,16 +79,13 @@ All commands are sent as JSON text messages:
     "crop_top": 0
 }}
 
-// Set frame saving mode
-{"cmd": "set_save_mode", "mode": "none|buffer|batch", "params": {
-    "prefix": "camera",
+# Set frame saving mode
+{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard", "params": {
+    "output_dir": "camera_frames",
+    "prepend_timestamp_to_dir": false,
     "batch_size": 10,
     "writer_threads": 4
 }}
-
-# Checkerboard Save Mode Addition
-
-Add this section to the existing README.md under the "Set frame saving mode" command documentation:
 
 ## Frame Saving Modes
 
@@ -106,7 +103,8 @@ Example command:
 ```json
 // Set checkerboard detection mode with custom parameters
 {"cmd": "set_save_mode", "mode": "checkerboard", "params": {
-    "prefix": "calib",
+    "output_dir": "calibration_frames",
+    "prepend_timestamp_to_dir": true,
     "writer_threads": 4,
     "checkerboard_rows": 8,        // Number of inner corners vertically
     "checkerboard_cols": 11,       // Number of inner corners horizontally
@@ -117,6 +115,8 @@ Example command:
 
 #### Checkerboard Mode Parameters
 
+- `output_dir` (default: "camera_frames"): Directory where frames will be saved (created automatically)
+- `prepend_timestamp_to_dir` (default: false): Prepend timestamp (YYYYMMDD-HHMM-) to the directory name
 - `checkerboard_rows` (default: 8): Number of inner corners in the checkerboard pattern vertically
 - `checkerboard_cols` (default: 11): Number of inner corners in the checkerboard pattern horizontally
 - `checkerboard_full_res_detection` (default: false): Whether to use full resolution for detection (slower but more accurate)
@@ -128,7 +128,17 @@ Example command:
 - Half-resolution detection (default) provides a good balance between speed and accuracy
 - The debayering process uses NEON optimizations for ARM processors
 - Original raw Bayer data is saved, not the debayered grayscale image
-- Frame IDs are preserved - if frames 0, 2, and 5 contain checkerboards, they will be saved as `prefix_cam0_frame000000.raw`, `prefix_cam0_frame000002.raw`, and `prefix_cam0_frame000005.raw`
+- Frame IDs are preserved - if frames 0, 2, and 5 contain checkerboards, they will be saved as `cam0-0.raw`, `cam0-2.raw`, and `cam0-5.raw` in the specified output directory
+
+#### Directory Creation
+
+- The server automatically creates the output directory when frame saving is configured
+- If `prepend_timestamp_to_dir` is true, the timestamp is prepended to the last part of the directory path
+  - Example: `experiments/calibration` becomes `experiments/20241215-1430-calibration`
+- If the directory already exists, the server continues without error
+- If directory creation fails, the server falls back to the current working directory and logs a warning
+- Directory permissions are set to 0755
+- Both relative and absolute paths are supported
 
 
 // Start all cameras
@@ -241,7 +251,8 @@ async def client():
             "cmd": "set_save_mode",
             "mode": "checkerboard",
             "params": {
-                "prefix": "calibration",
+                "output_dir": "calibration_frames",
+                "prepend_timestamp_to_dir": True,
                 "checkerboard_rows": 6,
                 "checkerboard_cols": 9,
                 "checkerboard_full_res_detection": True,

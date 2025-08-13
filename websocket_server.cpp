@@ -302,7 +302,9 @@ void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
   // Get optional parameters
   if (msg.contains("params")) {
     const json& params = msg["params"];
-    if (params.contains("prefix")) config.prefix = params["prefix"];
+    if (params.contains("output_dir")) config.output_dir = params["output_dir"];
+    if (params.contains("prepend_timestamp_to_dir"))
+      config.prepend_timestamp_to_dir = params["prepend_timestamp_to_dir"];
     if (params.contains("batch_size")) config.batch_size = params["batch_size"];
     if (params.contains("writer_threads"))
       config.writer_threads = params["writer_threads"];

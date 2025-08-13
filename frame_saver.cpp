@@ -1,9 +1,13 @@
 #include "frame_saver.hpp"
 
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -13,6 +17,16 @@ FrameSaver::~FrameSaver() { stop(); }
 
 void FrameSaver::configure(const SaveConfig& cfg) {
   config = cfg;
+
+  // Create output directory when configuring (if mode is not NONE)
+  if (config.mode != SaveMode::NONE) {
+    if (!createOutputDirectory()) {
+      LOG_WARN("FrameSaver",
+               "Failed to create output directory, falling back to current "
+               "directory");
+      actual_output_dir = ".";
+    }
+  }
 
   // Initialize checkerboard detector if needed
   if (config.mode == SaveMode::CHECKERBOARD) {
@@ -24,6 +38,93 @@ void FrameSaver::configure(const SaveConfig& cfg) {
     checkerboard_detector->setAdaptiveThreshC(2);
     checkerboard_detector->setNormalizeImage(true);
     checkerboard_detector->setFastCheck(true);
+  }
+}
+
+bool FrameSaver::createOutputDirectory() {
+  try {
+    // Check if output_dir is empty or just whitespace
+    std::string trimmed_dir = config.output_dir;
+    trimmed_dir.erase(0, trimmed_dir.find_first_not_of(" \t\n\r"));
+    trimmed_dir.erase(trimmed_dir.find_last_not_of(" \t\n\r") + 1);
+
+    if (trimmed_dir.empty()) {
+      LOG_WARN("FrameSaver",
+               "Empty output directory specified, using current directory");
+      actual_output_dir = ".";
+      return true;
+    }
+
+    // Apply timestamp prefix if requested
+    std::string final_dir = trimmed_dir;
+    if (config.prepend_timestamp_to_dir) {
+      std::filesystem::path dir_path(trimmed_dir);
+      std::filesystem::path parent_path = dir_path.parent_path();
+      std::string dir_name = dir_path.filename().string();
+
+      // Generate timestamp string (YYYYMMDD-HHMM-)
+      auto now = std::chrono::system_clock::now();
+      auto time_t = std::chrono::system_clock::to_time_t(now);
+      std::tm* tm_ptr = std::localtime(&time_t);
+
+      std::stringstream timestamp_ss;
+      timestamp_ss << std::put_time(tm_ptr, "%Y%m%d-%H%M-");
+      std::string timestamp = timestamp_ss.str();
+
+      // Construct the new directory name with timestamp
+      std::string timestamped_name = timestamp + dir_name;
+
+      if (parent_path.empty() || parent_path == ".") {
+        final_dir = timestamped_name;
+      } else {
+        final_dir = (parent_path / timestamped_name).string();
+      }
+
+      LOG_INFO("FrameSaver", "Timestamp prepended to directory: " +
+                                 trimmed_dir + " -> " + final_dir);
+    }
+
+    // Use the filesystem library for robust directory creation
+    std::filesystem::path dir_path(final_dir);
+
+    // Check if directory already exists
+    if (std::filesystem::exists(dir_path)) {
+      if (std::filesystem::is_directory(dir_path)) {
+        LOG_INFO("FrameSaver", "Output directory already exists: " + final_dir);
+        actual_output_dir = final_dir;
+        return true;
+      } else {
+        LOG_ERROR("FrameSaver",
+                  "Output path exists but is not a directory: " + final_dir);
+        return false;
+      }
+    }
+
+    // Create the directory
+    if (std::filesystem::create_directory(dir_path)) {
+      LOG_INFO("FrameSaver", "Created output directory: " + final_dir);
+
+      // Set permissions to 0755 using chmod
+      if (chmod(final_dir.c_str(),
+                S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0) {
+        LOG_WARN("FrameSaver", "Failed to set directory permissions to 0755");
+      }
+
+      actual_output_dir = final_dir;
+      return true;
+    } else {
+      LOG_ERROR("FrameSaver",
+                "Failed to create output directory: " + final_dir);
+      return false;
+    }
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG_ERROR("FrameSaver",
+              "Filesystem error creating directory: " + std::string(e.what()));
+    return false;
+  } catch (const std::exception& e) {
+    LOG_ERROR("FrameSaver",
+              "Error creating output directory: " + std::string(e.what()));
+    return false;
   }
 }
 
@@ -256,6 +357,6 @@ void FrameSaver::writerThreadFunc() {
 std::string FrameSaver::generateFilename(uint32_t camera_id,
                                          uint32_t frame_id) {
   std::stringstream ss;
-  ss << config.prefix << "cam" << camera_id << "-" << frame_id << ".raw";
+  ss << actual_output_dir << "/cam" << camera_id << "-" << frame_id << ".raw";
   return ss.str();
 }

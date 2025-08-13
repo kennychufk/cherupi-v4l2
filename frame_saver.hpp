@@ -16,6 +16,7 @@ class FrameSaver {
  private:
   SaveConfig config;
   std::atomic<bool> enabled{false};
+  std::string actual_output_dir;  // The directory that will actually be used
 
   // For buffer mode
   std::vector<FrameData> buffered_frames;
@@ -44,6 +45,7 @@ class FrameSaver {
   void writerThreadFunc();
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
   bool detectCheckerboard(const FrameData& frame);
+  bool createOutputDirectory();  // New method for directory creation
 
  public:
   FrameSaver() = default;
@@ -65,4 +67,5 @@ class FrameSaver {
   size_t getCheckerboardsDetected() const { return checkerboards_detected; }
   bool isEnabled() const { return enabled; }
   SaveMode getMode() const { return config.mode; }
+  const std::string& getActualOutputDir() const { return actual_output_dir; }
 };
