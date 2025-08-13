@@ -9,7 +9,7 @@
 
 // Function declarations for internal use
 void demosaic_half_res_neon(const uint16_t* bayer, uint8_t* grayscale,
-                            int width, int height, int start_y, int end_y);
+                            int width, int start_y, int end_y);
 void demosaic_full_res_fast(const uint16_t* bayer, uint8_t* grayscale,
                             int width, int height, int start_y, int end_y);
 
@@ -106,10 +106,6 @@ void unpack_10bit_neon(const uint8_t* packed, uint16_t* unpacked, int width,
     int x = 0;
     // Process 16 pixels at a time (4 groups of 4 pixels)
     for (; x + 15 < width; x += 16) {
-      // Load 20 bytes (4 groups)
-      uint8x16_t data = vld1q_u8(line_ptr);
-      uint8x8_t extra = vld1_u8(line_ptr + 16);
-
       // Extract low 2 bits from every 5th byte
       uint8_t b4_0 = line_ptr[4];
       uint8_t b4_1 = line_ptr[9];
@@ -170,7 +166,7 @@ void unpack_10bit_neon(const uint8_t* packed, uint16_t* unpacked, int width,
 
 // Half resolution demosaic with NEON optimization
 void demosaic_half_res_neon(const uint16_t* bayer, uint8_t* grayscale,
-                            int width, int height, int start_y, int end_y) {
+                            int width, int start_y, int end_y) {
   const float r_weight = 0.299f;
   const float g_weight = 0.587f;
   const float b_weight = 0.114f;
@@ -444,7 +440,7 @@ void demosaic_threaded(const uint16_t* bayer, uint8_t* grayscale, int width,
       if (full_res) {
         demosaic_full_res_fast(bayer, grayscale, width, height, start_y, end_y);
       } else {
-        demosaic_half_res_neon(bayer, grayscale, width, height, start_y, end_y);
+        demosaic_half_res_neon(bayer, grayscale, width, start_y, end_y);
       }
     });
   }

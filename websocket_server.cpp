@@ -174,7 +174,7 @@ void WebSocketServer::run() {
               },
 
           .close =
-              [this](auto* ws, int code, std::string_view message) {
+              [this](auto*, int code, std::string_view message) {
                 LOG_INFO("WebSocketServer",
                          "Client disconnected with code " +
                              std::to_string(code) +
