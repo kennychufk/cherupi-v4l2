@@ -32,12 +32,6 @@ void FrameSaver::configure(const SaveConfig& cfg) {
   if (config.mode == SaveMode::CHECKERBOARD) {
     checkerboard_detector = std::make_unique<CheckerboardDetector>(
         config.checkerboard_cols, config.checkerboard_rows);
-
-    // Configure detector for RPi5 optimization
-    checkerboard_detector->setAdaptiveThreshWinSize(11);
-    checkerboard_detector->setAdaptiveThreshC(2);
-    checkerboard_detector->setNormalizeImage(true);
-    checkerboard_detector->setFastCheck(true);
   }
 }
 
