@@ -95,6 +95,8 @@ void WebSocketServer::run() {
                     handleStopStream(ws, msg);
                   } else if (cmd == Protocol::CMD_STOP_CAMERAS) {
                     handleStopCameras(ws);
+                  } else if (cmd == Protocol::CMD_RESET_FRAME_COUNTS) {
+                    handleResetFrameCounts(ws);
                   } else {
                     sendError(ws, "Unknown command: " + cmd);
                   }
@@ -419,6 +421,15 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
   status["bytes_written"] = frame_saver->getBytesWritten();
 
   ws->send(status.dump(), uWS::OpCode::TEXT);
+}
+
+void WebSocketServer::handleResetFrameCounts(
+    uWS::WebSocket<false, true, int>* ws) {
+  LOG_INFO("WebSocketServer", "Resetting frame counts for all cameras");
+
+  camera_manager->resetFrameCounts();
+
+  sendStatus(ws, "Frame counts reset for all cameras");
 }
 
 void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,

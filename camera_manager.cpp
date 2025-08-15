@@ -187,3 +187,12 @@ bool CameraManager::areAnyRunning() const {
   }
   return false;
 }
+
+void CameraManager::resetFrameCounts() {
+  for (auto& camera : cameras) {
+    camera->resetFrameCounts();
+  }
+
+  LOG_INFO("CameraManager", "Reset frame counts for all " +
+                                std::to_string(cameras.size()) + " cameras");
+}

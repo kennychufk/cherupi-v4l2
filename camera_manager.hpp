@@ -47,4 +47,6 @@ class CameraManager {
 
   // Check if any cameras are running
   bool areAnyRunning() const;
+
+  void resetFrameCounts();
 };

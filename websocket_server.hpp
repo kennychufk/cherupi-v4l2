@@ -41,6 +41,7 @@ class WebSocketServer {
   void handleStopStream(uWS::WebSocket<false, true, int>* ws,
                         const nlohmann::json& params);
   void handleStopCameras(uWS::WebSocket<false, true, int>* ws);
+  void handleResetFrameCounts(uWS::WebSocket<false, true, int>* ws);
 
   void sendStatus(uWS::WebSocket<false, true, int>* ws,
                   const std::string& message);

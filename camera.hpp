@@ -70,4 +70,10 @@ class Camera {
   uint32_t getFramesCaptured() const { return frame_counter; }
   uint32_t getFramesDropped() const { return frames_dropped; }
   const CameraConfig& getConfig() const { return config; }
+  void resetFrameCounts() {
+    frame_counter = 0;
+    frames_dropped = 0;
+    LOG_INFO("Camera",
+             "Reset frame counts for camera " + std::to_string(camera_id));
+  }
 };
