@@ -1,3 +1,4 @@
+// types.hpp - Updated with header only mode support
 #pragma once
 
 #include <atomic>
@@ -180,6 +181,7 @@ constexpr const char* CMD_START_STREAM = "start_stream";
 constexpr const char* CMD_STOP_STREAM = "stop_stream";
 constexpr const char* CMD_STOP_CAMERAS = "stop_cameras";
 constexpr const char* CMD_RESET_FRAME_COUNTS = "reset_frame_counts";
+constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";  // New command
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";

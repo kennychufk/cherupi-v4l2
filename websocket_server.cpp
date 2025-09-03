@@ -97,6 +97,8 @@ void WebSocketServer::run() {
                     handleStopCameras(ws);
                   } else if (cmd == Protocol::CMD_RESET_FRAME_COUNTS) {
                     handleResetFrameCounts(ws);
+                  } else if (cmd == Protocol::CMD_SET_HEADER_ONLY) {
+                    handleSetHeaderOnly(ws, msg);
                   } else {
                     sendError(ws, "Unknown command: " + cmd);
                   }
@@ -430,6 +432,22 @@ void WebSocketServer::handleResetFrameCounts(
   camera_manager->resetFrameCounts();
 
   sendStatus(ws, "Frame counts reset for all cameras");
+}
+
+void WebSocketServer::handleSetHeaderOnly(uWS::WebSocket<false, true, int>* ws,
+                                          const json& msg) {
+  bool enabled = msg.value("enabled", false);
+
+  LOG_INFO("WebSocketServer",
+           "Setting header only mode to " +
+               std::string(enabled ? "enabled" : "disabled"));
+
+  // Set the header only mode in the stream manager
+  stream_manager->setHeaderOnlyMode(enabled);
+
+  // Send confirmation status
+  sendStatus(
+      ws, "Header only mode " + std::string(enabled ? "enabled" : "disabled"));
 }
 
 void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,

@@ -269,19 +269,30 @@ void StreamManager::streamingLoop() {
                   "Got frame " + std::to_string(frame.frame_id) +
                       " from camera " + std::to_string(camera_id));
 
-        // Send the frame
-        if (sendChunkedFrame(frame, camera_id)) {
+        // Check if we're in header only mode
+        bool success = false;
+        if (header_only_mode) {
+          // Send only the header, no frame data
+          success = sendHeaderOnlyFrame(frame, camera_id);
+          if (success) {
+            stats.header_only_frames++;
+          }
+        } else {
+          // Send the full frame with chunks
+          success = sendChunkedFrame(frame, camera_id);
+        }
+
+        if (success) {
           found_frame = true;
           stats.frames_sent++;
-
-          // Release the streaming frame after successful send
-          camera->releaseStreamingFrame();
         } else {
           stats.frames_dropped++;
-          camera->releaseStreamingFrame();
           LOG_WARN("StreamManager", "Failed to send frame from camera " +
                                         std::to_string(camera_id));
         }
+
+        // Release the streaming frame after send attempt
+        camera->releaseStreamingFrame();
       }
     }
 
@@ -297,6 +308,28 @@ void StreamManager::streamingLoop() {
   }
 
   LOG_INFO("StreamManager", "Streaming loop ended");
+}
+
+bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
+                                        uint32_t camera_id) {
+  // For header only mode, we send just the chunk header with total_chunks = 0
+  // and total_size = 0, but preserve width, height, and bytes_per_line
+
+  // Create a minimal transfer structure for the header
+  ChunkedTransfer transfer;
+  transfer.frame = frame;
+  transfer.frame_uuid = generateFrameUUID();
+  transfer.total_chunks = 0;  // Indicates header only mode
+  transfer.current_chunk = 0;
+  transfer.start_time = std::chrono::steady_clock::now();
+  transfer.in_progress = false;  // No actual transfer
+
+  LOG_DEBUG("StreamManager", "Sending header only for frame " +
+                                 std::to_string(frame.frame_id) +
+                                 " from camera " + std::to_string(camera_id));
+
+  // Send chunk header with header_only flag
+  return sendChunkHeader(transfer, true);
 }
 
 bool StreamManager::sendChunkedFrame(const FrameData& frame,
@@ -321,7 +354,8 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
                 std::to_string(current_transfer->total_chunks) + " chunks");
 
   // Send chunk header
-  if (!sendChunkHeader(*current_transfer)) {
+  if (!sendChunkHeader(*current_transfer,
+                       false)) {  // Pass false for normal mode
     LOG_ERROR("StreamManager", "Failed to send chunk header");
     cleanupTransfer();
     return false;
@@ -419,7 +453,8 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
   return true;
 }
 
-bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer) {
+bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
+                                    bool header_only) {
   std::lock_guard<std::mutex> lock(ws_mutex);
   if (!ws_connection) return false;
 
@@ -436,8 +471,17 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer) {
   header.frame_uuid = transfer.frame_uuid;
   header.frame_id = transfer.frame.frame_id;
   header.camera_id = transfer.frame.camera_id;
-  header.total_chunks = transfer.total_chunks;
-  header.total_size = transfer.frame.data.size();
+
+  // For header only mode, set total_chunks and total_size to 0
+  if (header_only) {
+    header.total_chunks = 0;
+    header.total_size = 0;
+  } else {
+    header.total_chunks = transfer.total_chunks;
+    header.total_size = transfer.frame.data.size();
+  }
+
+  // Always preserve these fields regardless of mode
   header.bytes_per_line = transfer.frame.bytes_per_line;
   header.width = transfer.frame.width;
   header.height = transfer.frame.height;
@@ -535,11 +579,13 @@ void StreamManager::logStats() const {
   std::stringstream ss;
   ss << "StreamManager Statistics:\n"
      << "  Frames sent: " << stats.frames_sent.load() << "\n"
+     << "  Header only frames: " << stats.header_only_frames.load() << "\n"
      << "  Frames dropped: " << stats.frames_dropped.load() << "\n"
      << "  Chunks sent: " << stats.chunks_sent.load() << "\n"
      << "  Bytes sent: " << stats.bytes_sent.load() << "\n"
      << "  Backpressure pauses: " << stats.backpressure_pauses.load() << "\n"
      << "  Final chunk rate: " << rate_controller.getCurrentRate()
-     << " chunks/sec";
+     << " chunks/sec\n"
+     << "  Mode: " << (header_only_mode ? "Header Only" : "Full Frame");
   LOG_INFO("StreamManager", ss.str());
 }

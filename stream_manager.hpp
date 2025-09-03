@@ -1,3 +1,4 @@
+// stream_manager.hpp - Updated with header only mode support
 #pragma once
 
 #include <atomic>
@@ -139,6 +140,9 @@ class StreamManager {
   std::set<uint32_t> streaming_cameras;
   std::mutex streaming_mutex;
 
+  // Header only mode
+  std::atomic<bool> header_only_mode{false};
+
   // Streaming thread and control
   std::unique_ptr<std::thread> streaming_thread;
   std::atomic<bool> should_stop{false};
@@ -168,12 +172,15 @@ class StreamManager {
     std::atomic<uint64_t> chunks_sent{0};
     std::atomic<uint64_t> bytes_sent{0};
     std::atomic<uint64_t> backpressure_pauses{0};
+    std::atomic<uint64_t> header_only_frames{0};
   } stats;
 
   // Internal methods
   void streamingLoop();
   bool sendChunkedFrame(const FrameData& frame, uint32_t camera_id);
-  bool sendChunkHeader(const ChunkedTransfer& transfer);
+  bool sendHeaderOnlyFrame(const FrameData& frame, uint32_t camera_id);
+  bool sendChunkHeader(const ChunkedTransfer& transfer,
+                       bool header_only = false);
   bool sendChunkData(const ChunkedTransfer& transfer, size_t chunk_index);
   void cleanupTransfer();
   bool isTransferTimedOut();
@@ -191,6 +198,15 @@ class StreamManager {
   bool startStreamingCamera(uint32_t camera_id);
   bool stopStreamingCamera(uint32_t camera_id);
   void stopAllStreaming();
+
+  // Header only mode control
+  void setHeaderOnlyMode(bool enabled) {
+    LOG_INFO("StreamManager",
+             "Setting header only mode to " +
+                 std::string(enabled ? "enabled" : "disabled"));
+    header_only_mode = enabled;
+  }
+  bool isHeaderOnlyMode() const { return header_only_mode; }
 
   // Query methods
   bool isStreamingCamera(uint32_t camera_id);
