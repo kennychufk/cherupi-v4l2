@@ -1,5 +1,3 @@
-// stream_manager.cpp - Fixed implementation without blocking flow control
-
 #include "stream_manager.hpp"
 
 #include <uWS/App.h>
@@ -7,7 +5,8 @@
 #include <random>
 #include <sstream>
 
-StreamManager::StreamManager(CameraManager* mgr) : camera_manager(mgr) {
+StreamManager::StreamManager(CameraManager* mgr, FrameSaver* saver)
+    : camera_manager(mgr), frame_saver(saver) {
   LOG_INFO("StreamManager",
            "Initialized with adaptive rate control, chunk size: " +
                std::to_string(CHUNK_SIZE) + " bytes");
@@ -485,6 +484,12 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.bytes_per_line = transfer.frame.bytes_per_line;
   header.width = transfer.frame.width;
   header.height = transfer.frame.height;
+
+  // Set frames_saved count for this camera
+  header.frames_saved =
+      frame_saver
+          ? frame_saver->getFramesSavedForCamera(transfer.frame.camera_id)
+          : 0;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,

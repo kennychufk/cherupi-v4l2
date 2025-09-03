@@ -1,4 +1,3 @@
-// stream_manager.hpp - Updated with header only mode support
 #pragma once
 
 #include <atomic>
@@ -12,6 +11,7 @@
 #include <thread>
 
 #include "camera_manager.hpp"
+#include "frame_saver.hpp"
 #include "types.hpp"
 
 // Forward declaration for uWebSockets
@@ -135,6 +135,7 @@ class StreamManager {
   static constexpr size_t CHUNK_SIZE = 32768;  // Fixed 32KB chunks
   static constexpr auto CHUNK_TIMEOUT = std::chrono::seconds(5);
   CameraManager* camera_manager;
+  FrameSaver* frame_saver;  // Reference to frame saver for getting saved counts
 
   // Streaming state
   std::set<uint32_t> streaming_cameras;
@@ -187,7 +188,7 @@ class StreamManager {
   uint32_t generateFrameUUID();
 
  public:
-  StreamManager(CameraManager* mgr);
+  StreamManager(CameraManager* mgr, FrameSaver* saver);
   ~StreamManager();
 
   // WebSocket management

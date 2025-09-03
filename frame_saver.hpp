@@ -6,6 +6,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "bayer_converter.h"
@@ -26,6 +27,8 @@ class FrameSaver {
   struct WriteTask {
     std::string filename;
     std::vector<uint8_t> data;
+    uint32_t
+        camera_id;  // Add camera_id to track which camera this frame belongs to
   };
 
   std::queue<WriteTask> write_queue;
@@ -38,6 +41,11 @@ class FrameSaver {
   std::atomic<size_t> bytes_written{0};
   std::atomic<size_t> frames_checked{0};
   std::atomic<size_t> checkerboards_detected{0};
+
+  // Per-camera frame saving counters
+  std::unordered_map<uint32_t, std::atomic<uint32_t>> frames_saved_per_camera;
+  // std::mutex is not used to protect the map because the numbers do not need
+  // to be so precise
 
   // For checkerboard detection
   std::unique_ptr<CheckerboardDetector> checkerboard_detector;
@@ -68,4 +76,18 @@ class FrameSaver {
   bool isEnabled() const { return enabled; }
   SaveMode getMode() const { return config.mode; }
   const std::string& getActualOutputDir() const { return actual_output_dir; }
+
+  // Get saved frame count for specific camera
+  uint32_t getFramesSavedForCamera(uint32_t camera_id) {
+    auto it = frames_saved_per_camera.find(camera_id);
+    return it != frames_saved_per_camera.end() ? it->second.load() : 0;
+  }
+
+  // Reset saved frame counts for all cameras
+  void resetFramesSavedCounts() {
+    for (auto& pair : frames_saved_per_camera) {
+      pair.second = 0;
+    }
+    LOG_INFO("FrameSaver", "Reset per-camera saved frame counts");
+  }
 };

@@ -9,7 +9,8 @@ using json = nlohmann::json;
 WebSocketServer::WebSocketServer() {
   camera_manager = std::make_unique<CameraManager>();
   frame_saver = std::make_unique<FrameSaver>();
-  stream_manager = std::make_unique<StreamManager>(camera_manager.get());
+  stream_manager =
+      std::make_unique<StreamManager>(camera_manager.get(), frame_saver.get());
 
   // Set up the callback for frame notifications
   camera_manager->setStreamManagerNotify([this]() {
@@ -430,6 +431,11 @@ void WebSocketServer::handleResetFrameCounts(
   LOG_INFO("WebSocketServer", "Resetting frame counts for all cameras");
 
   camera_manager->resetFrameCounts();
+
+  // Also reset frame saver counts
+  if (frame_saver) {
+    frame_saver->resetFramesSavedCounts();
+  }
 
   sendStatus(ws, "Frame counts reset for all cameras");
 }

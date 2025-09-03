@@ -133,6 +133,9 @@ void FrameSaver::start() {
   frames_checked = 0;
   checkerboards_detected = 0;
 
+  // Reset per-camera counters
+  frames_saved_per_camera.clear();
+
   if (config.mode == SaveMode::BUFFER) {
     // Reserve space for buffered frames
     std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -186,6 +189,7 @@ void FrameSaver::saveFrame(const FrameData& frame) {
     WriteTask task;
     task.filename = generateFilename(frame.camera_id, frame.frame_id);
     task.data = frame.data;
+    task.camera_id = frame.camera_id;
 
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -203,6 +207,7 @@ void FrameSaver::saveFrame(const FrameData& frame) {
       WriteTask task;
       task.filename = generateFilename(frame.camera_id, frame.frame_id);
       task.data = frame.data;
+      task.camera_id = frame.camera_id;
 
       {
         std::lock_guard<std::mutex> lock(queue_mutex);
@@ -302,6 +307,8 @@ void FrameSaver::flushBufferedFrames() {
                  frame.data.size());
       frames_saved++;
       bytes_written += frame.data.size();
+
+      frames_saved_per_camera[frame.camera_id]++;
     }
   }
 
@@ -339,6 +346,8 @@ void FrameSaver::writerThreadFunc() {
           if (written > 0) {
             bytes_written += task.data.size();
             frames_saved++;
+
+            frames_saved_per_camera[task.camera_id]++;
           }
           free(aligned_buffer);
         }

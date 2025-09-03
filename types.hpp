@@ -1,4 +1,3 @@
-// types.hpp - Updated with header only mode support
 #pragma once
 
 #include <atomic>
@@ -94,6 +93,7 @@ struct ChunkHeader {
   uint32_t bytes_per_line;
   uint32_t width;
   uint32_t height;
+  uint32_t frames_saved;
 } __attribute__((packed));
 
 struct ChunkData {
@@ -181,7 +181,7 @@ constexpr const char* CMD_START_STREAM = "start_stream";
 constexpr const char* CMD_STOP_STREAM = "stop_stream";
 constexpr const char* CMD_STOP_CAMERAS = "stop_cameras";
 constexpr const char* CMD_RESET_FRAME_COUNTS = "reset_frame_counts";
-constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";  // New command
+constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
