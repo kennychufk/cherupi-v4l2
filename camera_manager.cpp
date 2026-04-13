@@ -37,10 +37,10 @@ size_t CameraManager::discoverCameras() {
     std::string path = "/dev/" + std::string(entry->d_name);
     MediaDevice media;
     if (media.open(path)) {
-      // Check if this media device has an IMX296 sensor
-      std::string sensor_entity = media.findIMX296SensorEntity();
+      // Check if this media device has an IMX519 sensor
+      std::string sensor_entity = media.findIMX519SensorEntity();
       if (!sensor_entity.empty()) {
-        LOG_INFO("CameraManager", "Found IMX296 camera at " + path +
+        LOG_INFO("CameraManager", "Found IMX519 camera at " + path +
                                       " with sensor entity: " + sensor_entity);
         media_devices.push_back(std::move(media));
       }
@@ -51,7 +51,7 @@ size_t CameraManager::discoverCameras() {
   // Create Camera objects for each discovered device
   for (size_t i = 0; i < media_devices.size(); i++) {
     CameraConfig config = default_config;
-    config.sensor_entity = media_devices[i].findIMX296SensorEntity();
+    config.sensor_entity = media_devices[i].findIMX519SensorEntity();
 
     auto camera = std::make_unique<Camera>(i, &media_devices[i], config);
 
@@ -64,7 +64,7 @@ size_t CameraManager::discoverCameras() {
   }
 
   LOG_INFO("CameraManager", "Discovered " + std::to_string(cameras.size()) +
-                                " IMX296 camera(s)");
+                                " IMX519 camera(s)");
   return cameras.size();
 }
 

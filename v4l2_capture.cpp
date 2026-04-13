@@ -487,9 +487,9 @@ class MediaDevice {
     return "";
   }
 
-  std::string findIMX296SensorEntity() {
+  std::string findIMX519SensorEntity() {
     for (const auto& pair : entities) {
-      if (pair.first.find("imx296") != std::string::npos) {
+      if (pair.first.find("imx519") != std::string::npos) {
         return pair.first;
       }
     }
@@ -749,12 +749,12 @@ struct CameraConfig {
   std::string sensor_entity;
   std::string csi2_entity = "csi2";
   std::string video_entity = "rp1-cfe-csi2_ch0";
-  uint32_t width = 1456;
-  uint32_t height = 1088;
-  uint32_t crop_width = 1456;
-  uint32_t crop_height = 1088;
-  uint32_t crop_left = 0;
-  uint32_t crop_top = 0;
+  uint32_t width = 2328;
+  uint32_t height = 1748;
+  uint32_t crop_width = 4656;
+  uint32_t crop_height = 3496;
+  uint32_t crop_left = 8;
+  uint32_t crop_top = 48;
 };
 
 struct PreparedCamera {
@@ -817,25 +817,25 @@ bool configureCamera(MediaDevice& media, const CameraConfig& config,
             << config.crop_top << ")/" << config.crop_width << "x"
             << config.crop_height << std::endl;
 
-  // Configure formats
-  if (!media.setFormat(config.sensor_entity, 0, config.crop_width,
-                       config.crop_height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
-    std::cerr << "Failed to set sensor format to " << config.crop_width << "x"
-              << config.crop_height << std::endl;
+  // Configure formats (use output width/height - sensor handles binning)
+  if (!media.setFormat(config.sensor_entity, 0, config.width,
+                       config.height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
+    std::cerr << "Failed to set sensor format to " << config.width << "x"
+              << config.height << std::endl;
     return false;
   }
-  std::cout << "Set sensor format to " << config.crop_width << "x"
-            << config.crop_height << std::endl;
+  std::cout << "Set sensor format to " << config.width << "x"
+            << config.height << std::endl;
 
-  if (!media.setFormat(config.csi2_entity, 0, config.crop_width,
-                       config.crop_height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
+  if (!media.setFormat(config.csi2_entity, 0, config.width,
+                       config.height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
     std::cerr << "Failed to set CSI2 pad0 format" << std::endl;
     return false;
   }
   std::cout << "Set CSI2 pad0 format" << std::endl;
 
-  if (!media.setFormat(config.csi2_entity, 4, config.crop_width,
-                       config.crop_height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
+  if (!media.setFormat(config.csi2_entity, 4, config.width,
+                       config.height, MEDIA_BUS_FMT_SRGGB10_1X10)) {
     std::cerr << "Failed to set CSI2 pad4 format" << std::endl;
     return false;
   }
@@ -869,7 +869,7 @@ bool configureCamera(MediaDevice& media, const CameraConfig& config,
     return false;
   }
 
-  if (!video_device->setFormat(config.crop_width, config.crop_height,
+  if (!video_device->setFormat(config.width, config.height,
                                V4L2_PIX_FMT_SRGGB10P)) {
     std::cerr << "Failed to set video format" << std::endl;
     return false;
@@ -896,10 +896,10 @@ std::vector<MediaDevice> findAllCameras() {
     std::string path = "/dev/" + std::string(entry->d_name);
     MediaDevice media;
     if (media.open(path)) {
-      // Check if this media device has an IMX296 sensor
-      std::string sensor_entity = media.findIMX296SensorEntity();
+      // Check if this media device has an IMX519 sensor
+      std::string sensor_entity = media.findIMX519SensorEntity();
       if (!sensor_entity.empty()) {
-        std::cout << "Found IMX296 camera at " << path
+        std::cout << "Found IMX519 camera at " << path
                   << " with sensor entity: " << sensor_entity << std::endl;
         cameras.push_back(std::move(media));
       }
@@ -1036,15 +1036,15 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // Find all cameras with IMX296 sensors
+  // Find all cameras with IMX519 sensors
   std::vector<MediaDevice> cameras = findAllCameras();
 
   if (cameras.empty()) {
-    std::cerr << "No IMX296 cameras found!" << std::endl;
+    std::cerr << "No IMX519 cameras found!" << std::endl;
     return 1;
   }
 
-  std::cout << "\nFound " << cameras.size() << " IMX296 camera(s)" << std::endl;
+  std::cout << "\nFound " << cameras.size() << " IMX519 camera(s)" << std::endl;
   std::cout << "Capture mode: "
             << (mode == CaptureMode::BUFFER_ALL ? "Buffer All" : "Batch Write")
             << std::endl;
@@ -1058,7 +1058,7 @@ int main(int argc, char* argv[]) {
   }
 
   // Calculate memory requirements
-  size_t frame_size = (1456 * 1088 * 5) / 4;  // SRGGB10P format
+  size_t frame_size = (2328 * 1748 * 5) / 4;  // SRGGB10P format
   size_t total_memory_needed = frame_size * num_frames * cameras.size();
   std::cout << "Estimated memory usage: "
             << (total_memory_needed / (1024 * 1024)) << " MB" << std::endl;
@@ -1096,7 +1096,7 @@ int main(int argc, char* argv[]) {
 
     // Configure the camera
     CameraConfig config;
-    config.sensor_entity = media.findIMX296SensorEntity();
+    config.sensor_entity = media.findIMX519SensorEntity();
 
     // Configure camera and prepare video device
     std::unique_ptr<V4L2Device> video_device;

@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
   signal(SIGINT, signalHandler);
   signal(SIGTERM, signalHandler);
 
-  LOG_INFO("Main", "IMX296 Camera WebSocket Server");
+  LOG_INFO("Main", "IMX519 Camera WebSocket Server");
   LOG_INFO("Main", "==============================");
 
   try {

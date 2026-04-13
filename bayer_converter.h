@@ -8,9 +8,9 @@
 struct Config {
   std::string input_file;
   std::string output_file;
-  int width = 1456;
-  int height = 1088;
-  int stride = 1824;
+  int width = 2328;
+  int height = 1748;
+  int stride = 2910;
   bool full_res = false;
   int num_threads = 4;
   bool check_checkerboard = false;

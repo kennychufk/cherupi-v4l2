@@ -21,7 +21,7 @@ class CameraManager {
   CameraManager();
   ~CameraManager();
 
-  // Discover all IMX296 cameras (won't re-discover if already done)
+  // Discover all IMX519 cameras (won't re-discover if already done)
   size_t discoverCameras();
 
   // Configure all cameras with the same config

@@ -2,11 +2,11 @@
 
 ## Project Summary
 
-cherupi-v4l2 is a high-performance WebSocket server designed for Raspberry Pi 5 that provides real-time streaming of raw camera frames from multiple IMX296 cameras. The server handles camera discovery, configuration, streaming, and optional frame saving with a single-client architecture.
+cherupi-v4l2 is a high-performance WebSocket server designed for Raspberry Pi 5 that provides real-time streaming of raw camera frames from multiple IMX519 cameras. The server handles camera discovery, configuration, streaming, and optional frame saving with a single-client architecture.
 
 ## Key Features
 
-- **Auto-discovery** of all connected IMX296 cameras via V4L2 Media Controller API
+- **Auto-discovery** of all connected IMX519 cameras via V4L2 Media Controller API
 - **WebSocket-based control protocol** for remote camera management
 - **Real-time frame streaming** with adaptive frame skipping
 - **Multiple frame saving modes** (none, buffer, batch)
@@ -71,10 +71,10 @@ cherupi-v4l2 is a high-performance WebSocket server designed for Raspberry Pi 5 
 
 // Configure all cameras
 {"cmd": "configure", "params": {
-    "width": 1456,
-    "height": 1088,
-    "crop_width": 1456,
-    "crop_height": 1088,
+    "width": 2328,
+    "height": 1748,
+    "crop_width": 2328,
+    "crop_height": 1748,
     "crop_left": 0,
     "crop_top": 0
 }}
@@ -103,7 +103,7 @@ cherupi-v4l2 is a high-performance WebSocket server designed for Raspberry Pi 5 
 
 Text messages (JSON):
 ```json
-{"type": "discovery", "cameras": [{"id": 0, "type": "IMX296"}, ...]}
+{"type": "discovery", "cameras": [{"id": 0, "type": "IMX519"}, ...]}
 {"type": "status", "message": "..."}
 {"type": "error", "message": "..."}
 ```
@@ -171,7 +171,7 @@ IDLE → CONFIGURED → RUNNING
 ## Dependencies
 
 ### System Requirements
-- Raspberry Pi 5 with IMX296 cameras
+- Raspberry Pi 5 with IMX519 cameras
 - Linux with V4L2 and Media Controller support
 - Root/sudo access for camera control
 
@@ -188,7 +188,7 @@ IDLE → CONFIGURED → RUNNING
 ## Memory and Performance Considerations
 
 1. **Frame Size**: SRGGB10P format uses 5 bytes per 4 pixels
-   - Default 1456×1088 resolution = ~1.98 MB per frame
+   - Default 2328×1748 resolution = ~5.09 MB per frame
 
 2. **Buffer Management**:
    - V4L2 uses 4 memory-mapped buffers by default

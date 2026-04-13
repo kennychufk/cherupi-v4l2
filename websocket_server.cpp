@@ -247,7 +247,7 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
   for (size_t i = 0; i < count; i++) {
     json cam_info;
     cam_info["id"] = i;
-    cam_info["type"] = "IMX296";
+    cam_info["type"] = "IMX519";
     response["cameras"].push_back(cam_info);
   }
 

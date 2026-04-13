@@ -141,12 +141,12 @@ struct CameraConfig {
   std::string sensor_entity;
   std::string csi2_entity = "csi2";
   std::string video_entity = "rp1-cfe-csi2_ch0";
-  uint32_t width = 1456;
-  uint32_t height = 1088;
-  uint32_t crop_width = 1456;
-  uint32_t crop_height = 1088;
-  uint32_t crop_left = 0;
-  uint32_t crop_top = 0;
+  uint32_t width = 2328;
+  uint32_t height = 1748;
+  uint32_t crop_width = 4656;
+  uint32_t crop_height = 3496;
+  uint32_t crop_left = 8;
+  uint32_t crop_top = 48;
 };
 
 // Frame saving modes

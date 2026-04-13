@@ -2,6 +2,7 @@
 
 #include <linux/media.h>
 
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -40,6 +41,6 @@ class MediaDevice {
                const std::string& sink_entity, uint32_t sink_pad, bool enable);
   bool reset();
   std::string getVideoDevicePath(const std::string& entity_name);
-  std::string findIMX296SensorEntity();
+  std::string findIMX519SensorEntity();
   std::string getDevicePath() const { return device_path; }
 };

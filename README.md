@@ -1,10 +1,10 @@
-# IMX296 Camera WebSocket Server
+# IMX519 Camera WebSocket Server
 
-A high-performance WebSocket server for streaming raw frames from multiple IMX296 cameras on Raspberry Pi 5.
+A high-performance WebSocket server for streaming raw frames from multiple IMX519 cameras on Raspberry Pi 5.
 
 ## Features
 
-- Auto-discovery of all connected IMX296 cameras
+- Auto-discovery of all connected IMX519 cameras
 - Simultaneous control of multiple cameras
 - Real-time streaming of raw SRGGB10P frames over WebSocket
 - Adaptive frame skipping based on network congestion
@@ -71,10 +71,10 @@ All commands are sent as JSON text messages:
 
 // Configure all cameras (must be done before starting)
 {"cmd": "configure", "params": {
-    "width": 1456,
-    "height": 1088,
-    "crop_width": 1456,
-    "crop_height": 1088,
+    "width": 2328,
+    "height": 1748,
+    "crop_width": 2328,
+    "crop_height": 1748,
     "crop_left": 0,
     "crop_top": 0
 }}
@@ -160,7 +160,7 @@ Text messages (JSON):
 
 ```json
 // Discovery response
-{"type": "discovery", "cameras": [{"id": 0, "type": "IMX296"}, ...]}
+{"type": "discovery", "cameras": [{"id": 0, "type": "IMX519"}, ...]}
 
 // Status message
 {"type": "status", "message": "..."}
@@ -242,7 +242,7 @@ async def client():
         # Configure cameras
         await websocket.send(json.dumps({
             "cmd": "configure",
-            "params": {"width": 1456, "height": 1088}
+            "params": {"width": 2328, "height": 1748}
         }))
         await websocket.recv()
         

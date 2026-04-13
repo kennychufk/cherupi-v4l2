@@ -24,34 +24,35 @@ bool Camera::configure(size_t buffer_count) {
     return false;
   }
 
-  // Set sensor crop
+  // Set sensor crop (optional - IMX519 does not support S_SELECTION,
+  // it selects mode based on format resolution instead)
   if (!media_device->setCrop(config.sensor_entity, 0, config.crop_left,
                              config.crop_top, config.crop_width,
                              config.crop_height)) {
-    LOG_ERROR("Camera", "Failed to set sensor crop for camera " +
-                            std::to_string(camera_id));
-    return false;
+    LOG_WARN("Camera", "Sensor crop not supported for camera " +
+                           std::to_string(camera_id) +
+                           ", skipping (sensor selects mode via format)");
   }
 
-  // Configure formats
-  if (!media_device->setFormat(config.sensor_entity, 0, config.crop_width,
-                               config.crop_height,
+  // Configure formats (use output width/height - sensor handles binning)
+  if (!media_device->setFormat(config.sensor_entity, 0, config.width,
+                               config.height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
     LOG_ERROR("Camera", "Failed to set sensor format for camera " +
                             std::to_string(camera_id));
     return false;
   }
 
-  if (!media_device->setFormat(config.csi2_entity, 0, config.crop_width,
-                               config.crop_height,
+  if (!media_device->setFormat(config.csi2_entity, 0, config.width,
+                               config.height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
     LOG_ERROR("Camera", "Failed to set CSI2 pad0 format for camera " +
                             std::to_string(camera_id));
     return false;
   }
 
-  if (!media_device->setFormat(config.csi2_entity, 4, config.crop_width,
-                               config.crop_height,
+  if (!media_device->setFormat(config.csi2_entity, 4, config.width,
+                               config.height,
                                MEDIA_BUS_FMT_SRGGB10_1X10)) {
     LOG_ERROR("Camera", "Failed to set CSI2 pad4 format for camera " +
                             std::to_string(camera_id));
@@ -90,7 +91,7 @@ bool Camera::configure(size_t buffer_count) {
     return false;
   }
 
-  if (!video_device->setFormat(config.crop_width, config.crop_height,
+  if (!video_device->setFormat(config.width, config.height,
                                V4L2_PIX_FMT_SRGGB10P)) {
     LOG_ERROR("Camera", "Failed to set video format for camera " +
                             std::to_string(camera_id));

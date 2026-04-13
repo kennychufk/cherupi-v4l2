@@ -381,9 +381,9 @@ std::string MediaDevice::getVideoDevicePath(const std::string& entity_name) {
   return "";
 }
 
-std::string MediaDevice::findIMX296SensorEntity() {
+std::string MediaDevice::findIMX519SensorEntity() {
   for (const auto& pair : entities) {
-    if (pair.first.find("imx296") != std::string::npos) {
+    if (pair.first.find("imx519") != std::string::npos) {
       return pair.first;
     }
   }
