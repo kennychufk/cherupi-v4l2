@@ -356,6 +356,12 @@ bool MediaDevice::reset() {
   return true;
 }
 
+std::string MediaDevice::getSubdevPath(const std::string& entity_name) {
+  media_entity_desc entity;
+  if (!getEntityByName(entity_name, entity)) return "";
+  return findDeviceNode(entity.v4l.major, entity.v4l.minor);
+}
+
 std::string MediaDevice::getVideoDevicePath(const std::string& entity_name) {
   media_entity_desc entity;
   if (getEntityByName(entity_name, entity)) {
@@ -378,6 +384,84 @@ std::string MediaDevice::getVideoDevicePath(const std::string& entity_name) {
     }
     closedir(dir);
   }
+  return "";
+}
+
+std::string MediaDevice::getVideoNodeForPad(const std::string& entity_name,
+                                            uint32_t pad) {
+  media_entity_desc entity;
+  if (!getEntityByName(entity_name, entity)) {
+    std::cerr << "Entity not found: " << entity_name << std::endl;
+    return "";
+  }
+
+  // First call sizes the link table; we then allocate and call again.
+  struct media_links_enum links_enum;
+  memset(&links_enum, 0, sizeof(links_enum));
+  links_enum.entity = entity.id;
+  if (ioctl(fd, MEDIA_IOC_ENUM_LINKS, &links_enum) < 0) {
+    std::cerr << "MEDIA_IOC_ENUM_LINKS failed for " << entity_name << ": "
+              << strerror(errno) << std::endl;
+    return "";
+  }
+
+  __u32 pads_count = entity.pads;
+  __u32 links_count = entity.links;
+  if (links_count == 0) return "";
+
+  std::vector<media_pad_desc> pad_descs(pads_count);
+  std::vector<media_link_desc> link_descs(links_count);
+  links_enum.pads = pad_descs.data();
+  links_enum.links = link_descs.data();
+
+  if (ioctl(fd, MEDIA_IOC_ENUM_LINKS, &links_enum) < 0) {
+    std::cerr << "MEDIA_IOC_ENUM_LINKS (populate) failed: " << strerror(errno)
+              << std::endl;
+    return "";
+  }
+
+  // First pass: check links originating from entity's source pads.
+  for (const auto& link : link_descs) {
+    uint32_t peer_id = 0;
+    if (link.source.entity == entity.id && link.source.index == pad) {
+      peer_id = link.sink.entity;
+    } else if (link.sink.entity == entity.id && link.sink.index == pad) {
+      peer_id = link.source.entity;
+    } else {
+      continue;
+    }
+    auto it = entities_by_id.find(peer_id);
+    if (it == entities_by_id.end()) continue;
+    std::string path = getVideoDevicePath(it->second.name);
+    if (!path.empty()) return path;
+  }
+
+  // Fallback: some kernels only return outgoing links from ENUM_LINKS on a
+  // given entity. For sink pads (e.g. pisp-fe:1) we must walk the other
+  // entities and look for one whose source points at us.
+  for (const auto& kv : entities_by_id) {
+    const auto& peer = kv.second;
+    if (peer.id == entity.id) continue;
+
+    struct media_links_enum pe;
+    memset(&pe, 0, sizeof(pe));
+    pe.entity = peer.id;
+    if (ioctl(fd, MEDIA_IOC_ENUM_LINKS, &pe) < 0) continue;
+    if (peer.links == 0) continue;
+    std::vector<media_pad_desc> pds(peer.pads);
+    std::vector<media_link_desc> lds(peer.links);
+    pe.pads = pds.data();
+    pe.links = lds.data();
+    if (ioctl(fd, MEDIA_IOC_ENUM_LINKS, &pe) < 0) continue;
+    for (const auto& l : lds) {
+      bool hit = (l.source.entity == entity.id && l.source.index == pad) ||
+                 (l.sink.entity == entity.id && l.sink.index == pad);
+      if (!hit) continue;
+      std::string path = getVideoDevicePath(peer.name);
+      if (!path.empty()) return path;
+    }
+  }
+
   return "";
 }
 

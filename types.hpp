@@ -94,6 +94,9 @@ struct ChunkHeader {
   uint32_t width;
   uint32_t height;
   uint32_t frames_saved;
+  float awb_gain_r;
+  float awb_gain_b;
+  float awb_cct;
 } __attribute__((packed));
 
 struct ChunkData {
@@ -112,6 +115,9 @@ struct FrameData {
   uint32_t width;
   uint32_t height;
   uint32_t bytes_per_line;
+  float awb_gain_r = 1.0f;
+  float awb_gain_b = 1.0f;
+  float awb_cct = 0.0f;
 
   // Deep copy constructor
   FrameData() = default;
@@ -121,7 +127,10 @@ struct FrameData {
         camera_id(other.camera_id),
         width(other.width),
         height(other.height),
-        bytes_per_line(other.bytes_per_line) {}
+        bytes_per_line(other.bytes_per_line),
+        awb_gain_r(other.awb_gain_r),
+        awb_gain_b(other.awb_gain_b),
+        awb_cct(other.awb_cct) {}
 
   FrameData& operator=(const FrameData& other) {
     if (this != &other) {
@@ -131,9 +140,30 @@ struct FrameData {
       width = other.width;
       height = other.height;
       bytes_per_line = other.bytes_per_line;
+      awb_gain_r = other.awb_gain_r;
+      awb_gain_b = other.awb_gain_b;
+      awb_cct = other.awb_cct;
     }
     return *this;
   }
+};
+
+// AWB configuration. The mode selects between the existing CPU grey-world
+// estimator and the Bayesian estimator driven by PiSP Frontend stats.
+// Stage 1 scaffolding: Bayes mode is wired through the type system but the
+// estimator itself is still a stub — GREY_WORLD remains the default.
+enum class AwbMode {
+  GREY_WORLD,  // Subsampled Minkowski-norm from SRGGB10P (CPU, current prod).
+  BAYES,       // Libcamera-style Bayesian from pisp_awb_statistics.
+};
+
+struct AwbConfig {
+  bool enabled = true;
+  AwbMode mode = AwbMode::GREY_WORLD;
+  int interval = 10;       // Grey-world: recompute gains every N frames.
+  int period = 3;          // Bayes: run estimator every N FE stats frames.
+  float speed = 0.05f;     // IIR smoothing factor (post-warmup).
+  int warmup_frames = 10;  // Fast convergence for first N frames.
 };
 
 // Camera configuration
@@ -147,6 +177,7 @@ struct CameraConfig {
   uint32_t crop_height = 3496;
   uint32_t crop_left = 8;
   uint32_t crop_top = 48;
+  AwbConfig awb;
 };
 
 // Frame saving modes

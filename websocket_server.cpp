@@ -274,6 +274,16 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
   if (params.contains("crop_left")) config.crop_left = params["crop_left"];
   if (params.contains("crop_top")) config.crop_top = params["crop_top"];
 
+  // Optional AWB sub-config
+  if (params.contains("awb") && params["awb"].is_object()) {
+    const json& a = params["awb"];
+    if (a.contains("enabled")) config.awb.enabled = a["enabled"];
+    if (a.contains("interval")) config.awb.interval = a["interval"];
+    if (a.contains("speed")) config.awb.speed = a["speed"];
+    if (a.contains("warmup_frames"))
+      config.awb.warmup_frames = a["warmup_frames"];
+  }
+
   LOG_INFO("WebSocketServer", "Configuring cameras with resolution " +
                                   std::to_string(config.width) + "x" +
                                   std::to_string(config.height));

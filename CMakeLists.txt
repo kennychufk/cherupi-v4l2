@@ -12,6 +12,8 @@ find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PISP REQUIRED libpisp)
 
 # Set FetchContent properties
 set(FETCHCONTENT_QUIET OFF)
@@ -105,6 +107,10 @@ set(SOURCES
     stream_manager.cpp
     bayer_converter.cpp
     checkerboard_detector.cpp
+    awb_processor.cpp
+    awb_bayes.cpp
+    fe_configurator.cpp
+    pwl.cpp
 )
 
 # Header files
@@ -119,13 +125,21 @@ set(HEADERS
     stream_manager.hpp
     bayer_converter.h
     checkerboard_detector.h
+    awb_processor.hpp
+    awb_bayes.hpp
+    fe_configurator.hpp
+    pwl.hpp
 )
 
 # Create executable
 add_executable(camera_ws_server ${SOURCES} ${HEADERS})
 
 # Include nlohmann/json headers
-target_include_directories(camera_ws_server PRIVATE ${json_SOURCE_DIR}/include)
+target_include_directories(camera_ws_server PRIVATE
+    ${json_SOURCE_DIR}/include
+    ${PISP_INCLUDE_DIRS}
+)
+target_compile_options(camera_ws_server PRIVATE ${PISP_CFLAGS_OTHER})
 
 # Link libraries
 target_link_libraries(camera_ws_server
@@ -134,7 +148,9 @@ target_link_libraries(camera_ws_server
     uSockets
     nlohmann_json::nlohmann_json
     ${OpenCV_LIBS}
+    ${PISP_LIBRARIES}
 )
+target_link_directories(camera_ws_server PRIVATE ${PISP_LIBRARY_DIRS})
 
 # Compiler flags - optimize for Raspberry Pi 5 (Cortex-A76)
 target_compile_options(camera_ws_server PRIVATE
@@ -149,6 +165,35 @@ target_compile_options(camera_ws_server PRIVATE
 )
 
 add_executable(v4l2_capture v4l2_capture.cpp)
+
+# Stage 3 smoke test — drives Camera directly, no websockets.
+add_executable(test_fe_pipeline
+    test_fe_pipeline.cpp
+    camera.cpp
+    camera_manager.cpp
+    media_device.cpp
+    v4l2_device.cpp
+    stream_manager.cpp
+    frame_saver.cpp
+    bayer_converter.cpp
+    checkerboard_detector.cpp
+    awb_processor.cpp
+    awb_bayes.cpp
+    fe_configurator.cpp
+    pwl.cpp
+)
+target_include_directories(test_fe_pipeline PRIVATE
+    ${json_SOURCE_DIR}/include
+    ${PISP_INCLUDE_DIRS}
+)
+target_link_libraries(test_fe_pipeline
+    ${CMAKE_THREAD_LIBS_INIT}
+    ZLIB::ZLIB
+    uSockets
+    ${OpenCV_LIBS}
+    ${PISP_LIBRARIES}
+)
+target_link_directories(test_fe_pipeline PRIVATE ${PISP_LIBRARY_DIRS})
 
 # Installation
 install(TARGETS camera_ws_server

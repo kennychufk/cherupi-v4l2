@@ -41,6 +41,14 @@ class MediaDevice {
                const std::string& sink_entity, uint32_t sink_pad, bool enable);
   bool reset();
   std::string getVideoDevicePath(const std::string& entity_name);
+
+  // Follow the media-graph link on `entity_name:pad` and return the
+  // `/dev/videoN` path of the video-node entity on the other side. Works for
+  // both source pads (e.g. pisp-fe:2 -> fe_image0) and sink pads
+  // (e.g. pisp-fe:1 <- fe_config). Returns "" if no video node is linked.
+  std::string getVideoNodeForPad(const std::string& entity_name, uint32_t pad);
+
   std::string findIMX519SensorEntity();
+  std::string getSubdevPath(const std::string& entity_name);
   std::string getDevicePath() const { return device_path; }
 };

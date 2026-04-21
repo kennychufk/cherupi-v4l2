@@ -7,6 +7,10 @@
 #include <mutex>
 #include <thread>
 
+#include "awb_bayes.hpp"
+#include "awb_processor.hpp"
+#include "fe_configurator.hpp"
+#include "frontend/pisp_statistics.h"
 #include "media_device.hpp"
 #include "types.hpp"
 #include "v4l2_device.hpp"
@@ -16,6 +20,13 @@ class Camera {
   uint32_t camera_id;
   MediaDevice* media_device;  // Non-owning pointer
   std::unique_ptr<V4L2Device> video_device;
+  // Bayes pipeline devices — only populated when AwbMode::BAYES is active
+  // and the FE reroute in configure() succeeds. Otherwise null, and the
+  // grey-world single-device path runs on video_device alone.
+  std::unique_ptr<V4L2Device> stats_device;
+  std::unique_ptr<V4L2Device> fe_config_device;
+  std::unique_ptr<FeConfigurator> fe_configurator;
+  bool bayes_pipeline_active = false;
   CameraConfig config;
 
   std::atomic<CameraState> state{CameraState::IDLE};
@@ -36,13 +47,29 @@ class Camera {
   std::unique_ptr<std::thread> capture_thread;
   std::atomic<bool> should_stop{false};
 
+  // Per-camera AWB — grey-world by default, bayes when enabled.
+  AwbProcessor awb;
+  AwbBayes awb_bayes;
+
+  // Sensor subdevice for reading exposure/gain controls (lux estimation).
+  std::string sensor_subdev_path_;
+  int sensor_subdev_fd_ = -1;
+  double sensor_line_time_us_ = 0.0;  // µs per exposure line
+
   void captureLoop();
+  void captureLoopBayes();
+  bool configureBayesPipeline(size_t buffer_count);
+  double readSensorLux(const pisp_statistics& stats) const;
 
  public:
   Camera(uint32_t id, MediaDevice* media_dev, const CameraConfig& cfg);
   ~Camera();
 
   bool configure(size_t buffer_count = 4);
+  void setAwbConfig(const AwbConfig& cfg) {
+    config.awb = cfg;
+    awb.setConfig(cfg);
+  }
   bool start();
   bool stop();
 

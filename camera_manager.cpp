@@ -97,6 +97,9 @@ bool CameraManager::configureAll(const CameraConfig& config,
     CameraConfig cam_config = config;
     cam_config.sensor_entity = camera->getConfig().sensor_entity;
 
+    // Propagate AWB sub-config to this camera's processor.
+    camera->setAwbConfig(config.awb);
+
     LOG_INFO("CameraManager",
              "Configuring camera " + std::to_string(camera->getId()));
     if (!camera->configure(buffer_count)) {

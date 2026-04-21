@@ -491,6 +491,11 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
           ? frame_saver->getFramesSavedForCamera(transfer.frame.camera_id)
           : 0;
 
+  // AWB gains + CCT stamped by the camera capture thread.
+  header.awb_gain_r = transfer.frame.awb_gain_r;
+  header.awb_gain_b = transfer.frame.awb_gain_b;
+  header.awb_cct = transfer.frame.awb_cct;
+
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,
                  header_bytes + sizeof(ChunkHeader));

@@ -141,6 +141,8 @@ void FrameSaver::start() {
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
     buffered_frames.reserve(10000);  // Reserve space for many frames
+    buffered_awb_records.clear();
+    buffered_awb_records.reserve(10000);
   } else if (config.mode == SaveMode::BATCH ||
              config.mode == SaveMode::CHECKERBOARD) {
     // Start writer threads
@@ -170,6 +172,8 @@ void FrameSaver::stop() {
     writer_threads.clear();
   }
 
+  closeAwbSidecars();
+
   // Log checkerboard detection statistics
   if (config.mode == SaveMode::CHECKERBOARD && frames_checked > 0) {
     std::cout << "Checkerboard detection stats: " << checkerboards_detected
@@ -185,11 +189,18 @@ void FrameSaver::saveFrame(const FrameData& frame) {
   if (config.mode == SaveMode::BUFFER) {
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.push_back(frame);
+    buffered_awb_records.push_back({frame.frame_id, frame.camera_id,
+                                    frame.awb_gain_r, frame.awb_gain_b,
+                                    frame.awb_cct});
   } else if (config.mode == SaveMode::BATCH) {
     WriteTask task;
     task.filename = generateFilename(frame.camera_id, frame.frame_id);
     task.data = frame.data;
     task.camera_id = frame.camera_id;
+    task.frame_id = frame.frame_id;
+    task.awb_gain_r = frame.awb_gain_r;
+    task.awb_gain_b = frame.awb_gain_b;
+    task.awb_cct = frame.awb_cct;
 
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -208,6 +219,10 @@ void FrameSaver::saveFrame(const FrameData& frame) {
       task.filename = generateFilename(frame.camera_id, frame.frame_id);
       task.data = frame.data;
       task.camera_id = frame.camera_id;
+      task.frame_id = frame.frame_id;
+      task.awb_gain_r = frame.awb_gain_r;
+      task.awb_gain_b = frame.awb_gain_b;
+      task.awb_cct = frame.awb_cct;
 
       {
         std::lock_guard<std::mutex> lock(queue_mutex);
@@ -313,6 +328,25 @@ void FrameSaver::flushBufferedFrames() {
   }
 
   buffered_frames.clear();
+
+  // Flush per-camera AWB sidecars from the buffered records.
+  std::unordered_map<uint32_t, std::ofstream> awb_files;
+  for (const auto& rec : buffered_awb_records) {
+    auto it = awb_files.find(rec.camera_id);
+    if (it == awb_files.end()) {
+      std::stringstream ss;
+      ss << actual_output_dir << "/cam" << rec.camera_id << "_awb.bin";
+      auto [ins, _] = awb_files.emplace(
+          rec.camera_id,
+          std::ofstream(ss.str(), std::ios::binary | std::ios::app));
+      it = ins;
+    }
+    if (it->second) {
+      it->second.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
+    }
+  }
+  buffered_awb_records.clear();
+
   std::cout << "Finished writing buffered frames" << std::endl;
 }
 
@@ -348,6 +382,7 @@ void FrameSaver::writerThreadFunc() {
             frames_saved++;
 
             frames_saved_per_camera[task.camera_id]++;
+            writeAwbRecord(task);
           }
           free(aligned_buffer);
         }
@@ -355,6 +390,40 @@ void FrameSaver::writerThreadFunc() {
       }
     }
   }
+}
+
+void FrameSaver::writeAwbRecord(const WriteTask& task) {
+  AwbRecord rec{task.frame_id, task.camera_id, task.awb_gain_r,
+                task.awb_gain_b, task.awb_cct};
+
+  std::lock_guard<std::mutex> lock(awb_sidecar_mutex);
+  auto it = awb_sidecar_fds.find(task.camera_id);
+  int fd = -1;
+  if (it == awb_sidecar_fds.end()) {
+    std::stringstream ss;
+    ss << actual_output_dir << "/cam" << task.camera_id << "_awb.bin";
+    fd = ::open(ss.str().c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+      LOG_WARN("FrameSaver", "Failed to open AWB sidecar: " + ss.str());
+      return;
+    }
+    awb_sidecar_fds[task.camera_id] = fd;
+  } else {
+    fd = it->second;
+  }
+
+  ssize_t n = write(fd, &rec, sizeof(rec));
+  if (n != static_cast<ssize_t>(sizeof(rec))) {
+    LOG_WARN("FrameSaver", "Short write on AWB sidecar");
+  }
+}
+
+void FrameSaver::closeAwbSidecars() {
+  std::lock_guard<std::mutex> lock(awb_sidecar_mutex);
+  for (auto& kv : awb_sidecar_fds) {
+    if (kv.second >= 0) close(kv.second);
+  }
+  awb_sidecar_fds.clear();
 }
 
 std::string FrameSaver::generateFilename(uint32_t camera_id,
