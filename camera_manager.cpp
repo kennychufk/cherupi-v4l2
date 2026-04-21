@@ -1,70 +1,53 @@
 #include "camera_manager.hpp"
 
-#include <dirent.h>
-
-#include <cstring>
-#include <iostream>
+#include <algorithm>
 
 CameraManager::CameraManager() {
-  // Constructor
+  lcam_manager = std::make_unique<libcamera::CameraManager>();
 }
 
 CameraManager::~CameraManager() {
-  // Destructor - ensure cleanup
   stopAll();
+  cameras.clear();
+  if (lcam_manager) lcam_manager->stop();
 }
 
 size_t CameraManager::discoverCameras() {
-  // If cameras are already discovered and running, just return the count
   if (!cameras.empty()) {
     LOG_INFO("CameraManager",
-             "Cameras already discovered, returning existing count: " +
-                 std::to_string(cameras.size()));
+             "Cameras already discovered: " + std::to_string(cameras.size()));
     return cameras.size();
   }
 
-  // Only do actual discovery if no cameras exist
-  cameras.clear();
-  media_devices.clear();
-
-  DIR* dir = opendir("/dev");
-  if (!dir) return 0;
-
-  struct dirent* entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    if (strncmp(entry->d_name, "media", 5) != 0) continue;
-
-    std::string path = "/dev/" + std::string(entry->d_name);
-    MediaDevice media;
-    if (media.open(path)) {
-      // Check if this media device has an IMX519 sensor
-      std::string sensor_entity = media.findIMX519SensorEntity();
-      if (!sensor_entity.empty()) {
-        LOG_INFO("CameraManager", "Found IMX519 camera at " + path +
-                                      " with sensor entity: " + sensor_entity);
-        media_devices.push_back(std::move(media));
-      }
-    }
+  if (lcam_manager->start() < 0) {
+    LOG_ERROR("CameraManager", "Failed to start libcamera CameraManager");
+    return 0;
   }
-  closedir(dir);
 
-  // Create Camera objects for each discovered device
-  for (size_t i = 0; i < media_devices.size(); i++) {
-    CameraConfig config = default_config;
-    config.sensor_entity = media_devices[i].findIMX519SensorEntity();
+  uint32_t id = 0;
+  for (auto& lcam : lcam_manager->cameras()) {
+    // Filter to IMX519 cameras by model property.
+    auto model = lcam->properties().get(libcamera::properties::Model);
+    if (!model) continue;
+    std::string model_str(model->begin(), model->end());
+    // Convert to lower-case for comparison.
+    std::string lower = model_str;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    if (lower.find("imx519") == std::string::npos) continue;
 
-    auto camera = std::make_unique<Camera>(i, &media_devices[i], config);
+    LOG_INFO("CameraManager",
+             "Found IMX519 camera: id=" + lcam->id() + " model=" + model_str);
 
-    // Set frame available callback to notify stream manager
+    auto cam = std::make_unique<Camera>(id, lcam, default_config);
     if (stream_manager_notify) {
-      camera->setFrameAvailableCallback(stream_manager_notify);
+      cam->setFrameAvailableCallback(stream_manager_notify);
     }
-
-    cameras.push_back(std::move(camera));
+    cameras.push_back(std::move(cam));
+    ++id;
   }
 
-  LOG_INFO("CameraManager", "Discovered " + std::to_string(cameras.size()) +
-                                " IMX519 camera(s)");
+  LOG_INFO("CameraManager",
+           "Discovered " + std::to_string(cameras.size()) + " IMX519 camera(s)");
   return cameras.size();
 }
 
@@ -75,31 +58,18 @@ bool CameraManager::configureAll(const CameraConfig& config,
     return false;
   }
 
-  // Check if cameras are already running
-  bool any_running = false;
   for (const auto& camera : cameras) {
     if (camera->getState() == CameraState::RUNNING) {
-      any_running = true;
-      break;
+      LOG_WARN("CameraManager",
+               "Cannot configure cameras while they are running");
+      return false;
     }
   }
 
-  if (any_running) {
-    LOG_WARN("CameraManager",
-             "Cannot configure cameras while they are running");
-    return false;
-  }
-
-  // Update default config
   default_config = config;
 
   for (auto& camera : cameras) {
-    CameraConfig cam_config = config;
-    cam_config.sensor_entity = camera->getConfig().sensor_entity;
-
-    // Propagate AWB sub-config to this camera's processor.
     camera->setAwbConfig(config.awb);
-
     LOG_INFO("CameraManager",
              "Configuring camera " + std::to_string(camera->getId()));
     if (!camera->configure(buffer_count)) {
@@ -108,7 +78,6 @@ bool CameraManager::configureAll(const CameraConfig& config,
       return false;
     }
   }
-
   return true;
 }
 
@@ -119,83 +88,58 @@ bool CameraManager::startAll() {
     if (!camera->start()) {
       LOG_ERROR("CameraManager",
                 "Failed to start camera " + std::to_string(camera->getId()));
-      // Stop all cameras if one fails
       stopAll();
       return false;
     }
   }
-
   LOG_INFO("CameraManager", "All cameras started successfully");
   return true;
 }
 
 bool CameraManager::stopAll() {
-  bool all_success = true;
-
+  bool all_ok = true;
   for (auto& camera : cameras) {
     LOG_INFO("CameraManager",
              "Stopping camera " + std::to_string(camera->getId()));
     if (!camera->stop()) {
       LOG_ERROR("CameraManager",
                 "Failed to stop camera " + std::to_string(camera->getId()));
-      all_success = false;
+      all_ok = false;
     }
   }
-
-  return all_success;
+  return all_ok;
 }
 
 Camera* CameraManager::getCamera(uint32_t camera_id) {
-  if (camera_id >= cameras.size()) {
-    return nullptr;
-  }
+  if (camera_id >= cameras.size()) return nullptr;
   return cameras[camera_id].get();
 }
 
 std::vector<Camera*> CameraManager::getAllCameras() {
   std::vector<Camera*> result;
-  for (auto& camera : cameras) {
-    result.push_back(camera.get());
-  }
+  for (auto& cam : cameras) result.push_back(cam.get());
   return result;
 }
 
 void CameraManager::setFrameCallback(
     std::function<void(const FrameData&)> callback) {
-  for (auto& camera : cameras) {
-    camera->onFrameCaptured = callback;
-  }
-
-  if (callback) {
-    LOG_INFO("CameraManager", "Frame callback set for all cameras");
-  } else {
-    LOG_INFO("CameraManager", "Frame callback cleared for all cameras");
-  }
+  for (auto& camera : cameras) camera->onFrameCaptured = callback;
 }
 
 void CameraManager::setStreamManagerNotify(std::function<void()> callback) {
   stream_manager_notify = callback;
-
-  // Update existing cameras
-  for (auto& camera : cameras) {
-    camera->setFrameAvailableCallback(callback);
-  }
+  for (auto& camera : cameras) camera->setFrameAvailableCallback(callback);
 }
 
 bool CameraManager::areAnyRunning() const {
   for (const auto& camera : cameras) {
-    if (camera->getState() == CameraState::RUNNING) {
-      return true;
-    }
+    if (camera->getState() == CameraState::RUNNING) return true;
   }
   return false;
 }
 
 void CameraManager::resetFrameCounts() {
-  for (auto& camera : cameras) {
-    camera->resetFrameCounts();
-  }
-
+  for (auto& camera : cameras) camera->resetFrameCounts();
   LOG_INFO("CameraManager", "Reset frame counts for all " +
                                 std::to_string(cameras.size()) + " cameras");
 }

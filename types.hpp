@@ -148,29 +148,17 @@ struct FrameData {
   }
 };
 
-// AWB configuration. The mode selects between the existing CPU grey-world
-// estimator and the Bayesian estimator driven by PiSP Frontend stats.
-// Stage 1 scaffolding: Bayes mode is wired through the type system but the
-// estimator itself is still a stub — GREY_WORLD remains the default.
-enum class AwbMode {
-  GREY_WORLD,  // Subsampled Minkowski-norm from SRGGB10P (CPU, current prod).
-  BAYES,       // Libcamera-style Bayesian from pisp_awb_statistics.
-};
-
+// AWB configuration (libcamera IPA runs AWB internally; these fields are
+// accepted from the client for protocol compatibility but not used).
 struct AwbConfig {
   bool enabled = true;
-  AwbMode mode = AwbMode::GREY_WORLD;
-  int interval = 10;       // Grey-world: recompute gains every N frames.
-  int period = 3;          // Bayes: run estimator every N FE stats frames.
-  float speed = 0.05f;     // IIR smoothing factor (post-warmup).
-  int warmup_frames = 10;  // Fast convergence for first N frames.
+  int interval = 10;
+  float speed = 0.05f;
+  int warmup_frames = 10;
 };
 
 // Camera configuration
 struct CameraConfig {
-  std::string sensor_entity;
-  std::string csi2_entity = "csi2";
-  std::string video_entity = "rp1-cfe-csi2_ch0";
   uint32_t width = 2328;
   uint32_t height = 1748;
   uint32_t crop_width = 4656;
