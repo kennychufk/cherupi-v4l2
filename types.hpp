@@ -69,19 +69,10 @@ class Logger {
 #define LOG_INFO(component, msg) Logger::log(LogLevel::INFO, component, msg)
 #define LOG_DEBUG(component, msg) Logger::log(LogLevel::DEBUG, component, msg)
 
-// Frame metadata structure (packed for network transmission)
-struct FrameHeader {
-  uint32_t frame_id;
-  uint32_t camera_id;
-  uint32_t bytes_per_line;
-  uint32_t width;
-  uint32_t height;
-} __attribute__((packed));
-
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 1;
+  uint32_t version = 2;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -93,10 +84,8 @@ struct ChunkHeader {
   uint32_t bytes_per_line;
   uint32_t width;
   uint32_t height;
+  uint32_t pixel_format;  // FourCC (e.g. YUV420 = V4L2_PIX_FMT_YUV420)
   uint32_t frames_saved;
-  float awb_gain_r;
-  float awb_gain_b;
-  float awb_cct;
 } __attribute__((packed));
 
 struct ChunkData {
@@ -110,16 +99,13 @@ struct ChunkData {
 // Frame data structure for internal use
 struct FrameData {
   std::vector<uint8_t> data;
-  uint32_t frame_id;
-  uint32_t camera_id;
-  uint32_t width;
-  uint32_t height;
-  uint32_t bytes_per_line;
-  float awb_gain_r = 1.0f;
-  float awb_gain_b = 1.0f;
-  float awb_cct = 0.0f;
+  uint32_t frame_id = 0;
+  uint32_t camera_id = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t bytes_per_line = 0;
+  uint32_t pixel_format = 0;  // FourCC
 
-  // Deep copy constructor
   FrameData() = default;
   FrameData(const FrameData& other)
       : data(other.data),
@@ -128,9 +114,7 @@ struct FrameData {
         width(other.width),
         height(other.height),
         bytes_per_line(other.bytes_per_line),
-        awb_gain_r(other.awb_gain_r),
-        awb_gain_b(other.awb_gain_b),
-        awb_cct(other.awb_cct) {}
+        pixel_format(other.pixel_format) {}
 
   FrameData& operator=(const FrameData& other) {
     if (this != &other) {
@@ -140,9 +124,7 @@ struct FrameData {
       width = other.width;
       height = other.height;
       bytes_per_line = other.bytes_per_line;
-      awb_gain_r = other.awb_gain_r;
-      awb_gain_b = other.awb_gain_b;
-      awb_cct = other.awb_cct;
+      pixel_format = other.pixel_format;
     }
     return *this;
   }

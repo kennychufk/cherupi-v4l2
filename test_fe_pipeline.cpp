@@ -52,9 +52,8 @@ int main(int argc, char** argv) {
     if (cam->getFrameForStreaming(frame)) {
       LOG_INFO("Test", "frame " + std::to_string(frame.frame_id) + " size=" +
                            std::to_string(frame.data.size()) +
-                           " awb_r=" + std::to_string(frame.awb_gain_r) +
-                           " awb_b=" + std::to_string(frame.awb_gain_b) +
-                           " cct=" + std::to_string(frame.awb_cct));
+                           " fmt=0x" +
+                           [&]{ std::ostringstream s; s << std::hex << frame.pixel_format; return s.str(); }());
       cam->releaseStreamingFrame();
       ++received;
     }

@@ -54,8 +54,14 @@ class Camera {
     void* data = MAP_FAILED;
     size_t size = 0;
   };
+  struct MmapRegion {
+    void* base = MAP_FAILED;
+    size_t size = 0;
+  };
   // Indexed by request/buffer slot, then plane index.
   std::vector<std::vector<MappedPlane>> mapped_planes;
+  // Actual mmap regions to unmap (one per unique fd per buffer slot).
+  std::vector<std::vector<MmapRegion>> mmap_regions;
 
   CameraConfig config;
   std::atomic<CameraState> state{CameraState::IDLE};

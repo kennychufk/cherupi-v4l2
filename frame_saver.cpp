@@ -140,9 +140,7 @@ void FrameSaver::start() {
     // Reserve space for buffered frames
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
-    buffered_frames.reserve(10000);  // Reserve space for many frames
-    buffered_awb_records.clear();
-    buffered_awb_records.reserve(10000);
+    buffered_frames.reserve(10000);
   } else if (config.mode == SaveMode::BATCH ||
              config.mode == SaveMode::CHECKERBOARD) {
     // Start writer threads
@@ -172,8 +170,6 @@ void FrameSaver::stop() {
     writer_threads.clear();
   }
 
-  closeAwbSidecars();
-
   // Log checkerboard detection statistics
   if (config.mode == SaveMode::CHECKERBOARD && frames_checked > 0) {
     std::cout << "Checkerboard detection stats: " << checkerboards_detected
@@ -189,18 +185,12 @@ void FrameSaver::saveFrame(const FrameData& frame) {
   if (config.mode == SaveMode::BUFFER) {
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.push_back(frame);
-    buffered_awb_records.push_back({frame.frame_id, frame.camera_id,
-                                    frame.awb_gain_r, frame.awb_gain_b,
-                                    frame.awb_cct});
   } else if (config.mode == SaveMode::BATCH) {
     WriteTask task;
     task.filename = generateFilename(frame.camera_id, frame.frame_id);
     task.data = frame.data;
     task.camera_id = frame.camera_id;
     task.frame_id = frame.frame_id;
-    task.awb_gain_r = frame.awb_gain_r;
-    task.awb_gain_b = frame.awb_gain_b;
-    task.awb_cct = frame.awb_cct;
 
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -210,19 +200,14 @@ void FrameSaver::saveFrame(const FrameData& frame) {
   } else if (config.mode == SaveMode::CHECKERBOARD) {
     frames_checked++;
 
-    // Check if frame contains checkerboard
     if (detectCheckerboard(frame)) {
       checkerboards_detected++;
 
-      // Save the original raw frame
       WriteTask task;
       task.filename = generateFilename(frame.camera_id, frame.frame_id);
       task.data = frame.data;
       task.camera_id = frame.camera_id;
       task.frame_id = frame.frame_id;
-      task.awb_gain_r = frame.awb_gain_r;
-      task.awb_gain_b = frame.awb_gain_b;
-      task.awb_cct = frame.awb_cct;
 
       {
         std::lock_guard<std::mutex> lock(queue_mutex);
@@ -234,61 +219,43 @@ void FrameSaver::saveFrame(const FrameData& frame) {
 }
 
 bool FrameSaver::detectCheckerboard(const FrameData& frame) {
-  std::chrono::steady_clock::time_point start_tp =
-      std::chrono::steady_clock::now();
-  std::chrono::steady_clock::now();
+  auto start_tp = std::chrono::steady_clock::now();
 
-  // PISP_COMP1: 1 byte per Bayer pixel, rows padded to stride alignment.
-  // Expand to uint16_t (shifted to 10-bit range) so demosaic_threaded can
-  // reuse the same code path without modification.
-  std::vector<uint16_t> bayer_data(frame.width * frame.height);
-  for (int row = 0; row < static_cast<int>(frame.height); ++row) {
-    const uint8_t* src = frame.data.data() + row * frame.bytes_per_line;
-    uint16_t* dst = bayer_data.data() + row * frame.width;
-    for (int col = 0; col < static_cast<int>(frame.width); ++col) {
-      dst[col] = static_cast<uint16_t>(src[col]) << 2;
-    }
-  }
-  std::chrono::steady_clock::time_point unpack_tp =
-      std::chrono::steady_clock::now();
-
-  // Prepare output buffer
+  // YUV420: the Y (luma) plane occupies the first height*bytes_per_line bytes.
+  // Extract it into a packed buffer for the checkerboard detector.
   int out_width =
       config.checkerboard_full_res_detection ? frame.width : frame.width / 2;
   int out_height =
       config.checkerboard_full_res_detection ? frame.height : frame.height / 2;
   std::vector<uint8_t> grayscale_data(out_width * out_height);
 
-  // Demosaic
-  demosaic_threaded(bayer_data.data(), grayscale_data.data(), frame.width,
-                    frame.height, config.checkerboard_full_res_detection,
-                    config.checkerboard_num_threads);
-  std::chrono::steady_clock::time_point demosaic_tp =
-      std::chrono::steady_clock::now();
+  if (config.checkerboard_full_res_detection) {
+    for (int row = 0; row < static_cast<int>(frame.height); ++row) {
+      std::memcpy(grayscale_data.data() + row * frame.width,
+                  frame.data.data() + row * frame.bytes_per_line,
+                  frame.width);
+    }
+  } else {
+    // 2x subsample: take every other row and column from Y plane
+    for (int row = 0; row < out_height; ++row) {
+      const uint8_t* src =
+          frame.data.data() + (row * 2) * frame.bytes_per_line;
+      uint8_t* dst = grayscale_data.data() + row * out_width;
+      for (int col = 0; col < out_width; ++col) {
+        dst[col] = src[col * 2];
+      }
+    }
+  }
 
-  // Detect checkerboard
   bool detected = checkerboard_detector->detect(grayscale_data.data(),
                                                 out_width, out_height);
 
-  std::chrono::steady_clock::time_point end_tp =
-      std::chrono::steady_clock::now();
+  auto end_tp = std::chrono::steady_clock::now();
   auto total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
           .count();
-  auto unpack_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         unpack_tp - start_tp)
-                         .count();
-  auto demosaic_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           demosaic_tp - unpack_tp)
-                           .count();
-  auto detect_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         end_tp - demosaic_tp)
-                         .count();
   LOG_INFO("FrameSaver", "Checkerboard detected: " + std::to_string(detected) +
-                             " Total: " + std::to_string(total_time) +
-                             "ms (Unpack " + std::to_string(unpack_time) +
-                             " Demosaic " + std::to_string(demosaic_time) +
-                             " Detect " + std::to_string(detect_time) + ")");
+                             " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 
@@ -314,24 +281,6 @@ void FrameSaver::flushBufferedFrames() {
   }
 
   buffered_frames.clear();
-
-  // Flush per-camera AWB sidecars from the buffered records.
-  std::unordered_map<uint32_t, std::ofstream> awb_files;
-  for (const auto& rec : buffered_awb_records) {
-    auto it = awb_files.find(rec.camera_id);
-    if (it == awb_files.end()) {
-      std::stringstream ss;
-      ss << actual_output_dir << "/cam" << rec.camera_id << "_awb.bin";
-      auto [ins, _] = awb_files.emplace(
-          rec.camera_id,
-          std::ofstream(ss.str(), std::ios::binary | std::ios::app));
-      it = ins;
-    }
-    if (it->second) {
-      it->second.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
-    }
-  }
-  buffered_awb_records.clear();
 
   std::cout << "Finished writing buffered frames" << std::endl;
 }
@@ -368,7 +317,6 @@ void FrameSaver::writerThreadFunc() {
             frames_saved++;
 
             frames_saved_per_camera[task.camera_id]++;
-            writeAwbRecord(task);
           }
           free(aligned_buffer);
         }
@@ -378,43 +326,9 @@ void FrameSaver::writerThreadFunc() {
   }
 }
 
-void FrameSaver::writeAwbRecord(const WriteTask& task) {
-  AwbRecord rec{task.frame_id, task.camera_id, task.awb_gain_r,
-                task.awb_gain_b, task.awb_cct};
-
-  std::lock_guard<std::mutex> lock(awb_sidecar_mutex);
-  auto it = awb_sidecar_fds.find(task.camera_id);
-  int fd = -1;
-  if (it == awb_sidecar_fds.end()) {
-    std::stringstream ss;
-    ss << actual_output_dir << "/cam" << task.camera_id << "_awb.bin";
-    fd = ::open(ss.str().c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-      LOG_WARN("FrameSaver", "Failed to open AWB sidecar: " + ss.str());
-      return;
-    }
-    awb_sidecar_fds[task.camera_id] = fd;
-  } else {
-    fd = it->second;
-  }
-
-  ssize_t n = write(fd, &rec, sizeof(rec));
-  if (n != static_cast<ssize_t>(sizeof(rec))) {
-    LOG_WARN("FrameSaver", "Short write on AWB sidecar");
-  }
-}
-
-void FrameSaver::closeAwbSidecars() {
-  std::lock_guard<std::mutex> lock(awb_sidecar_mutex);
-  for (auto& kv : awb_sidecar_fds) {
-    if (kv.second >= 0) close(kv.second);
-  }
-  awb_sidecar_fds.clear();
-}
-
 std::string FrameSaver::generateFilename(uint32_t camera_id,
                                          uint32_t frame_id) {
   std::stringstream ss;
-  ss << actual_output_dir << "/cam" << camera_id << "-" << frame_id << ".raw";
+  ss << actual_output_dir << "/cam" << camera_id << "-" << frame_id << ".yuv";
   return ss.str();
 }

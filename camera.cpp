@@ -3,6 +3,7 @@
 #include <sys/mman.h>
 #include <algorithm>
 #include <cstring>
+#include <map>
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
                const CameraConfig& cfg)
@@ -22,7 +23,7 @@ bool Camera::configure(size_t buffer_count) {
     return false;
   }
 
-  cam_config = lcam->generateConfiguration({libcamera::StreamRole::Raw});
+  cam_config = lcam->generateConfiguration({libcamera::StreamRole::VideoRecording});
   if (!cam_config) {
     LOG_ERROR("Camera", "Failed to generate configuration for camera " +
                             std::to_string(camera_id));
@@ -31,7 +32,7 @@ bool Camera::configure(size_t buffer_count) {
   }
 
   libcamera::StreamConfiguration& stream_cfg = cam_config->at(0);
-  stream_cfg.pixelFormat = libcamera::formats::RGGB_PISP_COMP1;
+  stream_cfg.pixelFormat = libcamera::formats::YUV420;
   stream_cfg.size = libcamera::Size(config.width, config.height);
   stream_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
 
@@ -70,24 +71,44 @@ bool Camera::configure(size_t buffer_count) {
 
   const auto& buffers = allocator->buffers(stream);
   mapped_planes.resize(buffers.size());
+  mmap_regions.resize(buffers.size());
   requests.reserve(buffers.size());
 
   for (size_t i = 0; i < buffers.size(); ++i) {
     libcamera::FrameBuffer* buf = buffers[i].get();
-
     mapped_planes[i].resize(buf->planes().size());
-    for (size_t p = 0; p < buf->planes().size(); ++p) {
-      const libcamera::FrameBuffer::Plane& plane = buf->planes()[p];
-      size_t len = plane.length;
-      void* ptr = ::mmap(nullptr, len, PROT_READ, MAP_SHARED,
-                         plane.fd.get(), plane.offset);
-      if (ptr == MAP_FAILED) {
+
+    // Determine total mapped size required for each unique fd.
+    // mmap requires page-aligned offsets, so we map each fd from offset 0
+    // with enough length to cover all planes that share it, then derive
+    // per-plane pointers as base + plane.offset.
+    std::map<int, size_t> fd_total_size;
+    for (const auto& plane : buf->planes()) {
+      int fd = plane.fd.get();
+      size_t needed = static_cast<size_t>(plane.offset) + plane.length;
+      fd_total_size[fd] = std::max(fd_total_size[fd], needed);
+    }
+
+    std::map<int, void*> fd_base;
+    for (auto& [fd, total] : fd_total_size) {
+      void* base = ::mmap(nullptr, total, PROT_READ, MAP_SHARED, fd, 0);
+      if (base == MAP_FAILED) {
         LOG_ERROR("Camera",
                   "mmap failed for camera " + std::to_string(camera_id));
+        // Unmap any already-mapped fds for this buffer.
+        for (auto& [mapped_fd, ptr] : fd_base)
+          ::munmap(ptr, fd_total_size[mapped_fd]);
         lcam->release();
         return false;
       }
-      mapped_planes[i][p] = {ptr, len};
+      fd_base[fd] = base;
+      mmap_regions[i].push_back({base, total});
+    }
+
+    for (size_t p = 0; p < buf->planes().size(); ++p) {
+      const libcamera::FrameBuffer::Plane& plane = buf->planes()[p];
+      uint8_t* ptr = static_cast<uint8_t*>(fd_base[plane.fd.get()]) + plane.offset;
+      mapped_planes[i][p] = {ptr, plane.length};
     }
 
     auto req = lcam->createRequest(static_cast<uint64_t>(i));
@@ -166,14 +187,15 @@ bool Camera::stop() {
   lcam->requestCompleted.disconnect(this);
 
   libcamera::Stream* stream = cam_config->at(0).stream();
-  for (auto& planes : mapped_planes) {
-    for (auto& mp : planes) {
-      if (mp.data != MAP_FAILED) {
-        ::munmap(mp.data, mp.size);
-        mp.data = MAP_FAILED;
+  for (auto& regions : mmap_regions) {
+    for (auto& r : regions) {
+      if (r.base != MAP_FAILED) {
+        ::munmap(r.base, r.size);
+        r.base = MAP_FAILED;
       }
     }
   }
+  mmap_regions.clear();
   mapped_planes.clear();
   requests.clear();
   allocator->free(stream);
@@ -207,6 +229,7 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     frame.width = stream_cfg.size.width;
     frame.height = stream_cfg.size.height;
     frame.bytes_per_line = stream_cfg.stride;
+    frame.pixel_format = stream_cfg.pixelFormat.fourcc();
 
     size_t total = 0;
     for (const auto& plane : buf->planes()) total += plane.length;
@@ -221,15 +244,6 @@ void Camera::onRequestComplete(libcamera::Request* request) {
                     mapped_planes[slot][p].data, len);
       }
       offset += len;
-    }
-
-    const libcamera::ControlList& meta = request->metadata();
-    if (auto gains = meta.get(libcamera::controls::ColourGains)) {
-      frame.awb_gain_r = (*gains)[0];
-      frame.awb_gain_b = (*gains)[1];
-    }
-    if (auto cct = meta.get(libcamera::controls::ColourTemperature)) {
-      frame.awb_cct = static_cast<float>(*cct);
     }
 
     {

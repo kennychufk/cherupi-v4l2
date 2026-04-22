@@ -290,7 +290,8 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
 
   if (camera_manager->configureAll(config)) {
     system_state = CameraState::CONFIGURED;
-    sendStatus(ws, "All cameras configured successfully");
+    sendStatus(ws, "Configured: " + std::to_string(config.width) + "x" +
+                       std::to_string(config.height) + " YUV420");
   } else {
     sendError(ws, "Failed to configure cameras");
   }

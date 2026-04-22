@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "bayer_converter.h"
 #include "checkerboard_detector.h"
 #include "types.hpp"
 
@@ -27,32 +26,9 @@ class FrameSaver {
   struct WriteTask {
     std::string filename;
     std::vector<uint8_t> data;
-    uint32_t
-        camera_id;  // Add camera_id to track which camera this frame belongs to
-    uint32_t frame_id;
-    float awb_gain_r;
-    float awb_gain_b;
-    float awb_cct;
-  };
-
-  // Fixed 20-byte per-frame metadata record written to `camN_awb.bin`.
-  struct AwbRecord {
-    uint32_t frame_id;
     uint32_t camera_id;
-    float gain_r;
-    float gain_b;
-    float cct;
-  } __attribute__((packed));
-
-  // Per-camera AWB sidecar files (batch/checkerboard modes).
-  std::unordered_map<uint32_t, int> awb_sidecar_fds;
-  std::mutex awb_sidecar_mutex;
-
-  // In-memory AWB records for buffer mode.
-  std::vector<AwbRecord> buffered_awb_records;
-
-  void writeAwbRecord(const WriteTask& task);
-  void closeAwbSidecars();
+    uint32_t frame_id;
+  };
 
   std::queue<WriteTask> write_queue;
   std::mutex queue_mutex;
