@@ -238,31 +238,17 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
       std::chrono::steady_clock::now();
   std::chrono::steady_clock::now();
 
-  // Configure BayerConverter
-  Config bayer_config;
-  bayer_config.width = frame.width;
-  bayer_config.height = frame.height;
-  bayer_config.stride = frame.bytes_per_line;
-  bayer_config.full_res = config.checkerboard_full_res_detection;
-  bayer_config.num_threads = config.checkerboard_num_threads;
-  bayer_config.save_ppm = false;  // We don't need to save PPM
-
-  // Create BayerConverter instance
-  BayerConverter converter(bayer_config);
-
-  // Set the input data directly (avoiding file I/O)
-  // We need to modify BayerConverter to accept raw data, but for now,
-  // we'll create a temporary converter that processes the data
-
-  // Since BayerConverter expects packed 10-bit data and our frame.data
-  // is already in the correct format, we can process it directly
-
-  // Create a temporary processing pipeline
+  // PISP_COMP1: 1 byte per Bayer pixel, rows padded to stride alignment.
+  // Expand to uint16_t (shifted to 10-bit range) so demosaic_threaded can
+  // reuse the same code path without modification.
   std::vector<uint16_t> bayer_data(frame.width * frame.height);
-
-  // Unpack 10-bit data
-  unpack_10bit_neon(frame.data.data(), bayer_data.data(), frame.width,
-                    frame.height, frame.bytes_per_line);
+  for (int row = 0; row < static_cast<int>(frame.height); ++row) {
+    const uint8_t* src = frame.data.data() + row * frame.bytes_per_line;
+    uint16_t* dst = bayer_data.data() + row * frame.width;
+    for (int col = 0; col < static_cast<int>(frame.width); ++col) {
+      dst[col] = static_cast<uint16_t>(src[col]) << 2;
+    }
+  }
   std::chrono::steady_clock::time_point unpack_tp =
       std::chrono::steady_clock::now();
 

@@ -177,6 +177,12 @@ target_link_libraries(test_fe_pipeline
 )
 target_link_directories(test_fe_pipeline PRIVATE ${LIBCAMERA_LIBRARY_DIRS})
 
+# Standalone PISP_COMP1 debayerer for frames saved by FrameSaver
+add_executable(pisp_debayer pisp_debayer.cpp)
+target_compile_options(pisp_debayer PRIVATE -O2)
+target_include_directories(pisp_debayer PRIVATE ${json_SOURCE_DIR}/include)
+target_link_libraries(pisp_debayer ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
+
 # Installation
 install(TARGETS camera_ws_server
     RUNTIME DESTINATION bin

@@ -1,6 +1,7 @@
 #include "camera.hpp"
 
 #include <sys/mman.h>
+#include <algorithm>
 #include <cstring>
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
@@ -30,7 +31,7 @@ bool Camera::configure(size_t buffer_count) {
   }
 
   libcamera::StreamConfiguration& stream_cfg = cam_config->at(0);
-  stream_cfg.pixelFormat = libcamera::formats::SRGGB10_CSI2P;
+  stream_cfg.pixelFormat = libcamera::formats::RGGB_PISP_COMP1;
   stream_cfg.size = libcamera::Size(config.width, config.height);
   stream_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
 
