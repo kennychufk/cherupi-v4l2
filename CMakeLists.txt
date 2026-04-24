@@ -90,7 +90,7 @@ set_property(TARGET uSockets PROPERTY C_STANDARD 11)
 
 # Include directories
 include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${usockets_SOURCE_DIR}/src
     ${OpenCV_INCLUDE_DIRS}
 )
@@ -112,32 +112,32 @@ include_directories(${UWS_INCLUDE_DIR})
 
 # Source files
 set(SOURCES
-    main.cpp
-    websocket_server.cpp
-    camera.cpp
-    camera_manager.cpp
-    frame_saver.cpp
-    frame_saver_helpers.cpp
-    stream_manager.cpp
-    rate_controller.cpp
-    command_parser.cpp
-    checkerboard_detector.cpp
+    src/main.cpp
+    src/websocket_server.cpp
+    src/camera.cpp
+    src/camera_manager.cpp
+    src/frame_saver.cpp
+    src/frame_saver_helpers.cpp
+    src/stream_manager.cpp
+    src/rate_controller.cpp
+    src/command_parser.cpp
+    src/checkerboard_detector.cpp
 )
 
 # Header files
 set(HEADERS
-    types.hpp
-    websocket_server.hpp
-    camera.hpp
-    camera_manager.hpp
-    frame_saver.hpp
-    frame_saver_helpers.hpp
-    stream_manager.hpp
-    rate_controller.hpp
-    command_parser.hpp
-    frame_sink.hpp
-    uws_frame_sink.hpp
-    checkerboard_detector.h
+    src/types.hpp
+    src/websocket_server.hpp
+    src/camera.hpp
+    src/camera_manager.hpp
+    src/frame_saver.hpp
+    src/frame_saver_helpers.hpp
+    src/stream_manager.hpp
+    src/rate_controller.hpp
+    src/command_parser.hpp
+    src/frame_sink.hpp
+    src/uws_frame_sink.hpp
+    src/checkerboard_detector.h
 )
 
 # Create executable
@@ -174,7 +174,7 @@ target_compile_options(camera_ws_server PRIVATE
 )
 
 # Standalone YUV420 converter for frames saved by FrameSaver
-add_executable(yuv420_convert yuv420_convert.cpp)
+add_executable(yuv420_convert tools/yuv420_convert.cpp)
 target_compile_options(yuv420_convert PRIVATE -O2)
 target_include_directories(yuv420_convert PRIVATE ${json_SOURCE_DIR}/include)
 target_link_libraries(yuv420_convert ${OpenCV_LIBS})

@@ -1,364 +1,88 @@
-# IMX519 Camera WebSocket Server
+# cherupi-v4l2
 
-A high-performance WebSocket server for streaming raw frames from multiple IMX519 cameras on Raspberry Pi 5.
+WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cameras via libcamera. Single client, YUV420 output, optional frame saving, optional on-device checkerboard detection.
 
-## Features
-
-- Auto-discovery of all connected IMX519 cameras
-- Simultaneous control of multiple cameras
-- Real-time streaming of raw SRGGB10P frames over WebSocket
-- Adaptive frame skipping based on network congestion
-- Optional frame saving to SSD (buffer or batch mode)
-- Single WebSocket connection with multiplexed camera streams
-- Zero-copy frame transmission where possible
-- **Automatic chunked transfer for large frames**
-
-## Dependencies
-
-- CMake 3.14 or higher
-- C++17 compiler
-- OpenSSL development libraries
-- zlib development libraries
-- Linux V4L2 and Media Controller APIs
-
-## Building
-
-### Install System Dependencies
+## Install dependencies
 
 ```bash
-# Install system dependencies
 sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    libssl-dev \
-    zlib1g-dev \
-    libopencv-dev
+sudo apt-get install -y build-essential cmake pkg-config \
+    libcamera-dev libopencv-dev libssl-dev zlib1g-dev
 ```
 
-### Build the Server
+## Build
 
 ```bash
-mkdir build
-cd build
+mkdir -p build && cd build
 cmake ..
 make -j4
 ```
 
-CMake will automatically download and build the following dependencies:
-- uWebSockets (with uSockets)
-- nlohmann/json
+CMake fetches `nlohmann/json`, `uSockets`, `uWebSockets`, and (for tests) GoogleTest automatically.
 
-## Usage
+Targets:
+- `camera_ws_server` — the server
+- `yuv420_convert` — converts saved YUV420 frames to images
+- `unit_tests` / `hw_tests` — run `ctest -L unit` or `ctest -L hardware`
 
-Run the server:
+## Run
 
 ```bash
 sudo ./camera_ws_server
 ```
 
-The server listens on port 9001 by default.
+Listens on `ws://0.0.0.0:9001`. Requires root (or appropriate permissions) for libcamera device access.
 
-## WebSocket Protocol
+## Project layout
 
-### Client to Server Commands
-
-All commands are sent as JSON text messages:
-
-```json
-// Discover cameras
-{"cmd": "discover"}
-
-// Configure all cameras (must be done before starting)
-{"cmd": "configure", "params": {
-    "width": 2328,
-    "height": 1748,
-    "crop_width": 2328,
-    "crop_height": 1748,
-    "crop_left": 0,
-    "crop_top": 0
-}}
-
-# Set frame saving mode
-{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard", "params": {
-    "output_dir": "camera_frames",
-    "prepend_timestamp_to_dir": false,
-    "batch_size": 10,
-    "writer_threads": 4
-}}
-
-## Frame Saving Modes
-
-### Checkerboard Mode
-
-The `checkerboard` mode automatically detects and saves only frames containing a checkerboard pattern. This mode:
-
-- Debayers each frame using the optimized BayerConverter
-- Detects checkerboard patterns using OpenCV
-- Saves only the original raw Bayer data of frames containing checkerboards
-- Preserves the original frame IDs in filenames
-
-Example command:
-
-```json
-// Set checkerboard detection mode with custom parameters
-{"cmd": "set_save_mode", "mode": "checkerboard", "params": {
-    "output_dir": "calibration_frames",
-    "prepend_timestamp_to_dir": true,
-    "writer_threads": 4,
-    "checkerboard_rows": 8,        // Number of inner corners vertically
-    "checkerboard_cols": 11,       // Number of inner corners horizontally
-    "checkerboard_full_res_detection": false,  // Use half-res for faster detection
-    "checkerboard_num_threads": 4   // Threads for debayering
-}}
+```
+src/      Server sources
+tools/    yuv420_convert (C++) and test_client.py
+tests/    unit/ and hw/ GoogleTest suites
+docs/     Protocol spec and design notes
 ```
 
-#### Checkerboard Mode Parameters
+## Quick start with the test client
 
-- `output_dir` (default: "camera_frames"): Directory where frames will be saved (created automatically)
-- `prepend_timestamp_to_dir` (default: false): Prepend timestamp (YYYYMMDD-HHMM-) to the directory name
-- `checkerboard_rows` (default: 8): Number of inner corners in the checkerboard pattern vertically
-- `checkerboard_cols` (default: 11): Number of inner corners in the checkerboard pattern horizontally
-- `checkerboard_full_res_detection` (default: false): Whether to use full resolution for detection (slower but more accurate)
-- `checkerboard_num_threads` (default: 4): Number of threads for the debayering process
+```bash
+pip install websocket-client
+python3 tools/test_client.py --host localhost --port 9001
+```
 
-#### Performance Notes for Checkerboard Mode
+This connects, discovers cameras, configures at 2328×1748, starts streaming for 3 seconds, and prints a line per frame.
 
-- Processing is done sequentially in the capture thread to ensure no frames are missed
-- Half-resolution detection (default) provides a good balance between speed and accuracy
-- The debayering process uses NEON optimizations for ARM processors
-- Original raw Bayer data is saved, not the debayered grayscale image
-- Frame IDs are preserved - if frames 0, 2, and 5 contain checkerboards, they will be saved as `cam0-0.raw`, `cam0-2.raw`, and `cam0-5.raw` in the specified output directory
+## WebSocket protocol (overview)
 
-#### Directory Creation
+Control messages are JSON; frames are sent as chunked binary messages.
 
-- The server automatically creates the output directory when frame saving is configured
-- If `prepend_timestamp_to_dir` is true, the timestamp is prepended to the last part of the directory path
-  - Example: `experiments/calibration` becomes `experiments/20241215-1430-calibration`
-- If the directory already exists, the server continues without error
-- If directory creation fails, the server falls back to the current working directory and logs a warning
-- Directory permissions are set to 0755
-- Both relative and absolute paths are supported
-
-
-// Start all cameras
+```json
+{"cmd": "discover"}
+{"cmd": "configure", "params": {"width": 2328, "height": 1748}}
+{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard", "params": {...}}
 {"cmd": "start_cameras"}
-
-// Start streaming from a specific camera
 {"cmd": "start_stream", "camera_id": 0}
-
-// Stop streaming from a specific camera
-{"cmd": "stop_stream", "camera_id": 0}
-
-// Stop all cameras
+{"cmd": "stop_stream",  "camera_id": 0}
 {"cmd": "stop_cameras"}
 ```
 
-### Server to Client Messages
+State machine: `IDLE → CONFIGURED → RUNNING → CONFIGURED`. Commands are rejected when issued in the wrong state.
 
-Text messages (JSON):
+Full specification, including binary header layout and chunk framing, lives in [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
-```json
-// Discovery response
-{"type": "discovery", "cameras": [{"id": 0, "type": "IMX519"}, ...]}
+## Save modes
 
-// Status message
-{"type": "status", "message": "..."}
+Set with `set_save_mode` before `start_cameras`:
 
-// Error message
-{"type": "error", "message": "..."}
-```
+- `none` — stream only
+- `buffer` — in-memory ring
+- `batch` — multi-threaded disk writer (`writer_threads`, `batch_size`)
+- `checkerboard` — detect and save only frames containing a checkerboard (`checkerboard_rows`, `checkerboard_cols`, `checkerboard_full_res_detection`, `checkerboard_num_threads`)
 
-Binary messages (for frames):
-
-The server automatically chooses between single-message and chunked transfer based on frame size.
-
-#### Single Frame Message (for frames ≤ 256KB)
-```
-[FrameHeader (20 bytes)][Raw frame data (SRGGB10P)]
-
-FrameHeader structure:
-- frame_id (uint32_t): Frame number (0-indexed)
-- camera_id (uint32_t): Camera ID (0-indexed)
-- bytes_per_line (uint32_t): Stride of the frame
-- width (uint32_t): Frame width in pixels
-- height (uint32_t): Frame height in pixels
-```
-
-#### Chunked Transfer (for frames > 256KB)
-
-For large frames, the server splits the data into multiple chunks:
-
-1. **Chunk Start Message**:
-```
-[ChunkStartMarker (8 bytes)][ChunkHeader (28 bytes)]
-
-ChunkStartMarker:
-- magic (uint32_t): 0x4348554E ('CHUN')
-- version (uint32_t): 1
-
-ChunkHeader:
-- frame_id (uint32_t): Frame number
-- camera_id (uint32_t): Camera ID
-- total_chunks (uint32_t): Total number of chunks
-- total_size (uint32_t): Total frame data size in bytes
-- bytes_per_line (uint32_t): Stride of the frame
-- width (uint32_t): Frame width in pixels
-- height (uint32_t): Frame height in pixels
-```
-
-2. **Chunk Data Messages** (sent sequentially):
-```
-[ChunkData (8 bytes)][Chunk payload (up to 256KB)]
-
-ChunkData:
-- chunk_index (uint32_t): Chunk index (0-based)
-- chunk_size (uint32_t): Size of this chunk's payload
-```
-
-The default chunk size is 256KB (262,144 bytes). This provides a good balance between efficiency and network compatibility.
-
-## Example Client (Python)
-
-```python
-import asyncio
-import websockets
-import json
-import struct
-
-async def client():
-    uri = "ws://localhost:9001"
-    
-    # For tracking chunked transfers
-    chunk_buffers = {}
-    CHUNK_MAGIC = 0x4348554E
-    
-    async with websockets.connect(uri) as websocket:
-        # Discover cameras
-        await websocket.send(json.dumps({"cmd": "discover"}))
-        response = json.loads(await websocket.recv())
-        print(f"Found cameras: {response}")
-        
-        # Configure cameras
-        await websocket.send(json.dumps({
-            "cmd": "configure",
-            "params": {"width": 2328, "height": 1748}
-        }))
-        await websocket.recv()
-        
-        # Set checkerboard detection mode
-        await websocket.send(json.dumps({
-            "cmd": "set_save_mode",
-            "mode": "checkerboard",
-            "params": {
-                "output_dir": "calibration_frames",
-                "prepend_timestamp_to_dir": True,
-                "checkerboard_rows": 6,
-                "checkerboard_cols": 9,
-                "checkerboard_full_res_detection": True,
-                "checkerboard_num_threads": 4
-            }
-        }))
-        await websocket.recv()
-        
-        # Start cameras
-        await websocket.send(json.dumps({"cmd": "start_cameras"}))
-        await websocket.recv()
-        
-        # Start streaming from camera 0
-        await websocket.send(json.dumps({
-            "cmd": "start_stream",
-            "camera_id": 0
-        }))
-        await websocket.recv()
-        
-        # Receive frames
-        frame_count = 0
-        while frame_count < 100:
-            message = await websocket.recv()
-            
-            if isinstance(message, bytes):
-                # Check for chunked transfer
-                if len(message) >= 8:
-                    magic = struct.unpack("<I", message[:4])[0]
-                    
-                    if magic == CHUNK_MAGIC:
-                        # Handle chunk start
-                        version = struct.unpack("<I", message[4:8])[0]
-                        if version == 1 and len(message) >= 36:
-                            # Parse chunk header
-                            header = struct.unpack("<IIIIIII", message[8:36])
-                            frame_id, camera_id, total_chunks, total_size, bytes_per_line, width, height = header
-                            
-                            # Initialize chunk buffer
-                            key = f"{camera_id}_{frame_id}"
-                            chunk_buffers[key] = {
-                                'chunks': [None] * total_chunks,
-                                'received': 0,
-                                'total_chunks': total_chunks,
-                                'header': (frame_id, camera_id, bytes_per_line, width, height)
-                            }
-                            continue
-                
-                # Check if this is chunk data
-                if len(message) >= 8:
-                    chunk_index, chunk_size = struct.unpack("<II", message[:8])
-                    
-                    # Find matching chunk buffer
-                    for key, buffer in chunk_buffers.items():
-                        if buffer['chunks'][chunk_index] is None:
-                            # Store chunk
-                            buffer['chunks'][chunk_index] = message[8:8+chunk_size]
-                            buffer['received'] += 1
-                            
-                            # Check if complete
-                            if buffer['received'] == buffer['total_chunks']:
-                                # Reassemble frame
-                                frame_data = b''.join(buffer['chunks'])
-                                frame_id, camera_id, bytes_per_line, width, height = buffer['header']
-                                
-                                print(f"Frame {frame_id} from camera {camera_id}: "
-                                      f"{width}x{height}, {len(frame_data)} bytes (chunked)")
-                                
-                                frame_count += 1
-                                del chunk_buffers[key]
-                            break
-                else:
-                    # Regular single-message frame
-                    header = struct.unpack("<IIIII", message[:20])
-                    frame_id, camera_id, bytes_per_line, width, height = header
-                    frame_data = message[20:]
-                    
-                    print(f"Frame {frame_id} from camera {camera_id}: "
-                          f"{width}x{height}, {len(frame_data)} bytes")
-                    
-                    frame_count += 1
-        
-        # Stop streaming
-        await websocket.send(json.dumps({
-            "cmd": "stop_stream",
-            "camera_id": 0
-        }))
-        
-        # Stop cameras
-        await websocket.send(json.dumps({"cmd": "stop_cameras"}))
-
-asyncio.run(client())
-```
-
-## Performance Notes
-
-- The server uses adaptive frame skipping to maintain real-time streaming
-- Only one frame is kept in the network pipeline at a time
-- Multiple cameras are handled in round-robin fashion
-- Frame saving runs independently of streaming
-- Use O_DIRECT for optimal SSD write performance in batch mode
-- **Chunked transfers automatically activate for frames larger than 256KB**
-- Small delays between chunks prevent network congestion
+Common parameters: `output_dir`, `prepend_timestamp_to_dir`. Saved YUV420 frames can be converted to images with `yuv420_convert`.
 
 ## Limitations
 
-- Only one client connection is allowed at a time
-- All cameras use identical configuration
-- Cameras can only be configured once per connection
-- Frame saving options must be set before starting cameras
+- One client connection at a time.
+- All cameras share the same configuration.
+- Cameras must be configured once per connection, before starting.
+- Save mode must be set before `start_cameras`.

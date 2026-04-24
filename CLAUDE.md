@@ -4,14 +4,25 @@
 
 WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cameras via libcamera. Single-client; binary frames over chunked transfer; optional saving and on-device checkerboard detection.
 
+## Layout
+
+```
+src/     C++ server sources and headers (flat; all internal includes are quote-form with just the filename)
+tools/   Standalone companion binaries and scripts (yuv420_convert.cpp, test_client.py)
+tests/   unit/ (no libcamera/hardware needed) and hw/ (requires a live IMX519); fixtures/ holds test inputs
+docs/    Protocol spec and design notes
+```
+
 ## Pipeline
 
 libcamera (Pi5 PiSP frontend) → YUV420 main stream → app
 - AWB is handled by libcamera's IPA (not custom).
 - Frames carry a FourCC; default is `V4L2_PIX_FMT_YUV420`.
-- `yuv420_convert.cpp` is the standalone converter for frames written to disk.
+- `tools/yuv420_convert.cpp` is the standalone converter for frames written to disk.
 
 ## Components
+
+All paths below are under `src/`.
 
 - `main.cpp` — entry point, signal handling
 - `websocket_server.*` — uWebSockets server, command routing, single-client policy, state machine

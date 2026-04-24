@@ -20,18 +20,18 @@ set(UNIT_SOURCES
 # the unit tests never actually instantiate Camera/CameraManager.
 add_executable(unit_tests
     ${UNIT_SOURCES}
-    ../stream_manager.cpp
-    ../rate_controller.cpp
-    ../frame_saver.cpp
-    ../frame_saver_helpers.cpp
-    ../command_parser.cpp
-    ../checkerboard_detector.cpp
-    ../camera.cpp
-    ../camera_manager.cpp
+    ../src/stream_manager.cpp
+    ../src/rate_controller.cpp
+    ../src/frame_saver.cpp
+    ../src/frame_saver_helpers.cpp
+    ../src/command_parser.cpp
+    ../src/checkerboard_detector.cpp
+    ../src/camera.cpp
+    ../src/camera_manager.cpp
 )
 
 target_include_directories(unit_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
     ${json_SOURCE_DIR}/include
     ${LIBCAMERA_INCLUDE_DIRS}
 )
@@ -58,12 +58,12 @@ add_executable(hw_tests
     hw/camera_discovery_test.cpp
     hw/camera_lifecycle_test.cpp
     hw/camera_frame_capture_test.cpp
-    ../camera.cpp
-    ../camera_manager.cpp
+    ../src/camera.cpp
+    ../src/camera_manager.cpp
 )
 
 target_include_directories(hw_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
     ${json_SOURCE_DIR}/include
     ${LIBCAMERA_INCLUDE_DIRS}
 )
