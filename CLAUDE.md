@@ -1,244 +1,67 @@
-# CLAUDE.md - cherupi-v4l2 Project Overview
+# CLAUDE.md - cherupi-v4l2
 
-## Project Summary
+## Summary
 
-cherupi-v4l2 is a high-performance WebSocket server designed for Raspberry Pi 5 that provides real-time streaming of raw camera frames from multiple IMX519 cameras. The server handles camera discovery, configuration, streaming, and optional frame saving with a single-client architecture.
+WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cameras via libcamera. Single-client; binary frames over chunked transfer; optional saving and on-device checkerboard detection.
 
-## Key Features
+## Pipeline
 
-- **Auto-discovery** of all connected IMX519 cameras via V4L2 Media Controller API
-- **WebSocket-based control protocol** for remote camera management
-- **Real-time frame streaming** with adaptive frame skipping
-- **Multiple frame saving modes** (none, buffer, batch)
-- **Zero-copy frame transmission** where possible
-- **Single-client architecture** with connection blocking
+libcamera (Pi5 PiSP frontend) → YUV420 main stream → app
+- AWB is handled by libcamera's IPA (not custom).
+- Frames carry a FourCC; default is `V4L2_PIX_FMT_YUV420`.
+- `bayer_converter.*` still exists for raw-Bayer paths; `yuv420_convert.cpp` is the current standalone converter for saved frames.
+- `v4l2_capture.cpp` is an unrelated standalone capture utility (not linked into the server).
 
-## Architecture Overview
+## Components
 
-### Core Components
+- `main.cpp` — entry point, signal handling
+- `websocket_server.*` — uWebSockets server, command routing, single-client policy, state machine
+- `camera_manager.*` — multi-camera lifecycle (configure → start → stop)
+- `camera.*` — per-camera libcamera wrapper: owns `libcamera::Camera`, `CameraConfiguration`, `FrameBufferAllocator`, request queue, mmap of DMA buffers, frame callbacks
+- `stream_manager.*` — round-robin streaming, backpressure/skipping, chunked transfer
+- `frame_saver.*` — save modes: NONE / BUFFER / BATCH / CHECKERBOARD
+- `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection
+- `bayer_converter.*` — Bayer→RGB helper
+- `types.hpp` — logger, protocol constants, `CameraConfig`, `SaveConfig`, chunk headers
 
-1. **WebSocketServer** (`websocket_server.hpp/cpp`)
-   - Main server class using uWebSockets
-   - Handles client connections and command routing
-   - Enforces single-client policy
-   - Manages system state transitions
+## WebSocket Protocol
 
-2. **CameraManager** (`camera_manager.hpp/cpp`)
-   - Discovers and manages multiple cameras
-   - Configures all cameras with identical settings
-   - Coordinates camera lifecycle (configure → start → stop)
+Port 9001, single client. Text (JSON) for control, binary (chunked `CHUN` header + N `CHNK` data packets) for frames. YUV420 output; 32 KiB chunks; header-only mode skips payload.
 
-3. **Camera** (`camera.hpp/cpp`)
-   - Represents individual camera instance
-   - Manages V4L2 device and media controller entities
-   - Runs capture thread for continuous frame acquisition
-   - Provides latest frame for streaming
+Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
-4. **StreamManager** (`stream_manager.hpp/cpp`)
-   - Handles WebSocket frame transmission
-   - Implements round-robin streaming for multiple cameras
-   - Manages backpressure and frame skipping
-   - Multiplexes multiple camera streams over single connection
-
-5. **FrameSaver** (`frame_saver.hpp/cpp`)
-   - Optional frame saving functionality
-   - Three modes: none, buffer (memory), batch (disk)
-   - Multi-threaded batch writing with O_DIRECT
-
-6. **MediaDevice** (`media_device.hpp/cpp`)
-   - Wraps Linux Media Controller API
-   - Configures sensor pipeline (sensor → CSI2 → video)
-   - Sets formats, crops, and enables links
-
-7. **V4L2Device** (`v4l2_device.hpp/cpp`)
-   - Wraps V4L2 video device operations
-   - Manages memory-mapped buffers
-   - Captures frames in SRGGB10P format
-
-## Protocol Specification
-
-### WebSocket Connection
-- Port: 9001
-- Only one client allowed at a time
-- Text messages for commands (JSON)
-- Binary messages for frame data
-
-### Client → Server Commands
-
-```json
-// Camera discovery
-{"cmd": "discover"}
-
-// Configure all cameras
-{"cmd": "configure", "params": {
-    "width": 2328,
-    "height": 1748,
-    "crop_width": 2328,
-    "crop_height": 1748,
-    "crop_left": 0,
-    "crop_top": 0
-}}
-
-// Set frame saving mode
-{"cmd": "set_save_mode", "mode": "none|buffer|batch", "params": {
-    "prefix": "camera",
-    "batch_size": 10,
-    "writer_threads": 4
-}}
-
-// Start all cameras
-{"cmd": "start_cameras"}
-
-// Start streaming specific camera
-{"cmd": "start_stream", "camera_id": 0}
-
-// Stop streaming specific camera
-{"cmd": "stop_stream", "camera_id": 0}
-
-// Stop all cameras
-{"cmd": "stop_cameras"}
-```
-
-### Server → Client Responses
-
-Text messages (JSON):
-```json
-{"type": "discovery", "cameras": [{"id": 0, "type": "IMX519"}, ...]}
-{"type": "status", "message": "..."}
-{"type": "error", "message": "..."}
-```
-
-Binary frame format:
-```
-[FrameHeader (20 bytes)][Raw SRGGB10P data]
-
-FrameHeader structure (packed):
-- frame_id (uint32_t): Frame sequence number
-- camera_id (uint32_t): Camera identifier
-- bytes_per_line (uint32_t): Frame stride
-- width (uint32_t): Frame width in pixels
-- height (uint32_t): Frame height in pixels
-```
+**Keep `docs/websocket-protocol.md` in sync with any change to the protocol or client-server behavior** (commands, response shapes, state transitions, binary struct layout, chunk/version constants, error conditions). Update it in the same commit as the code change.
 
 ## State Machine
 
-The system follows these state transitions:
+`IDLE → CONFIGURED → RUNNING → CONFIGURED` (stop returns to CONFIGURED; error state exists per-camera).
 
-```
-IDLE → CONFIGURED → RUNNING
-         ↑            ↓
-         ←────────────
-```
+## Save Modes
 
-- **IDLE**: Initial state, cameras discovered but not configured
-- **CONFIGURED**: Cameras configured but not capturing
-- **RUNNING**: Cameras actively capturing, streaming possible
+- `NONE` — no save
+- `BUFFER` — in-memory ring
+- `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
+- `CHECKERBOARD` — save only frames where a checkerboard is detected (`rows`, `cols`, `full_res_detection`, `num_threads`)
+- Output directory optionally prepended with timestamp.
 
-## Key Design Decisions
+## Build
 
-1. **Single Client Architecture**: Simplifies state management and resource allocation
-2. **Identical Camera Configuration**: All cameras use same resolution/format
-3. **Latest Frame Streaming**: Only most recent frame kept for streaming (drops older frames)
-4. **Separate Capture and Stream Threads**: Decouples frame acquisition from network transmission
-5. **Round-Robin Streaming**: Fair bandwidth distribution across cameras
-6. **Adaptive Frame Skipping**: Maintains real-time performance under network congestion
+CMake 3.14+, C++17. Targets:
+- `camera_ws_server` — the server
+- `test_fe_pipeline` — libcamera smoke test (no websockets)
+- `yuv420_convert` — standalone YUV420→image converter for saved frames
+- `v4l2_capture` — legacy standalone capture utility
 
-## File Organization
+### Dependencies
+- System: `libcamera` (pkg-config), `OpenCV`, `OpenSSL`, `zlib`, pthreads
+- Fetched: `nlohmann/json` v3.11.3, `uSockets` v0.8.8, `uWebSockets` v20.62.0
+- Flags: `-O3 -march=armv8.2-a+fp16+simd -mtune=cortex-a76 -ffast-math -funroll-loops -ftree-vectorize`
 
-### Core Server Files
-- `main.cpp`: Entry point with signal handling
-- `websocket_server.*`: WebSocket server implementation
-- `types.hpp`: Common data structures and protocol constants
+## Key Design Points
 
-### Camera Management
-- `camera_manager.*`: Multi-camera coordination
-- `camera.*`: Individual camera control
-- `stream_manager.*`: Frame streaming logic
-
-### V4L2 Integration
-- `media_device.*`: Media Controller API wrapper
-- `v4l2_device.*`: V4L2 video device wrapper
-
-### Utilities
-- `frame_saver.*`: Optional frame saving
-- `v4l2_capture.cpp`: Standalone capture utility (not part of server)
-
-### Build System
-- `CMakeLists.txt`: CMake configuration
-- `.gitignore`: Git ignore rules
-- `README.md`: User documentation
-
-## Dependencies
-
-### System Requirements
-- Raspberry Pi 5 with IMX519 cameras
-- Linux with V4L2 and Media Controller support
-- Root/sudo access for camera control
-
-### Build Dependencies
-- CMake 3.14+
-- C++17 compiler
-- OpenSSL development libraries
-- zlib development libraries
-
-### Auto-downloaded Dependencies
-- uWebSockets (with uSockets)
-- nlohmann/json
-
-## Memory and Performance Considerations
-
-1. **Frame Size**: SRGGB10P format uses 5 bytes per 4 pixels
-   - Default 2328×1748 resolution = ~5.09 MB per frame
-
-2. **Buffer Management**:
-   - V4L2 uses 4 memory-mapped buffers by default
-   - Latest frame kept for streaming (1 per camera)
-   - Optional frame saving buffers depend on mode
-
-3. **Network Optimization**:
-   - Binary frame transmission (no encoding overhead)
-   - Single frame in network pipeline per camera
-   - Backpressure handling to prevent memory buildup
-
-## Common Operations Flow
-
-1. **Connection and Discovery**:
-   - Client connects to ws://host:9001
-   - Client sends "discover" command
-   - Server responds with camera list
-
-2. **Configuration and Start**:
-   - Client sends "configure" with parameters
-   - Client optionally sets save mode
-   - Client sends "start_cameras"
-   - All cameras begin capturing
-
-3. **Streaming**:
-   - Client sends "start_stream" for each desired camera
-   - Server begins sending binary frames
-   - Client can start/stop streams dynamically
-   - Cameras continue capturing regardless of streaming state
-
-4. **Shutdown**:
-   - Client sends "stop_cameras"
-   - Server stops all capture threads
-   - Frame saving completes (if enabled)
-   - Resources are freed
-
-## Error Handling
-
-- Commands rejected if system state doesn't allow operation
-- Individual camera failures don't crash the system
-- Network disconnection triggers graceful cleanup
-- Frame drops tracked but don't interrupt streaming
-
-## Future Enhancement Opportunities
-
-1. Multi-client support with session management
-2. Per-camera configuration options
-3. Frame compression/encoding options
-4. Hardware-accelerated image processing
-5. Camera hot-plug support
-6. Web UI for configuration
-7. Recording triggered by events
-8. Integration with computer vision pipelines
+- Single client simplifies state and resource ownership.
+- All cameras share one `CameraConfig` (identical resolution/crop).
+- Latest-frame-wins for streaming; older frames dropped.
+- Adaptive rate control + chunked transfer keeps WebSocket responsive under load.
+- Header-only mode lets a client track framing without pulling pixel data.
+- AWB config fields on `CameraConfig` are kept for protocol compatibility but ignored — libcamera IPA owns AWB now.
