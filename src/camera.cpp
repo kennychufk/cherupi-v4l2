@@ -22,12 +22,13 @@ bool Camera::configure(size_t buffer_count) {
               "Failed to acquire camera " + std::to_string(camera_id));
     return false;
   }
+  lcam_acquired_ = true;
 
   cam_config = lcam->generateConfiguration({libcamera::StreamRole::VideoRecording});
   if (!cam_config) {
     LOG_ERROR("Camera", "Failed to generate configuration for camera " +
                             std::to_string(camera_id));
-    lcam->release();
+    releaseConfiguredResources();
     return false;
   }
 
@@ -40,7 +41,7 @@ bool Camera::configure(size_t buffer_count) {
   if (status == libcamera::CameraConfiguration::Invalid) {
     LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) +
                             " configuration is invalid");
-    lcam->release();
+    releaseConfiguredResources();
     return false;
   }
   if (status == libcamera::CameraConfiguration::Adjusted) {
@@ -56,7 +57,7 @@ bool Camera::configure(size_t buffer_count) {
   if (lcam->configure(cam_config.get()) < 0) {
     LOG_ERROR("Camera",
               "Failed to configure camera " + std::to_string(camera_id));
-    lcam->release();
+    releaseConfiguredResources();
     return false;
   }
 
@@ -65,7 +66,7 @@ bool Camera::configure(size_t buffer_count) {
   if (allocator->allocate(stream) < 0) {
     LOG_ERROR("Camera", "Failed to allocate buffers for camera " +
                             std::to_string(camera_id));
-    lcam->release();
+    releaseConfiguredResources();
     return false;
   }
 
@@ -98,7 +99,7 @@ bool Camera::configure(size_t buffer_count) {
         // Unmap any already-mapped fds for this buffer.
         for (auto& [mapped_fd, ptr] : fd_base)
           ::munmap(ptr, fd_total_size[mapped_fd]);
-        lcam->release();
+        releaseConfiguredResources();
         return false;
       }
       fd_base[fd] = base;
@@ -115,13 +116,13 @@ bool Camera::configure(size_t buffer_count) {
     if (!req) {
       LOG_ERROR("Camera", "Failed to create request for camera " +
                               std::to_string(camera_id));
-      lcam->release();
+      releaseConfiguredResources();
       return false;
     }
     if (req->addBuffer(stream, buf) < 0) {
       LOG_ERROR("Camera", "Failed to add buffer to request for camera " +
                               std::to_string(camera_id));
-      lcam->release();
+      releaseConfiguredResources();
       return false;
     }
     requests.push_back(std::move(req));
@@ -186,7 +187,30 @@ bool Camera::stop() {
   lcam->stop();
   lcam->requestCompleted.disconnect(this);
 
-  libcamera::Stream* stream = cam_config->at(0).stream();
+  releaseConfiguredResources();
+
+  state = CameraState::CONFIGURED;
+  LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " stopped");
+  return true;
+}
+
+bool Camera::unconfigure() {
+  if (state == CameraState::RUNNING) {
+    LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) +
+                            ": unconfigure rejected while RUNNING");
+    return false;
+  }
+  if (state == CameraState::IDLE) {
+    return true;  // already there
+  }
+  LOG_INFO("Camera",
+           "Unconfiguring camera " + std::to_string(camera_id));
+  releaseConfiguredResources();
+  state = CameraState::IDLE;
+  return true;
+}
+
+void Camera::releaseConfiguredResources() {
   for (auto& regions : mmap_regions) {
     for (auto& r : regions) {
       if (r.base != MAP_FAILED) {
@@ -198,13 +222,15 @@ bool Camera::stop() {
   mmap_regions.clear();
   mapped_planes.clear();
   requests.clear();
-  allocator->free(stream);
+  if (allocator && cam_config) {
+    allocator->free(cam_config->at(0).stream());
+  }
   allocator.reset();
-  lcam->release();
-
-  state = CameraState::CONFIGURED;
-  LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " stopped");
-  return true;
+  cam_config.reset();
+  if (lcam_acquired_) {
+    lcam->release();
+    lcam_acquired_ = false;
+  }
 }
 
 void Camera::onRequestComplete(libcamera::Request* request) {

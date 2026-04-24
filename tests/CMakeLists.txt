@@ -83,3 +83,21 @@ gtest_discover_tests(hw_tests
     PROPERTIES LABELS hardware
     DISCOVERY_MODE PRE_TEST
 )
+
+# End-to-end pytest suite. Opt-in via -DCHERUPI_BUILD_E2E_TESTS=ON because it
+# requires Python deps (pytest, websocket-client) and live camera hardware.
+if(CHERUPI_BUILD_E2E_TESTS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(
+        NAME e2e_pytest
+        COMMAND ${Python3_EXECUTABLE} -m pytest
+                ${CMAKE_CURRENT_SOURCE_DIR}/e2e
+                --server-binary=$<TARGET_FILE:camera_ws_server>
+                -v
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(e2e_pytest PROPERTIES
+        LABELS e2e
+        TIMEOUT 300
+    )
+endif()

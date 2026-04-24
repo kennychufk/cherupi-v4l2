@@ -16,6 +16,7 @@ namespace command_parser {
 enum class CommandKind {
   Discover,
   Configure,
+  Unconfigure,
   SetSaveMode,
   StartCameras,
   StartStream,

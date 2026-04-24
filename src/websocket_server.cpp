@@ -99,6 +99,9 @@ void WebSocketServer::run() {
                       handleConfigure(
                           ws, cmd.message.value("params", json::object()));
                       break;
+                    case command_parser::CommandKind::Unconfigure:
+                      handleUnconfigure(ws);
+                      break;
                     case command_parser::CommandKind::SetSaveMode:
                       handleSetSaveMode(ws, cmd.message);
                       break;
@@ -295,6 +298,23 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
   } else {
     sendError(ws, "Failed to configure cameras");
   }
+}
+
+void WebSocketServer::handleUnconfigure(
+    uWS::WebSocket<false, true, int>* ws) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::Unconfigure, system_state)) {
+    sendError(ws, "Unconfigure only allowed when CONFIGURED");
+    return;
+  }
+
+  LOG_INFO("WebSocketServer", "Unconfiguring cameras");
+  if (!camera_manager->unconfigureAll()) {
+    sendError(ws, "Failed to unconfigure cameras");
+    return;
+  }
+  system_state = CameraState::IDLE;
+  sendStatus(ws, "Unconfigured: returned to IDLE");
 }
 
 void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,

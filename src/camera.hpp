@@ -22,6 +22,11 @@ class Camera {
   void setAwbConfig(const AwbConfig& cfg) { config.awb = cfg; }
   bool start();
   bool stop();
+  // Release all libcamera resources acquired by configure() and transition
+  // CONFIGURED → IDLE. No-op if already IDLE. Fails if RUNNING — caller must
+  // stop() first. Idempotent against cameras whose resources were already
+  // released by stop() (state flag vs. actual ownership).
+  bool unconfigure();
 
   bool getFrameForStreaming(FrameData& frame);
   bool waitForNewFrame(std::chrono::milliseconds timeout);
@@ -65,6 +70,10 @@ class Camera {
 
   CameraConfig config;
   std::atomic<CameraState> state{CameraState::IDLE};
+  // Tracks whether lcam->acquire() has been called without a matching
+  // release(). stop() releases and clears this; unconfigure() must not
+  // double-release.
+  bool lcam_acquired_ = false;
   std::atomic<uint32_t> frame_counter{0};
   std::atomic<uint32_t> frames_dropped{0};
 
@@ -80,4 +89,8 @@ class Camera {
   std::atomic<bool> should_stop{false};
 
   void onRequestComplete(libcamera::Request* request);
+  // Shared teardown for stop() and unconfigure(): unmap buffers, free
+  // allocator, drop requests, release lcam. Idempotent — safe to call even
+  // if some or all resources were already released.
+  void releaseConfiguredResources();
 };

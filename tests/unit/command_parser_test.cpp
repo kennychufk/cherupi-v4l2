@@ -76,6 +76,21 @@ TEST(CommandParserTest, StateGateConfigureRequiresIdle) {
                                                 CameraState::RUNNING));
 }
 
+TEST(CommandParserTest, ValidUnconfigureCommand) {
+  auto r = command_parser::parseCommand(R"({"cmd":"unconfigure"})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::Unconfigure);
+}
+
+TEST(CommandParserTest, StateGateUnconfigureRequiresConfigured) {
+  EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::Unconfigure,
+                                                CameraState::IDLE));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::Unconfigure,
+                                               CameraState::CONFIGURED));
+  EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::Unconfigure,
+                                                CameraState::RUNNING));
+}
+
 TEST(CommandParserTest, StateGateStartCamerasRequiresConfigured) {
   EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::StartCameras,
                                                 CameraState::IDLE));

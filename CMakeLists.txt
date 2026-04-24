@@ -46,6 +46,7 @@ FetchContent_Declare(
 
 # Fetch GoogleTest for unit/integration tests (opt-in).
 option(CHERUPI_BUILD_TESTS "Build unit and hardware test suites" ON)
+option(CHERUPI_BUILD_E2E_TESTS "Register the Python end-to-end pytest suite with ctest (requires hardware)" OFF)
 if(CHERUPI_BUILD_TESTS)
     FetchContent_Declare(
         googletest

@@ -20,6 +20,9 @@ class CameraManager {
 
   bool startAll();
   bool stopAll();
+  // Release per-camera libcamera resources and return each camera to IDLE.
+  // Caller must ensure cameras aren't RUNNING (stop() first).
+  bool unconfigureAll();
 
   Camera* getCamera(uint32_t camera_id);
   std::vector<Camera*> getAllCameras();

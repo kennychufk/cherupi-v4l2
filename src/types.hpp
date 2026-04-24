@@ -176,6 +176,7 @@ namespace Protocol {
 // Commands from client
 constexpr const char* CMD_DISCOVER = "discover";
 constexpr const char* CMD_CONFIGURE = "configure";
+constexpr const char* CMD_UNCONFIGURE = "unconfigure";
 constexpr const char* CMD_SET_SAVE_MODE = "set_save_mode";
 constexpr const char* CMD_START_CAMERAS = "start_cameras";
 constexpr const char* CMD_START_STREAM = "start_stream";

@@ -8,8 +8,9 @@ WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cam
 
 ```
 src/     C++ server sources and headers (flat; all internal includes are quote-form with just the filename)
-tools/   Standalone companion binaries and scripts (yuv420_convert.cpp, test_client.py)
-tests/   unit/ (no libcamera/hardware needed) and hw/ (requires a live IMX519); fixtures/ holds test inputs
+tools/   Standalone companion binaries (yuv420_convert.cpp)
+tests/   unit/ (no hardware), hw/ (live IMX519 libcamera), e2e/ (pytest over the WebSocket protocol); fixtures/ holds test inputs
+scripts/ run_e2e.sh — full e2e orchestrator across this repo + sibling telefacet clients
 docs/    Protocol spec and design notes
 ```
 
@@ -46,7 +47,14 @@ Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
 ## State Machine
 
-`IDLE → CONFIGURED → RUNNING → CONFIGURED` (stop returns to CONFIGURED; error state exists per-camera).
+`IDLE → CONFIGURED → RUNNING → CONFIGURED → IDLE`
+
+- `configure` IDLE→CONFIGURED (allocates libcamera resources)
+- `start_cameras` CONFIGURED→RUNNING (begins capture)
+- `stop_cameras` RUNNING→CONFIGURED (halts capture, keeps pipeline)
+- `unconfigure` CONFIGURED→IDLE (releases libcamera resources)
+
+A per-camera `ERROR` state exists but is not currently a state-machine target.
 
 ## Save Modes
 
@@ -62,6 +70,7 @@ CMake 3.14+, C++17. Targets:
 - `camera_ws_server` — the server
 - `yuv420_convert` — standalone YUV420→image converter for saved frames
 - `unit_tests` / `hw_tests` — GoogleTest binaries (ctest labels `unit` / `hardware`); gated by `-DCHERUPI_BUILD_TESTS=ON` (default ON)
+- End-to-end pytest suite under `tests/e2e/` — opt in with `-DCHERUPI_BUILD_E2E_TESTS=ON` (ctest label `e2e`, needs `pip install -r tests/e2e/requirements.txt` and live IMX519). See `tests/e2e/README.md`.
 
 ### Dependencies
 - System: `libcamera` (pkg-config), `OpenCV`, `OpenSSL`, `zlib`, pthreads

@@ -110,6 +110,18 @@ bool CameraManager::stopAll() {
   return all_ok;
 }
 
+bool CameraManager::unconfigureAll() {
+  bool all_ok = true;
+  for (auto& camera : cameras) {
+    if (!camera->unconfigure()) {
+      LOG_ERROR("CameraManager", "Failed to unconfigure camera " +
+                                     std::to_string(camera->getId()));
+      all_ok = false;
+    }
+  }
+  return all_ok;
+}
+
 Camera* CameraManager::getCamera(uint32_t camera_id) {
   if (camera_id >= cameras.size()) return nullptr;
   return cameras[camera_id].get();

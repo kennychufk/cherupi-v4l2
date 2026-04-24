@@ -29,15 +29,18 @@ All JSON objects the server sends include a `type` field. All JSON commands the 
 ## 3. State Machine
 
 ```
-IDLE ──configure──▶ CONFIGURED ──start_cameras──▶ RUNNING
- ▲                       ▲                            │
- │                       └─────── stop_cameras ───────┘
- └───────── (re-configure requires IDLE) ─────────────
+                    configure
+IDLE ─────────────────────────────────▶ CONFIGURED ──start_cameras──▶ RUNNING
+ ▲                                          ▲  │                          │
+ │                                          │  │                          │
+ └──────────────── unconfigure ─────────────┘  └────── stop_cameras ──────┘
 ```
 
-- **IDLE** — discovery done, no configuration applied. `configure` is the only state-changing command accepted.
-- **CONFIGURED** — camera pipeline configured; not yet capturing. `start_cameras` moves to RUNNING.
+- **IDLE** — discovery done, no camera pipeline allocated. Accepts `configure`.
+- **CONFIGURED** — camera pipeline configured (libcamera acquired, buffers allocated); not yet capturing. Accepts `start_cameras` (→ RUNNING) or `unconfigure` (→ IDLE, releases pipeline resources).
 - **RUNNING** — cameras capturing. `start_stream` / `stop_stream` enable per-camera delivery. `stop_cameras` returns to CONFIGURED.
+
+To re-configure with a different `CameraConfig`: `unconfigure` (if CONFIGURED) or `stop_cameras` then `unconfigure` (if RUNNING), then `configure`.
 
 Commands rejected outside the required state return an `error` response but do not change state.
 
@@ -98,7 +101,23 @@ All fields under `params` and `params.awb` are optional; omitted fields keep ser
 
 On success the server transitions to **CONFIGURED**.
 
-### 4.3 `set_save_mode`
+### 4.3 `unconfigure`
+Release the camera pipeline resources (libcamera, buffers, mappings) and return to **IDLE**. Required state: **CONFIGURED**. After `unconfigure`, the client must `configure` again before `start_cameras`.
+
+**Request**
+```json
+{"cmd": "unconfigure"}
+```
+
+**Response (success)** → `status`:
+```json
+{"type": "status", "message": "Unconfigured: returned to IDLE"}
+```
+**Response (failure)** → `error` (wrong state, or libcamera resource release failed).
+
+Use `unconfigure` when you want to apply a new `CameraConfig` to the existing server process without disconnecting. The intended flow is `stop_cameras` (if RUNNING) → `unconfigure` → `configure`.
+
+### 4.4 `set_save_mode`
 Configure the optional on-device frame saver. Can be called in any state; takes effect when cameras start.
 
 **Request**
@@ -128,7 +147,7 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 **Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
 
-### 4.4 `start_cameras`
+### 4.5 `start_cameras`
 Required state: **CONFIGURED**. Starts frame saver (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
 
 ```json
@@ -136,7 +155,7 @@ Required state: **CONFIGURED**. Starts frame saver (if non-`none`) and all captu
 ```
 Response: `status` or `error`.
 
-### 4.5 `start_stream`
+### 4.6 `start_stream`
 Required state: **RUNNING**. Begin binary delivery for one camera.
 
 ```json
@@ -144,7 +163,7 @@ Required state: **RUNNING**. Begin binary delivery for one camera.
 ```
 Response: `status` or `error` (e.g. unknown `camera_id`, cameras not running).
 
-### 4.6 `stop_stream`
+### 4.7 `stop_stream`
 Stop binary delivery for one camera. Cameras keep capturing.
 
 ```json
@@ -152,7 +171,7 @@ Stop binary delivery for one camera. Cameras keep capturing.
 ```
 Response: `status` or `error` (if camera wasn't streaming).
 
-### 4.7 `stop_cameras`
+### 4.8 `stop_cameras`
 Required state: **RUNNING**. Stops streaming, stops capture, flushes pending saves, returns to **CONFIGURED**.
 
 ```json
@@ -169,7 +188,7 @@ Required state: **RUNNING**. Stops streaming, stops capture, flushes pending sav
 }
 ```
 
-### 4.8 `reset_frame_counts`
+### 4.9 `reset_frame_counts`
 Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on the saver. Allowed in any state.
 
 ```json
@@ -177,7 +196,7 @@ Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on th
 ```
 Response: `status`.
 
-### 4.9 `set_header_only`
+### 4.10 `set_header_only`
 Toggle header-only streaming mode. When enabled, streamed frames carry a chunk header with `total_chunks = 0` and `total_size = 0`, and **no `CHNK` data packets follow**. Useful for timing/metadata probes without transferring pixel bytes.
 
 ```json
@@ -185,7 +204,7 @@ Toggle header-only streaming mode. When enabled, streamed frames carry a chunk h
 ```
 `enabled` defaults to `false` if omitted. Response: `status`.
 
-### 4.10 Server response types (summary)
+### 4.11 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
@@ -282,6 +301,9 @@ server → <binary: CHNK chunk 1/…>
 
 client → {"cmd":"stop_cameras"}
 server → {"type":"status","message":"All cameras stopped","frames_saved":3200,"bytes_written":19327352832}
+
+client → {"cmd":"unconfigure"}
+server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 ```
 
 ## 7. Error Conditions
