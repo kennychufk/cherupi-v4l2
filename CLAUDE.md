@@ -9,19 +9,20 @@ WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cam
 libcamera (Pi5 PiSP frontend) → YUV420 main stream → app
 - AWB is handled by libcamera's IPA (not custom).
 - Frames carry a FourCC; default is `V4L2_PIX_FMT_YUV420`.
-- `bayer_converter.*` still exists for raw-Bayer paths; `yuv420_convert.cpp` is the current standalone converter for saved frames.
-- `v4l2_capture.cpp` is an unrelated standalone capture utility (not linked into the server).
+- `yuv420_convert.cpp` is the standalone converter for frames written to disk.
 
 ## Components
 
 - `main.cpp` — entry point, signal handling
 - `websocket_server.*` — uWebSockets server, command routing, single-client policy, state machine
+- `command_parser.*` — pure JSON command parsing + state-machine gate (used by `websocket_server`)
 - `camera_manager.*` — multi-camera lifecycle (configure → start → stop)
 - `camera.*` — per-camera libcamera wrapper: owns `libcamera::Camera`, `CameraConfiguration`, `FrameBufferAllocator`, request queue, mmap of DMA buffers, frame callbacks
-- `stream_manager.*` — round-robin streaming, backpressure/skipping, chunked transfer
-- `frame_saver.*` — save modes: NONE / BUFFER / BATCH / CHECKERBOARD
+- `stream_manager.*` — round-robin streaming, backpressure/skipping, chunked transfer (writes to an abstract `FrameSink`)
+- `rate_controller.*` — `AdaptiveRateController`, used by `stream_manager`
+- `frame_sink.hpp` / `uws_frame_sink.hpp` — abstract byte sink + uWebSockets adapter
+- `frame_saver.*` / `frame_saver_helpers.*` — save modes NONE / BUFFER / BATCH / CHECKERBOARD plus pure helpers (filename, timestamped dir, Y-plane extraction)
 - `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection
-- `bayer_converter.*` — Bayer→RGB helper
 - `types.hpp` — logger, protocol constants, `CameraConfig`, `SaveConfig`, chunk headers
 
 ## WebSocket Protocol
@@ -48,9 +49,8 @@ Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
 CMake 3.14+, C++17. Targets:
 - `camera_ws_server` — the server
-- `test_fe_pipeline` — libcamera smoke test (no websockets)
 - `yuv420_convert` — standalone YUV420→image converter for saved frames
-- `v4l2_capture` — legacy standalone capture utility
+- `unit_tests` / `hw_tests` — GoogleTest binaries (ctest labels `unit` / `hardware`); gated by `-DCHERUPI_BUILD_TESTS=ON` (default ON)
 
 ### Dependencies
 - System: `libcamera` (pkg-config), `OpenCV`, `OpenSSL`, `zlib`, pthreads

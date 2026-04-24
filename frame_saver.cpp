@@ -13,6 +13,8 @@
 #include <iostream>
 #include <sstream>
 
+#include "frame_saver_helpers.hpp"
+
 FrameSaver::~FrameSaver() { stop(); }
 
 void FrameSaver::configure(const SaveConfig& cfg) {
@@ -37,43 +39,20 @@ void FrameSaver::configure(const SaveConfig& cfg) {
 
 bool FrameSaver::createOutputDirectory() {
   try {
-    // Check if output_dir is empty or just whitespace
-    std::string trimmed_dir = config.output_dir;
-    trimmed_dir.erase(0, trimmed_dir.find_first_not_of(" \t\n\r"));
-    trimmed_dir.erase(trimmed_dir.find_last_not_of(" \t\n\r") + 1);
-
-    if (trimmed_dir.empty()) {
+    std::string trimmed_dir =
+        frame_saver_helpers::normalizeBaseDir(config.output_dir);
+    if (trimmed_dir == "." && config.output_dir.find_first_not_of(" \t\n\r") ==
+                                  std::string::npos) {
       LOG_WARN("FrameSaver",
                "Empty output directory specified, using current directory");
       actual_output_dir = ".";
       return true;
     }
 
-    // Apply timestamp prefix if requested
     std::string final_dir = trimmed_dir;
     if (config.prepend_timestamp_to_dir) {
-      std::filesystem::path dir_path(trimmed_dir);
-      std::filesystem::path parent_path = dir_path.parent_path();
-      std::string dir_name = dir_path.filename().string();
-
-      // Generate timestamp string (YYYYMMDD-HHMM-)
-      auto now = std::chrono::system_clock::now();
-      auto time_t = std::chrono::system_clock::to_time_t(now);
-      std::tm* tm_ptr = std::localtime(&time_t);
-
-      std::stringstream timestamp_ss;
-      timestamp_ss << std::put_time(tm_ptr, "%Y%m%d-%H%M-");
-      std::string timestamp = timestamp_ss.str();
-
-      // Construct the new directory name with timestamp
-      std::string timestamped_name = timestamp + dir_name;
-
-      if (parent_path.empty() || parent_path == ".") {
-        final_dir = timestamped_name;
-      } else {
-        final_dir = (parent_path / timestamped_name).string();
-      }
-
+      final_dir = frame_saver_helpers::makeTimestampedDir(
+          trimmed_dir, std::chrono::system_clock::now());
       LOG_INFO("FrameSaver", "Timestamp prepended to directory: " +
                                  trimmed_dir + " -> " + final_dir);
     }
@@ -221,31 +200,12 @@ void FrameSaver::saveFrame(const FrameData& frame) {
 bool FrameSaver::detectCheckerboard(const FrameData& frame) {
   auto start_tp = std::chrono::steady_clock::now();
 
-  // YUV420: the Y (luma) plane occupies the first height*bytes_per_line bytes.
-  // Extract it into a packed buffer for the checkerboard detector.
+  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+      frame, config.checkerboard_full_res_detection);
   int out_width =
       config.checkerboard_full_res_detection ? frame.width : frame.width / 2;
   int out_height =
       config.checkerboard_full_res_detection ? frame.height : frame.height / 2;
-  std::vector<uint8_t> grayscale_data(out_width * out_height);
-
-  if (config.checkerboard_full_res_detection) {
-    for (int row = 0; row < static_cast<int>(frame.height); ++row) {
-      std::memcpy(grayscale_data.data() + row * frame.width,
-                  frame.data.data() + row * frame.bytes_per_line,
-                  frame.width);
-    }
-  } else {
-    // 2x subsample: take every other row and column from Y plane
-    for (int row = 0; row < out_height; ++row) {
-      const uint8_t* src =
-          frame.data.data() + (row * 2) * frame.bytes_per_line;
-      uint8_t* dst = grayscale_data.data() + row * out_width;
-      for (int col = 0; col < out_width; ++col) {
-        dst[col] = src[col * 2];
-      }
-    }
-  }
 
   bool detected = checkerboard_detector->detect(grayscale_data.data(),
                                                 out_width, out_height);
@@ -328,7 +288,6 @@ void FrameSaver::writerThreadFunc() {
 
 std::string FrameSaver::generateFilename(uint32_t camera_id,
                                          uint32_t frame_id) {
-  std::stringstream ss;
-  ss << actual_output_dir << "/cam" << camera_id << "-" << frame_id << ".yuv";
-  return ss.str();
+  return frame_saver_helpers::makeFilename(actual_output_dir, camera_id,
+                                           frame_id);
 }

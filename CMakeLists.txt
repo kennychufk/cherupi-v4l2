@@ -44,8 +44,23 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 
+# Fetch GoogleTest for unit/integration tests (opt-in).
+option(CHERUPI_BUILD_TESTS "Build unit and hardware test suites" ON)
+if(CHERUPI_BUILD_TESTS)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.14.0
+        GIT_SHALLOW TRUE
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+endif()
+
 # Make dependencies available
 FetchContent_MakeAvailable(json usockets uwebsockets)
+if(CHERUPI_BUILD_TESTS)
+    FetchContent_MakeAvailable(googletest)
+endif()
 
 # Build uSockets as a static library
 add_library(uSockets STATIC
@@ -102,8 +117,10 @@ set(SOURCES
     camera.cpp
     camera_manager.cpp
     frame_saver.cpp
+    frame_saver_helpers.cpp
     stream_manager.cpp
-    bayer_converter.cpp
+    rate_controller.cpp
+    command_parser.cpp
     checkerboard_detector.cpp
 )
 
@@ -114,8 +131,12 @@ set(HEADERS
     camera.hpp
     camera_manager.hpp
     frame_saver.hpp
+    frame_saver_helpers.hpp
     stream_manager.hpp
-    bayer_converter.h
+    rate_controller.hpp
+    command_parser.hpp
+    frame_sink.hpp
+    uws_frame_sink.hpp
     checkerboard_detector.h
 )
 
@@ -152,31 +173,6 @@ target_compile_options(camera_ws_server PRIVATE
     -ftree-vectorize
 )
 
-add_executable(v4l2_capture v4l2_capture.cpp)
-
-# Smoke test — drives Camera directly via libcamera, no websockets.
-add_executable(test_fe_pipeline
-    test_fe_pipeline.cpp
-    camera.cpp
-    camera_manager.cpp
-    frame_saver.cpp
-    stream_manager.cpp
-    bayer_converter.cpp
-    checkerboard_detector.cpp
-)
-target_include_directories(test_fe_pipeline PRIVATE
-    ${json_SOURCE_DIR}/include
-    ${LIBCAMERA_INCLUDE_DIRS}
-)
-target_link_libraries(test_fe_pipeline
-    ${CMAKE_THREAD_LIBS_INIT}
-    ZLIB::ZLIB
-    uSockets
-    ${OpenCV_LIBS}
-    ${LIBCAMERA_LIBRARIES}
-)
-target_link_directories(test_fe_pipeline PRIVATE ${LIBCAMERA_LIBRARY_DIRS})
-
 # Standalone YUV420 converter for frames saved by FrameSaver
 add_executable(yuv420_convert yuv420_convert.cpp)
 target_compile_options(yuv420_convert PRIVATE -O2)
@@ -187,3 +183,9 @@ target_link_libraries(yuv420_convert ${OpenCV_LIBS})
 install(TARGETS camera_ws_server
     RUNTIME DESTINATION bin
 )
+
+# Tests
+if(CHERUPI_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

@@ -4,6 +4,8 @@
 #include <nlohmann/json.hpp>
 #include <string_view>
 
+#include "command_parser.hpp"
+
 using json = nlohmann::json;
 
 WebSocketServer::WebSocketServer() {
@@ -66,7 +68,8 @@ void WebSocketServer::run() {
                          "Client connected from " +
                              std::string(ws->getRemoteAddressAsText()));
                 has_client = true;
-                stream_manager->setWebSocket(ws);
+                active_sink = std::make_unique<UwsFrameSink>(ws);
+                stream_manager->setSink(active_sink.get());
               },
 
           .message =
@@ -76,32 +79,47 @@ void WebSocketServer::run() {
                   return;
                 }
 
+                auto parsed = command_parser::parseCommand(message);
+                if (std::holds_alternative<std::string>(parsed)) {
+                  const auto& err = std::get<std::string>(parsed);
+                  LOG_ERROR("WebSocketServer", err);
+                  sendError(ws, err);
+                  return;
+                }
+                const auto& cmd = std::get<command_parser::ParsedCommand>(parsed);
+                LOG_DEBUG("WebSocketServer",
+                          "Received command: " +
+                              cmd.message.value("cmd", std::string()));
                 try {
-                  json msg = json::parse(message);
-                  std::string cmd = msg["cmd"];
-
-                  LOG_DEBUG("WebSocketServer", "Received command: " + cmd);
-
-                  if (cmd == Protocol::CMD_DISCOVER) {
-                    handleDiscover(ws);
-                  } else if (cmd == Protocol::CMD_CONFIGURE) {
-                    handleConfigure(ws, msg.value("params", json::object()));
-                  } else if (cmd == Protocol::CMD_SET_SAVE_MODE) {
-                    handleSetSaveMode(ws, msg);
-                  } else if (cmd == Protocol::CMD_START_CAMERAS) {
-                    handleStartCameras(ws);
-                  } else if (cmd == Protocol::CMD_START_STREAM) {
-                    handleStartStream(ws, msg);
-                  } else if (cmd == Protocol::CMD_STOP_STREAM) {
-                    handleStopStream(ws, msg);
-                  } else if (cmd == Protocol::CMD_STOP_CAMERAS) {
-                    handleStopCameras(ws);
-                  } else if (cmd == Protocol::CMD_RESET_FRAME_COUNTS) {
-                    handleResetFrameCounts(ws);
-                  } else if (cmd == Protocol::CMD_SET_HEADER_ONLY) {
-                    handleSetHeaderOnly(ws, msg);
-                  } else {
-                    sendError(ws, "Unknown command: " + cmd);
+                  switch (cmd.kind) {
+                    case command_parser::CommandKind::Discover:
+                      handleDiscover(ws);
+                      break;
+                    case command_parser::CommandKind::Configure:
+                      handleConfigure(
+                          ws, cmd.message.value("params", json::object()));
+                      break;
+                    case command_parser::CommandKind::SetSaveMode:
+                      handleSetSaveMode(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::StartCameras:
+                      handleStartCameras(ws);
+                      break;
+                    case command_parser::CommandKind::StartStream:
+                      handleStartStream(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::StopStream:
+                      handleStopStream(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::StopCameras:
+                      handleStopCameras(ws);
+                      break;
+                    case command_parser::CommandKind::ResetFrameCounts:
+                      handleResetFrameCounts(ws);
+                      break;
+                    case command_parser::CommandKind::SetHeaderOnly:
+                      handleSetHeaderOnly(ws, cmd.message);
+                      break;
                   }
                 } catch (json::exception& e) {
                   LOG_ERROR("WebSocketServer",
@@ -258,31 +276,13 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
 
 void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
                                       const json& params) {
-  if (system_state != CameraState::IDLE) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::Configure, system_state)) {
     sendError(ws, "Cameras must be idle to configure");
     return;
   }
 
-  CameraConfig config;
-
-  // Override with any provided parameters
-  if (params.contains("width")) config.width = params["width"];
-  if (params.contains("height")) config.height = params["height"];
-  if (params.contains("crop_width")) config.crop_width = params["crop_width"];
-  if (params.contains("crop_height"))
-    config.crop_height = params["crop_height"];
-  if (params.contains("crop_left")) config.crop_left = params["crop_left"];
-  if (params.contains("crop_top")) config.crop_top = params["crop_top"];
-
-  // Optional AWB sub-config
-  if (params.contains("awb") && params["awb"].is_object()) {
-    const json& a = params["awb"];
-    if (a.contains("enabled")) config.awb.enabled = a["enabled"];
-    if (a.contains("interval")) config.awb.interval = a["interval"];
-    if (a.contains("speed")) config.awb.speed = a["speed"];
-    if (a.contains("warmup_frames"))
-      config.awb.warmup_frames = a["warmup_frames"];
-  }
+  CameraConfig config = command_parser::buildCameraConfig(params);
 
   LOG_INFO("WebSocketServer", "Configuring cameras with resolution " +
                                   std::to_string(config.width) + "x" +
@@ -299,51 +299,22 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
 
 void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
                                         const json& msg) {
-  SaveConfig config;
-  std::string mode = msg["mode"];
-
-  if (mode == "none") {
-    config.mode = SaveMode::NONE;
-  } else if (mode == "buffer") {
-    config.mode = SaveMode::BUFFER;
-  } else if (mode == "batch") {
-    config.mode = SaveMode::BATCH;
-  } else if (mode == "checkerboard") {
-    config.mode = SaveMode::CHECKERBOARD;
-  } else {
+  auto config = command_parser::buildSaveConfig(msg);
+  if (!config) {
+    std::string mode = msg.value("mode", std::string("(missing)"));
     sendError(ws, "Invalid save mode: " + mode);
     return;
   }
 
-  // Get optional parameters
-  if (msg.contains("params")) {
-    const json& params = msg["params"];
-    if (params.contains("output_dir")) config.output_dir = params["output_dir"];
-    if (params.contains("prepend_timestamp_to_dir"))
-      config.prepend_timestamp_to_dir = params["prepend_timestamp_to_dir"];
-    if (params.contains("batch_size")) config.batch_size = params["batch_size"];
-    if (params.contains("writer_threads"))
-      config.writer_threads = params["writer_threads"];
-
-    // Checkerboard-specific parameters
-    if (params.contains("checkerboard_rows"))
-      config.checkerboard_rows = params["checkerboard_rows"];
-    if (params.contains("checkerboard_cols"))
-      config.checkerboard_cols = params["checkerboard_cols"];
-    if (params.contains("checkerboard_full_res_detection"))
-      config.checkerboard_full_res_detection =
-          params["checkerboard_full_res_detection"];
-    if (params.contains("checkerboard_num_threads"))
-      config.checkerboard_num_threads = params["checkerboard_num_threads"];
-  }
-
-  frame_saver->configure(config);
+  frame_saver->configure(*config);
+  std::string mode = msg.value("mode", std::string());
   LOG_INFO("WebSocketServer", "Save mode configured: " + mode);
   sendStatus(ws, "Save mode configured: " + mode);
 }
 
 void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
-  if (system_state != CameraState::CONFIGURED) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::StartCameras, system_state)) {
     sendError(ws, "Cameras must be configured before starting");
     return;
   }
@@ -373,7 +344,8 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
 
 void WebSocketServer::handleStartStream(uWS::WebSocket<false, true, int>* ws,
                                         const json& msg) {
-  if (system_state != CameraState::RUNNING) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::StartStream, system_state)) {
     sendError(ws, "Cameras must be running to start streaming");
     return;
   }
@@ -404,7 +376,8 @@ void WebSocketServer::handleStopStream(uWS::WebSocket<false, true, int>* ws,
 }
 
 void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
-  if (system_state != CameraState::RUNNING) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::StopCameras, system_state)) {
     sendError(ws, "Cameras are not running");
     return;
   }
@@ -488,7 +461,8 @@ void WebSocketServer::cleanupConnection() {
   LOG_INFO("WebSocketServer", "Cleaning up connection");
 
   // Stop streaming but keep cameras running
-  stream_manager->clearWebSocket();
+  stream_manager->clearSink();
+  active_sink.reset();
 
   // Note: We do NOT stop cameras here to allow frame saving to continue
   // Cameras will only be stopped by explicit stop_cameras command

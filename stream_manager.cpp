@@ -1,7 +1,5 @@
 #include "stream_manager.hpp"
 
-#include <uWS/App.h>
-
 #include <random>
 #include <sstream>
 
@@ -26,15 +24,14 @@ StreamManager::~StreamManager() {
   logStats();
 }
 
-void StreamManager::setWebSocket(uWS::WebSocket<false, true, int>* ws) {
-  std::lock_guard<std::mutex> lock(ws_mutex);
-  ws_connection = ws;
+void StreamManager::setSink(FrameSink* new_sink) {
+  std::lock_guard<std::mutex> lock(sink_mutex);
+  sink = new_sink;
   has_backpressure = false;
   rate_controller.reset();
 
-  LOG_INFO("StreamManager", "WebSocket connection set");
+  LOG_INFO("StreamManager", "Sink attached");
 
-  // Start streaming thread if we have cameras to stream
   if (!streaming_active && !streaming_cameras.empty()) {
     should_stop = false;
     streaming_active = true;
@@ -44,22 +41,17 @@ void StreamManager::setWebSocket(uWS::WebSocket<false, true, int>* ws) {
   }
 }
 
-void StreamManager::clearWebSocket() {
-  LOG_INFO("StreamManager", "Clearing WebSocket connection");
+void StreamManager::clearSink() {
+  LOG_INFO("StreamManager", "Clearing sink");
 
-  // Stop streaming first
   stopAllStreaming();
 
-  // Clear the WebSocket connection
   {
-    std::lock_guard<std::mutex> lock(ws_mutex);
-    ws_connection = nullptr;
+    std::lock_guard<std::mutex> lock(sink_mutex);
+    sink = nullptr;
   }
 
-  // Clean up any in-progress transfer
   cleanupTransfer();
-
-  // Reset rate controller
   rate_controller.reset();
 }
 
@@ -78,10 +70,9 @@ bool StreamManager::startStreamingCamera(uint32_t camera_id) {
   LOG_INFO("StreamManager",
            "Started streaming camera " + std::to_string(camera_id));
 
-  // Start streaming thread if not already running
   if (!streaming_active) {
-    std::lock_guard<std::mutex> lock(ws_mutex);
-    if (ws_connection) {
+    std::lock_guard<std::mutex> lock(sink_mutex);
+    if (sink) {
       should_stop = false;
       streaming_active = true;
       streaming_thread =
@@ -104,7 +95,6 @@ bool StreamManager::stopStreamingCamera(uint32_t camera_id) {
     LOG_INFO("StreamManager",
              "Stopped streaming camera " + std::to_string(camera_id));
 
-    // If this camera is currently being transferred, mark it for cleanup
     {
       std::lock_guard<std::mutex> lock(transfer_mutex);
       if (current_transfer && current_transfer->frame.camera_id == camera_id) {
@@ -119,16 +109,14 @@ bool StreamManager::stopStreamingCamera(uint32_t camera_id) {
 void StreamManager::stopAllStreaming() {
   LOG_INFO("StreamManager", "Stopping all streaming");
 
-  // Clear streaming cameras
   {
     std::lock_guard<std::mutex> lock(streaming_mutex);
     streaming_cameras.clear();
   }
 
-  // Stop streaming thread
   if (streaming_active) {
     should_stop = true;
-    frame_available_cv.notify_all();  // Wake up the streaming thread
+    frame_available_cv.notify_all();
 
     if (streaming_thread && streaming_thread->joinable()) {
       LOG_DEBUG("StreamManager", "Waiting for streaming thread to finish");
@@ -138,7 +126,6 @@ void StreamManager::stopAllStreaming() {
     streaming_active = false;
   }
 
-  // Clean up any in-progress transfer
   cleanupTransfer();
 
   LOG_INFO("StreamManager", "All streaming stopped");
@@ -168,7 +155,7 @@ void StreamManager::notifyBackpressure(bool has_pressure) {
              "Backpressure cleared - current rate: " +
                  std::to_string(rate_controller.getCurrentRate()) +
                  " chunks/sec");
-    frame_available_cv.notify_one();  // Wake up streaming thread
+    frame_available_cv.notify_one();
   }
 }
 
@@ -179,7 +166,6 @@ void StreamManager::streamingLoop() {
   size_t current_index = 0;
 
   while (!should_stop) {
-    // Check if we have backpressure
     if (has_backpressure) {
       LOG_DEBUG("StreamManager", "Waiting for backpressure to clear");
       std::unique_lock<std::mutex> lock(frame_wait_mutex);
@@ -189,18 +175,16 @@ void StreamManager::streamingLoop() {
       continue;
     }
 
-    // Check WebSocket connection
     {
-      std::lock_guard<std::mutex> lock(ws_mutex);
-      if (!ws_connection) {
-        LOG_DEBUG("StreamManager", "No WebSocket connection, waiting");
+      std::lock_guard<std::mutex> lock(sink_mutex);
+      if (!sink) {
+        LOG_DEBUG("StreamManager", "No sink attached, waiting");
         std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
         frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
         continue;
       }
     }
 
-    // Update camera list if needed
     {
       std::lock_guard<std::mutex> lock(streaming_mutex);
       if (streaming_cameras.empty()) {
@@ -210,7 +194,6 @@ void StreamManager::streamingLoop() {
         continue;
       }
 
-      // Rebuild camera order if it changed
       if (camera_order.size() != streaming_cameras.size()) {
         camera_order.clear();
         for (uint32_t cam_id : streaming_cameras) {
@@ -223,13 +206,11 @@ void StreamManager::streamingLoop() {
       }
     }
 
-    // Check for timeout on current transfer
     if (isTransferTimedOut()) {
       LOG_WARN("StreamManager", "Transfer timed out, cleaning up");
       cleanupTransfer();
     }
 
-    // Skip to next camera if transfer is in progress
     {
       std::lock_guard<std::mutex> lock(transfer_mutex);
       if (current_transfer && current_transfer->in_progress) {
@@ -240,7 +221,6 @@ void StreamManager::streamingLoop() {
       }
     }
 
-    // Try to get a frame from cameras (round-robin with skipping)
     bool found_frame = false;
     size_t cameras_checked = 0;
 
@@ -250,7 +230,6 @@ void StreamManager::streamingLoop() {
       current_index = (current_index + 1) % camera_order.size();
       cameras_checked++;
 
-      // Double-check camera is still streaming
       if (!isStreamingCamera(camera_id)) {
         continue;
       }
@@ -268,16 +247,13 @@ void StreamManager::streamingLoop() {
                   "Got frame " + std::to_string(frame.frame_id) +
                       " from camera " + std::to_string(camera_id));
 
-        // Check if we're in header only mode
         bool success = false;
         if (header_only_mode) {
-          // Send only the header, no frame data
           success = sendHeaderOnlyFrame(frame, camera_id);
           if (success) {
             stats.header_only_frames++;
           }
         } else {
-          // Send the full frame with chunks
           success = sendChunkedFrame(frame, camera_id);
         }
 
@@ -290,16 +266,12 @@ void StreamManager::streamingLoop() {
                                         std::to_string(camera_id));
         }
 
-        // Release the streaming frame after send attempt
         camera->releaseStreamingFrame();
       }
     }
 
-    // If no frames found, wait efficiently for new frames
     if (!found_frame && !should_stop) {
       LOG_DEBUG("StreamManager", "No frames available, waiting");
-
-      // Wait for any camera to signal new frame available
       std::unique_lock<std::mutex> lock(frame_wait_mutex);
       frame_available_cv.wait_for(lock, std::chrono::milliseconds(10),
                                   [this] { return should_stop.load(); });
@@ -309,35 +281,37 @@ void StreamManager::streamingLoop() {
   LOG_INFO("StreamManager", "Streaming loop ended");
 }
 
+bool StreamManager::sendFrameForTest(const FrameData& frame,
+                                     uint32_t camera_id) {
+  if (header_only_mode) {
+    return sendHeaderOnlyFrame(frame, camera_id);
+  }
+  return sendChunkedFrame(frame, camera_id);
+}
+
 bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
                                         uint32_t camera_id) {
-  // For header only mode, we send just the chunk header with total_chunks = 0
-  // and total_size = 0, but preserve width, height, and bytes_per_line
-
-  // Create a minimal transfer structure for the header
   ChunkedTransfer transfer;
   transfer.frame = frame;
   transfer.frame_uuid = generateFrameUUID();
-  transfer.total_chunks = 0;  // Indicates header only mode
+  transfer.total_chunks = 0;
   transfer.current_chunk = 0;
   transfer.start_time = std::chrono::steady_clock::now();
-  transfer.in_progress = false;  // No actual transfer
+  transfer.in_progress = false;
 
   LOG_DEBUG("StreamManager", "Sending header only for frame " +
                                  std::to_string(frame.frame_id) +
                                  " from camera " + std::to_string(camera_id));
 
-  // Send chunk header with header_only flag
   return sendChunkHeader(transfer, true);
 }
 
 bool StreamManager::sendChunkedFrame(const FrameData& frame,
                                      uint32_t camera_id) {
-  // Prepare chunked transfer
   {
     std::lock_guard<std::mutex> lock(transfer_mutex);
     current_transfer = std::make_unique<ChunkedTransfer>();
-    current_transfer->frame = frame;  // Deep copy
+    current_transfer->frame = frame;
     current_transfer->frame_uuid = generateFrameUUID();
     current_transfer->total_chunks =
         (frame.data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -352,37 +326,33 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
                 std::to_string(camera_id) + ", " +
                 std::to_string(current_transfer->total_chunks) + " chunks");
 
-  // Send chunk header
-  if (!sendChunkHeader(*current_transfer,
-                       false)) {  // Pass false for normal mode
+  if (!sendChunkHeader(*current_transfer, false)) {
     LOG_ERROR("StreamManager", "Failed to send chunk header");
     cleanupTransfer();
     return false;
   }
 
-  // Track timing for adaptive rate control
   auto last_chunk_time = std::chrono::steady_clock::now();
 
-  // Send all chunks with adaptive pacing
   for (size_t chunk_idx = 0; chunk_idx < current_transfer->total_chunks;
        chunk_idx++) {
-    // Check if we should stop or if transfer was cancelled
     if (should_stop) {
       cleanupTransfer();
       return false;
     }
 
-    // Check if camera is still streaming
-    if (!isStreamingCamera(camera_id)) {
+    // Only enforce the per-camera streaming check when the streaming loop is
+    // driving the send. `sendFrameForTest` skips this so chunking can be
+    // exercised without entering the streaming state.
+    if (streaming_active && !isStreamingCamera(camera_id)) {
       LOG_INFO("StreamManager", "Camera " + std::to_string(camera_id) +
                                     " stopped during transfer");
       cleanupTransfer();
       return false;
     }
 
-    // Check for backpressure and wait if necessary
     int backpressure_wait_count = 0;
-    while (has_backpressure && backpressure_wait_count < 50) {  // Max 5 seconds
+    while (has_backpressure && backpressure_wait_count < 50) {
       LOG_DEBUG("StreamManager", "Backpressure during chunk " +
                                      std::to_string(chunk_idx) + ", waiting");
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -402,7 +372,6 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
       return false;
     }
 
-    // Apply adaptive delay based on rate controller
     auto chunk_delay = rate_controller.getChunkDelay();
     auto now = std::chrono::steady_clock::now();
     auto elapsed = now - last_chunk_time;
@@ -413,7 +382,6 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
 
     last_chunk_time = std::chrono::steady_clock::now();
 
-    // Send chunk
     if (!sendChunkData(*current_transfer, chunk_idx)) {
       LOG_ERROR("StreamManager",
                 "Failed to send chunk " + std::to_string(chunk_idx) + "/" +
@@ -425,12 +393,10 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
     current_transfer->current_chunk = chunk_idx + 1;
     stats.chunks_sent++;
 
-    // Record successful chunk send for rate adaptation
     if (!has_backpressure) {
       rate_controller.recordChunkSent();
     }
 
-    // Log progress periodically for debugging
     if ((chunk_idx + 1) % 20 == 0 ||
         chunk_idx == current_transfer->total_chunks - 1) {
       LOG_DEBUG(
@@ -447,17 +413,15 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
           std::to_string(current_transfer->total_chunks) + " chunks at rate: " +
           std::to_string(rate_controller.getCurrentRate()) + " chunks/sec");
 
-  // Clean up completed transfer
   cleanupTransfer();
   return true;
 }
 
 bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
                                     bool header_only) {
-  std::lock_guard<std::mutex> lock(ws_mutex);
-  if (!ws_connection) return false;
+  std::lock_guard<std::mutex> lock(sink_mutex);
+  if (!sink) return false;
 
-  // Prepare chunk header message
   std::vector<uint8_t> message;
   message.reserve(sizeof(ChunkStartMarker) + sizeof(ChunkHeader));
 
@@ -471,7 +435,6 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.frame_id = transfer.frame.frame_id;
   header.camera_id = transfer.frame.camera_id;
 
-  // For header only mode, set total_chunks and total_size to 0
   if (header_only) {
     header.total_chunks = 0;
     header.total_size = 0;
@@ -480,11 +443,9 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
     header.total_size = transfer.frame.data.size();
   }
 
-  // Always preserve these fields regardless of mode
   header.bytes_per_line = transfer.frame.bytes_per_line;
   header.width = transfer.frame.width;
   header.height = transfer.frame.height;
-
   header.pixel_format = transfer.frame.pixel_format;
   header.frames_saved =
       frame_saver
@@ -495,31 +456,21 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   message.insert(message.end(), header_bytes,
                  header_bytes + sizeof(ChunkHeader));
 
-  try {
-    send_in_progress = true;
-    std::string_view message_view(reinterpret_cast<const char*>(message.data()),
-                                  message.size());
-    ws_connection->send(message_view, uWS::OpCode::BINARY);
-    send_in_progress = false;
-
-    stats.bytes_sent += message.size();
-    return true;
-  } catch (...) {
-    send_in_progress = false;
-    LOG_ERROR("StreamManager", "Exception while sending chunk header");
-    return false;
-  }
+  send_in_progress = true;
+  bool ok = sink->send(message.data(), message.size());
+  send_in_progress = false;
+  if (ok) stats.bytes_sent += message.size();
+  return ok;
 }
 
 bool StreamManager::sendChunkData(const ChunkedTransfer& transfer,
                                   size_t chunk_index) {
-  std::lock_guard<std::mutex> lock(ws_mutex);
-  if (!ws_connection) return false;
+  std::lock_guard<std::mutex> lock(sink_mutex);
+  if (!sink) return false;
 
   size_t offset = chunk_index * CHUNK_SIZE;
   size_t chunk_size = std::min(CHUNK_SIZE, transfer.frame.data.size() - offset);
 
-  // Prepare chunk data message
   std::vector<uint8_t> message;
   message.reserve(sizeof(ChunkData) + chunk_size);
 
@@ -533,24 +484,14 @@ bool StreamManager::sendChunkData(const ChunkedTransfer& transfer,
   message.insert(message.end(), chunk_header_bytes,
                  chunk_header_bytes + sizeof(ChunkData));
 
-  // Add chunk payload
   message.insert(message.end(), transfer.frame.data.begin() + offset,
                  transfer.frame.data.begin() + offset + chunk_size);
 
-  try {
-    send_in_progress = true;
-    std::string_view message_view(reinterpret_cast<const char*>(message.data()),
-                                  message.size());
-    ws_connection->send(message_view, uWS::OpCode::BINARY);
-    send_in_progress = false;
-
-    stats.bytes_sent += message.size();
-    return true;
-  } catch (...) {
-    send_in_progress = false;
-    LOG_ERROR("StreamManager", "Exception while sending chunk data");
-    return false;
-  }
+  send_in_progress = true;
+  bool ok = sink->send(message.data(), message.size());
+  send_in_progress = false;
+  if (ok) stats.bytes_sent += message.size();
+  return ok;
 }
 
 void StreamManager::cleanupTransfer() {

@@ -7,6 +7,7 @@
 #include "frame_saver.hpp"
 #include "stream_manager.hpp"
 #include "types.hpp"
+#include "uws_frame_sink.hpp"
 
 // Include uWebSockets headers directly
 #include <uWS/App.h>
@@ -21,6 +22,7 @@ class WebSocketServer {
   std::unique_ptr<CameraManager> camera_manager;
   std::unique_ptr<FrameSaver> frame_saver;
   std::unique_ptr<StreamManager> stream_manager;
+  std::unique_ptr<UwsFrameSink> active_sink;
 
   std::atomic<bool> has_client{false};
   std::atomic<CameraState> system_state{CameraState::IDLE};
