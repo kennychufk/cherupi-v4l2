@@ -117,19 +117,6 @@ npm run test:e2e -- protocol-rejection.test.js
 |---|---|---|
 | `TELEFACET_WS_URL` | `ws://localhost:9001` | WebSocket URL of the server |
 
-### Via `scripts/run_e2e.sh`
-
-The umbrella script in this repo runs the Python suite plus the web suite (and
-the C++ telefacet suite) back-to-back against one server launch:
-
-```bash
-TELEFACET_WEB_DIR=../../webWs/telefacet-web ./scripts/run_e2e.sh
-```
-
-Each suite is skipped if its source directory or dependencies are missing, so
-the script is safe to run on a dev box that only has one of the clients set
-up.
-
 ### Notes
 
 - Like the Python suite, tests share one server process. Teardown walks the
@@ -148,3 +135,73 @@ up.
 - BATCH mode uses O_DIRECT — don't point `output_dir` at `/tmp` on the Pi
   (tmpfs). A path inside the repo (e.g. `process.cwd() + '/.vitest-e2e-save'`)
   works.
+
+## C++ client e2e suite (telefacet)
+
+The sibling `cppWs/telefacet` repo ships a GoogleTest binary
+(`telefacet_e2e_tests`) that drives a live `camera_ws_server` through the
+production `WebSocketClient` + `ChunkReassembler` — no GLFW/ImGui/OpenGL, just
+the headless `libtelefacet_core` protocol layer. Passing it proves wire-level
+compatibility between the server and the C++ client.
+
+See `cppWs/telefacet/tests/README.md` for the full reference.
+
+### Build
+
+GUI deps are skipped for the test binary:
+
+```bash
+cd ../../cppWs/telefacet
+cmake -B build -DTELEFACET_BUILD_TESTS=ON -DTELEFACET_BUILD_GUI=OFF
+cmake --build build --target telefacet_e2e_tests
+```
+
+### Run
+
+Start the server (here), then run the C++ suite (there):
+
+```bash
+# in this repo
+./build/camera_ws_server &
+
+# in telefacet
+cd ../../cppWs/telefacet
+TELEFACET_WS_URL=ws://localhost:9001 ./build/tests/telefacet_e2e_tests
+
+# or via ctest
+ctest --test-dir build -L e2e --output-on-failure
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TELEFACET_WS_URL` | `ws://localhost:9001` | WebSocket URL of the server |
+
+### Notes
+
+- Tests are not parallel-safe — the server only accepts one client at a time.
+  Run them serially (ctest's default without `-j`).
+- Save-mode tests (`SaveMode.*`) write files to
+  `./telefacet_e2e_out/<label>/` under the test binary's CWD; the **server**
+  is the writer, so the path must resolve on the server's host. Co-locate the
+  client and server, or skip with `--gtest_filter=-*SaveMode*`.
+- The resolution-snap invariant from the web-suite notes applies here too:
+  assert against the *actual* `frame->width`/`height` reported by the server
+  and use `frame->bytes_per_line * height * 3 / 2` as the expected payload
+  size — do not pin to the requested cfg values or use
+  `width * height * 3 / 2` (IMX519 aligns the row stride).
+
+## Via `scripts/run_e2e.sh`
+
+The umbrella script in this repo runs the Python suite plus the web suite and
+the C++ telefacet suite back-to-back against one server launch:
+
+```bash
+TELEFACET_WEB_DIR=../../webWs/telefacet-web \
+TELEFACET_DIR=../../cppWs/telefacet \
+  ./scripts/run_e2e.sh
+```
+
+Each suite is skipped if its source directory or build artifact is missing
+(`TELEFACET_DIR` must point at a tree where `build/tests/telefacet_e2e_tests`
+has been built), so the script is safe to run on a dev box that only has one
+of the clients set up.
