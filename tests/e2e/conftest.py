@@ -17,7 +17,7 @@ from typing import Iterator, Optional
 
 import pytest
 
-from .client import CherupiClient, CommandError
+from .client import CherupiClient
 
 
 DEFAULT_HOST = "localhost"
@@ -156,21 +156,24 @@ def _reset_server_state(c: CherupiClient) -> None:
     release the sensor before the next test reconfigures; without it the
     IMX519 pipeline intermittently times out on the next start_cameras.
     """
+    # Tests may have abrupt-closed the socket before we got here; in that
+    # state every step below will raise something other than CommandError.
+    # Each step is best-effort, so swallow broadly.
     try:
         c.set_header_only(False)
-    except (CommandError, TimeoutError, OSError):
+    except Exception:
         pass
     try:
         c.stop_cameras()
-    except (CommandError, TimeoutError, OSError):
+    except Exception:
         pass
     try:
         c.unconfigure()
-    except (CommandError, TimeoutError, OSError):
+    except Exception:
         pass
     try:
         c.set_save_mode("none")
-    except (CommandError, TimeoutError, OSError):
+    except Exception:
         pass
     # Let the sensor pipeline fully release before the next acquire.
     time.sleep(0.5)

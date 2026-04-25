@@ -160,6 +160,25 @@ class CherupiClient:
         self._ws = None
         self._rx_thread = None
 
+    def abrupt_close(self) -> None:
+        """Drop the underlying TCP socket without sending a WebSocket close frame.
+
+        Server observes WS close code 1006 (abnormal closure). Used by tests that
+        simulate a client crash / network drop mid-session.
+        """
+        self._stop.set()
+        if self._ws is not None:
+            sock = getattr(self._ws, "sock", None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        if self._rx_thread is not None:
+            self._rx_thread.join(timeout=2.0)
+        self._ws = None
+        self._rx_thread = None
+
     def __enter__(self) -> "CherupiClient":
         self.connect()
         return self
