@@ -69,6 +69,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+telefacet_e2e_out/
 
 ## Python
 # Byte-compiled / optimized / DLL files
