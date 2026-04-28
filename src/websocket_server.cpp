@@ -68,7 +68,7 @@ void WebSocketServer::run() {
                          "Client connected from " +
                              std::string(ws->getRemoteAddressAsText()));
                 has_client = true;
-                active_sink = std::make_unique<UwsFrameSink>(ws);
+                active_sink = std::make_shared<UwsFrameSink>(ws);
                 stream_manager->setSink(active_sink.get());
               },
 
@@ -482,6 +482,15 @@ void WebSocketServer::cleanupConnection() {
 
   // Stop streaming but keep cameras running
   stream_manager->clearSink();
+
+  // Disarm the sink so any lambdas already enqueued on the loop (from the
+  // streaming thread, before clearSink joined it) skip ws_->send when they
+  // run — uWS will free the underlying WebSocket once this close handler
+  // returns. The shared_ptr keeps the sink itself alive so those lambdas can
+  // still safely decrement the buffered counter.
+  if (active_sink) {
+    active_sink->invalidate();
+  }
   active_sink.reset();
 
   // Note: We do NOT stop cameras here to allow frame saving to continue

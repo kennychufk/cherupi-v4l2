@@ -22,7 +22,7 @@ class WebSocketServer {
   std::unique_ptr<CameraManager> camera_manager;
   std::unique_ptr<FrameSaver> frame_saver;
   std::unique_ptr<StreamManager> stream_manager;
-  std::unique_ptr<UwsFrameSink> active_sink;
+  std::shared_ptr<UwsFrameSink> active_sink;
 
   std::atomic<bool> has_client{false};
   std::atomic<CameraState> system_state{CameraState::IDLE};
