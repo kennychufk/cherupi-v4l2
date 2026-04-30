@@ -9,7 +9,10 @@ Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
                const CameraConfig& cfg)
     : camera_id(id), lcam(std::move(cam)), config(cfg) {}
 
-Camera::~Camera() { stop(); }
+Camera::~Camera() {
+  stop();
+  unconfigure();
+}
 
 bool Camera::configure(size_t buffer_count) {
   if (state != CameraState::IDLE) {
@@ -160,6 +163,7 @@ bool Camera::start() {
   }
 
   for (auto& req : requests) {
+    req->reuse(libcamera::Request::ReuseBuffers);
     if (lcam->queueRequest(req.get()) < 0) {
       LOG_ERROR("Camera", "Failed to queue initial request for camera " +
                               std::to_string(camera_id));
@@ -186,8 +190,6 @@ bool Camera::stop() {
 
   lcam->stop();
   lcam->requestCompleted.disconnect(this);
-
-  releaseConfiguredResources();
 
   state = CameraState::CONFIGURED;
   LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " stopped");
