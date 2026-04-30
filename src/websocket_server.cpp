@@ -1,5 +1,6 @@
 #include "websocket_server.hpp"
 
+#include <cmath>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string_view>
@@ -125,6 +126,9 @@ void WebSocketServer::run() {
                       break;
                     case command_parser::CommandKind::SetHeaderOnly:
                       handleSetHeaderOnly(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::SetLensPosition:
+                      handleSetLensPosition(ws, cmd.message);
                       break;
                   }
                 } catch (json::exception& e) {
@@ -474,6 +478,32 @@ void WebSocketServer::handleSetHeaderOnly(uWS::WebSocket<false, true, int>* ws,
   // Send confirmation status
   sendStatus(
       ws, "Header only mode " + std::string(enabled ? "enabled" : "disabled"));
+}
+
+void WebSocketServer::handleSetLensPosition(
+    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::SetLensPosition, system_state)) {
+    sendError(ws, "set_lens_position requires CONFIGURED or RUNNING state");
+    return;
+  }
+  if (!msg.contains("lens_position") || !msg["lens_position"].is_number()) {
+    sendError(ws, "set_lens_position requires numeric 'lens_position' field");
+    return;
+  }
+  float lp = msg["lens_position"].get<float>();
+  if (!std::isfinite(lp) || lp > 32.0f) {
+    sendError(ws,
+              "lens_position out of range (expected < 0 for AF, or [0, 32])");
+    return;
+  }
+  camera_manager->setLensPosition(lp);
+  if (lp < 0.0f) {
+    sendStatus(ws, "Lens position: continuous autofocus");
+  } else {
+    sendStatus(ws, "Lens position: manual @ " + std::to_string(lp) +
+                       " dioptres");
+  }
 }
 
 void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,

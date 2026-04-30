@@ -20,6 +20,11 @@ class Camera {
 
   bool configure(size_t buffer_count = 4);
   void setAwbConfig(const AwbConfig& cfg) { config.awb = cfg; }
+  // Set focus. lens_position < 0 ⇒ continuous AF; ≥ 0 ⇒ manual at that lens
+  // position in dioptres (~0 = infinity, ~10 = closest macro; per-tuning
+  // map clamps the actual range). Thread-safe; takes effect on the next
+  // queued request when RUNNING, or at the next start() when CONFIGURED.
+  void setLensPosition(float lens_position);
   bool start();
   bool stop();
   // Release all libcamera resources acquired by configure() and transition
@@ -87,6 +92,16 @@ class Camera {
   bool streaming_frame_in_use = false;
 
   std::atomic<bool> should_stop{false};
+
+  // Focus state. af_continuous_ true ⇒ AfModeContinuous; false ⇒ AfModeManual
+  // at lens_position_ dioptres. focus_generation_ is bumped on every
+  // setLensPosition; the libcamera-completion thread compares it against
+  // applied_focus_generation_ to decide whether to attach controls to the
+  // next requeued request.
+  std::atomic<bool> af_continuous_{true};
+  std::atomic<float> lens_position_{0.0f};
+  std::atomic<uint64_t> focus_generation_{0};
+  uint64_t applied_focus_generation_ = 0;  // libcamera-completion thread only
 
   void onRequestComplete(libcamera::Request* request);
   // Shared teardown for stop() and unconfigure(): unmap buffers, free

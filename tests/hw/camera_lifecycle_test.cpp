@@ -44,4 +44,18 @@ TEST(CameraLifecycleTest, ConfigureRejectedWhileRunning) {
   mgr.stopAll();
 }
 
+TEST(CameraLifecycleTest, SetLensPositionAcceptedAcrossLifecycle) {
+  CameraManager mgr;
+  ASSERT_GE(mgr.discoverCameras(), 1u);
+  ASSERT_TRUE(mgr.configureAll(CameraConfig{}));
+  // CONFIGURED: value should be stashed; applied at start().
+  mgr.setLensPosition(3.0f);
+  ASSERT_TRUE(mgr.startAll());
+  EXPECT_TRUE(mgr.areAnyRunning());
+  // RUNNING: switch to AF, then back to a different manual value.
+  mgr.setLensPosition(-1.0f);
+  mgr.setLensPosition(6.0f);
+  ASSERT_TRUE(mgr.stopAll());
+}
+
 }  // namespace

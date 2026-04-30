@@ -155,4 +155,29 @@ TEST(CommandParserTest, BuildSaveConfigRejectsMissingMode) {
   EXPECT_FALSE(cfg.has_value());
 }
 
+TEST(CommandParserTest, ValidSetLensPositionManual) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_lens_position","lens_position":4.5})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  const auto& cmd = std::get<ParsedCommand>(r);
+  EXPECT_EQ(cmd.kind, CommandKind::SetLensPosition);
+  EXPECT_FLOAT_EQ(cmd.message["lens_position"].get<float>(), 4.5f);
+}
+
+TEST(CommandParserTest, ValidSetLensPositionAfSentinel) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_lens_position","lens_position":-1})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::SetLensPosition);
+}
+
+TEST(CommandParserTest, StateGateSetLensPositionRequiresConfiguredOrRunning) {
+  EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::SetLensPosition,
+                                                CameraState::IDLE));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::SetLensPosition,
+                                               CameraState::CONFIGURED));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::SetLensPosition,
+                                               CameraState::RUNNING));
+}
+
 }  // namespace

@@ -153,6 +153,15 @@ bool Camera::start() {
   libcamera::ControlList controls(lcam->controls());
   controls.set(libcamera::controls::AwbMode,
                static_cast<int32_t>(libcamera::controls::AwbAuto));
+  if (af_continuous_.load()) {
+    controls.set(libcamera::controls::AfMode,
+                 static_cast<int32_t>(libcamera::controls::AfModeContinuous));
+  } else {
+    controls.set(libcamera::controls::AfMode,
+                 static_cast<int32_t>(libcamera::controls::AfModeManual));
+    controls.set(libcamera::controls::LensPosition, lens_position_.load());
+  }
+  applied_focus_generation_ = focus_generation_.load();
 
   should_stop = false;
   if (lcam->start(&controls) < 0) {
@@ -287,8 +296,37 @@ void Camera::onRequestComplete(libcamera::Request* request) {
 requeue:
   if (!should_stop) {
     request->reuse(libcamera::Request::ReuseBuffers);
+    uint64_t gen = focus_generation_.load();
+    if (gen != applied_focus_generation_) {
+      libcamera::ControlList& reqctrls = request->controls();
+      if (af_continuous_.load()) {
+        reqctrls.set(
+            libcamera::controls::AfMode,
+            static_cast<int32_t>(libcamera::controls::AfModeContinuous));
+      } else {
+        reqctrls.set(libcamera::controls::AfMode,
+                     static_cast<int32_t>(libcamera::controls::AfModeManual));
+        reqctrls.set(libcamera::controls::LensPosition, lens_position_.load());
+      }
+      applied_focus_generation_ = gen;
+    }
     lcam->queueRequest(request);
   }
+}
+
+void Camera::setLensPosition(float lens_position) {
+  if (lens_position < 0.0f) {
+    af_continuous_.store(true);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setLensPosition: continuous AF");
+  } else {
+    lens_position_.store(lens_position);
+    af_continuous_.store(false);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setLensPosition: manual @ " +
+                           std::to_string(lens_position) + " dioptres");
+  }
+  focus_generation_.fetch_add(1);
 }
 
 bool Camera::getFrameForStreaming(FrameData& frame) {

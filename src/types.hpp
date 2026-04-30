@@ -185,6 +185,7 @@ constexpr const char* CMD_STOP_STREAM = "stop_stream";
 constexpr const char* CMD_STOP_CAMERAS = "stop_cameras";
 constexpr const char* CMD_RESET_FRAME_COUNTS = "reset_frame_counts";
 constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";
+constexpr const char* CMD_SET_LENS_POSITION = "set_lens_position";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";

@@ -35,6 +35,10 @@ class CameraManager {
   bool areAnyRunning() const;
   void resetFrameCounts();
 
+  // Apply the same focus setting to every discovered camera. lens_position
+  // semantics: < 0 ⇒ continuous AF; ≥ 0 ⇒ manual at that dioptre value.
+  void setLensPosition(float lens_position);
+
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;
   std::vector<std::unique_ptr<Camera>> cameras;

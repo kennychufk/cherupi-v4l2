@@ -155,3 +155,11 @@ void CameraManager::resetFrameCounts() {
   LOG_INFO("CameraManager", "Reset frame counts for all " +
                                 std::to_string(cameras.size()) + " cameras");
 }
+
+void CameraManager::setLensPosition(float lens_position) {
+  for (auto& camera : cameras) camera->setLensPosition(lens_position);
+  LOG_INFO("CameraManager",
+           "setLensPosition(" + std::to_string(lens_position) +
+               ") fanned out to " + std::to_string(cameras.size()) +
+               " camera(s)");
+}
