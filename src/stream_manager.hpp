@@ -27,6 +27,16 @@ struct ChunkedTransfer {
 class StreamManager {
  public:
   static constexpr size_t CHUNK_SIZE = 32768;  // Fixed 32KB chunks
+  // Soft cap on the sink's bufferedAmount() that the streaming thread
+  // enforces proactively. Without this, on a real LAN the server can
+  // queue several MB of in-flight binary chunks before the network drains
+  // them; a TEXT control reply that lands behind that backlog reaches the
+  // client late, and a Node client whose event loop is swamped processing
+  // the burst of binary 'message' events can take >30 s to issue its
+  // next outbound command — long enough to trip test timeouts.
+  // 512 KB ≈ ~5 ms drain at 1 Gbps wired LAN, which keeps text replies
+  // responsive without choking binary throughput.
+  static constexpr size_t SOFT_BUFFER_LIMIT = 512 * 1024;
 
   StreamManager(CameraManager* mgr, FrameSaver* saver);
   ~StreamManager();
@@ -107,6 +117,10 @@ class StreamManager {
   } stats;
 
   void streamingLoop();
+  // Block the streaming thread until sink->bufferedAmount() drops below
+  // SOFT_BUFFER_LIMIT, or `should_stop` fires, or we've waited too long.
+  // Returns true if the caller should proceed, false if it should bail.
+  bool waitForBufferDrain();
   bool sendChunkedFrame(const FrameData& frame, uint32_t camera_id);
   bool sendHeaderOnlyFrame(const FrameData& frame, uint32_t camera_id);
   bool sendChunkHeader(const ChunkedTransfer& transfer, bool header_only);

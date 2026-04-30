@@ -175,26 +175,29 @@ void StreamManager::streamingLoop() {
       continue;
     }
 
+    // Snapshot sink/camera state under the locks, then release them BEFORE
+    // sleeping. Holding sink_mutex or streaming_mutex across cv.wait_for
+    // starves the loop thread on the WS message handler — stopStreamingCamera
+    // / clearSink lock the same mutexes, and on a hot streaming path the
+    // streaming thread would re-acquire the lock between wait_for ticks
+    // faster than the kernel could schedule the loop-thread waiter.
+    bool no_sink = false;
     {
       std::lock_guard<std::mutex> lock(sink_mutex);
-      if (!sink) {
-        LOG_DEBUG("StreamManager", "No sink attached, waiting");
-        std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
-        frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
-        continue;
-      }
+      no_sink = (sink == nullptr);
+    }
+    if (no_sink) {
+      LOG_DEBUG("StreamManager", "No sink attached, waiting");
+      std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
+      frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
+      continue;
     }
 
+    bool no_cameras = false;
     {
       std::lock_guard<std::mutex> lock(streaming_mutex);
-      if (streaming_cameras.empty()) {
-        LOG_DEBUG("StreamManager", "No cameras streaming, waiting");
-        std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
-        frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
-        continue;
-      }
-
-      if (camera_order.size() != streaming_cameras.size()) {
+      no_cameras = streaming_cameras.empty();
+      if (!no_cameras && camera_order.size() != streaming_cameras.size()) {
         camera_order.clear();
         for (uint32_t cam_id : streaming_cameras) {
           camera_order.push_back(cam_id);
@@ -205,11 +208,22 @@ void StreamManager::streamingLoop() {
                                        " cameras");
       }
     }
+    if (no_cameras) {
+      LOG_DEBUG("StreamManager", "No cameras streaming, waiting");
+      std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
+      frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
+      continue;
+    }
 
     if (isTransferTimedOut()) {
       LOG_WARN("StreamManager", "Transfer timed out, cleaning up");
       cleanupTransfer();
     }
+
+    // Don't start a new frame while the WS outgoing buffer is already over
+    // the soft cap — otherwise we widen the gap any TEXT control reply
+    // (status / error) has to drain past on its way to the client.
+    if (!waitForBufferDrain()) continue;
 
     {
       std::lock_guard<std::mutex> lock(transfer_mutex);
@@ -279,6 +293,34 @@ void StreamManager::streamingLoop() {
   }
 
   LOG_INFO("StreamManager", "Streaming loop ended");
+}
+
+bool StreamManager::waitForBufferDrain() {
+  // Snapshot the sink under sink_mutex, but release the mutex before
+  // sleeping — otherwise clearSink() (which also takes sink_mutex on the
+  // loop thread during cleanupConnection) would block until we return.
+  FrameSink* s = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(sink_mutex);
+    s = sink;
+  }
+  if (!s) return true;
+  if (s->bufferedAmount() <= SOFT_BUFFER_LIMIT) return true;
+
+  // Cap the wait: at LAN speeds 512 KB drains in ~5 ms, so 2 s of
+  // ~5 ms ticks is ample. If we hit the cap something else is wrong
+  // (network stalled, client gone) and the rest of the loop will pick
+  // it up via the timeout / sink-cleared paths.
+  for (int i = 0; i < 400; ++i) {
+    if (should_stop.load()) return false;
+    {
+      std::lock_guard<std::mutex> lock(sink_mutex);
+      if (!sink) return true;
+      if (sink->bufferedAmount() <= SOFT_BUFFER_LIMIT) return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;  // give up waiting; let the rate controller / drain handle it
 }
 
 bool StreamManager::sendFrameForTest(const FrameData& frame,
@@ -368,6 +410,14 @@ bool StreamManager::sendChunkedFrame(const FrameData& frame,
       LOG_ERROR("StreamManager", "Backpressure timeout at chunk " +
                                      std::to_string(chunk_idx) +
                                      ", aborting transfer");
+      cleanupTransfer();
+      return false;
+    }
+
+    // Mid-frame cap: a 6 MB IMX519 frame is ~200 chunks; without this an
+    // in-flight frame can balloon the buffer well past SOFT_BUFFER_LIMIT
+    // before the next frame's check runs.
+    if (!waitForBufferDrain()) {
       cleanupTransfer();
       return false;
     }
