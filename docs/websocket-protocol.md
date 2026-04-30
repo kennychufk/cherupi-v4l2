@@ -66,7 +66,22 @@ Enumerate cameras. Allowed in any state.
 
 `id` is the stable index used by `start_stream`, `stop_stream`, and in binary frame headers.
 
-### 4.2 `configure`
+### 4.2 `get_state`
+Query the current state-machine state. Allowed in any state. Clients should send this immediately after connecting to synchronise their local state with the server rather than assuming IDLE.
+
+**Request**
+```json
+{"cmd": "get_state"}
+```
+
+**Response**
+```json
+{"type": "state", "state": "idle"}
+```
+
+`state` is one of `"idle"`, `"configured"`, or `"running"`.
+
+### 4.3 `configure`
 Apply identical configuration to all cameras. Required state: **IDLE**.
 
 **Request**
@@ -101,7 +116,7 @@ All fields under `params` and `params.awb` are optional; omitted fields keep ser
 
 On success the server transitions to **CONFIGURED**.
 
-### 4.3 `unconfigure`
+### 4.4 `unconfigure`
 Release the camera pipeline resources (libcamera, buffers, mappings) and return to **IDLE**. Required state: **CONFIGURED**. After `unconfigure`, the client must `configure` again before `start_cameras`.
 
 **Request**
@@ -117,7 +132,7 @@ Release the camera pipeline resources (libcamera, buffers, mappings) and return 
 
 Use `unconfigure` when you want to apply a new `CameraConfig` to the existing server process without disconnecting. The intended flow is `stop_cameras` (if RUNNING) → `unconfigure` → `configure`.
 
-### 4.4 `set_save_mode`
+### 4.5 `set_save_mode`
 Configure the optional on-device frame saver. Can be called in any state; takes effect when cameras start.
 
 **Request**
@@ -147,7 +162,7 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 **Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
 
-### 4.5 `start_cameras`
+### 4.6 `start_cameras`
 Required state: **CONFIGURED**. Starts frame saver (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
 
 ```json
@@ -155,7 +170,7 @@ Required state: **CONFIGURED**. Starts frame saver (if non-`none`) and all captu
 ```
 Response: `status` or `error`.
 
-### 4.6 `start_stream`
+### 4.7 `start_stream`
 Required state: **RUNNING**. Begin binary delivery for one camera.
 
 ```json
@@ -163,7 +178,7 @@ Required state: **RUNNING**. Begin binary delivery for one camera.
 ```
 Response: `status` or `error` (e.g. unknown `camera_id`, cameras not running).
 
-### 4.7 `stop_stream`
+### 4.8 `stop_stream`
 Stop binary delivery for one camera. Cameras keep capturing.
 
 ```json
@@ -171,7 +186,7 @@ Stop binary delivery for one camera. Cameras keep capturing.
 ```
 Response: `status` or `error` (if camera wasn't streaming).
 
-### 4.8 `stop_cameras`
+### 4.9 `stop_cameras`
 Required state: **RUNNING**. Stops streaming, stops capture, flushes pending saves, returns to **CONFIGURED**.
 
 ```json
@@ -188,7 +203,7 @@ Required state: **RUNNING**. Stops streaming, stops capture, flushes pending sav
 }
 ```
 
-### 4.9 `reset_frame_counts`
+### 4.10 `reset_frame_counts`
 Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on the saver. Allowed in any state.
 
 ```json
@@ -196,7 +211,7 @@ Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on th
 ```
 Response: `status`.
 
-### 4.10 `set_header_only`
+### 4.11 `set_header_only`
 Toggle header-only streaming mode. When enabled, streamed frames carry a chunk header with `total_chunks = 0` and `total_size = 0`, and **no `CHNK` data packets follow**. Useful for timing/metadata probes without transferring pixel bytes.
 
 ```json
@@ -204,11 +219,12 @@ Toggle header-only streaming mode. When enabled, streamed frames carry a chunk h
 ```
 `enabled` defaults to `false` if omitted. Response: `status`.
 
-### 4.11 Server response types (summary)
+### 4.12 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
+| `state` | `state` (`"idle"` \| `"configured"` \| `"running"`) | Reply to `get_state` |
 | `status` | `message`, optionally `frames_saved`, `bytes_written` | Successful command, state change |
 | `error` | `message` | Bad JSON, unknown command, wrong state, invalid arg, handler exception |
 

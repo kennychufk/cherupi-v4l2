@@ -175,6 +175,7 @@ struct SaveConfig {
 namespace Protocol {
 // Commands from client
 constexpr const char* CMD_DISCOVER = "discover";
+constexpr const char* CMD_GET_STATE = "get_state";
 constexpr const char* CMD_CONFIGURE = "configure";
 constexpr const char* CMD_UNCONFIGURE = "unconfigure";
 constexpr const char* CMD_SET_SAVE_MODE = "set_save_mode";
@@ -187,6 +188,7 @@ constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
+constexpr const char* TYPE_STATE = "state";
 constexpr const char* TYPE_STATUS = "status";
 constexpr const char* TYPE_FRAME = "frame";
 constexpr const char* TYPE_ERROR = "error";

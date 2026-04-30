@@ -33,6 +33,7 @@ class WebSocketServer {
 
   // Message handlers
   void handleDiscover(uWS::WebSocket<false, true, int>* ws);
+  void handleGetState(uWS::WebSocket<false, true, int>* ws);
   void handleConfigure(uWS::WebSocket<false, true, int>* ws,
                        const nlohmann::json& params);
   void handleUnconfigure(uWS::WebSocket<false, true, int>* ws);

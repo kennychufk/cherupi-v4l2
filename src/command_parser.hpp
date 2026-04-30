@@ -15,6 +15,7 @@ namespace command_parser {
 
 enum class CommandKind {
   Discover,
+  GetState,
   Configure,
   Unconfigure,
   SetSaveMode,

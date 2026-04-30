@@ -20,6 +20,8 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
   CommandKind kind;
   if (cmd == Protocol::CMD_DISCOVER) {
     kind = CommandKind::Discover;
+  } else if (cmd == Protocol::CMD_GET_STATE) {
+    kind = CommandKind::GetState;
   } else if (cmd == Protocol::CMD_CONFIGURE) {
     kind = CommandKind::Configure;
   } else if (cmd == Protocol::CMD_UNCONFIGURE) {
@@ -56,6 +58,7 @@ std::optional<SaveMode> parseSaveMode(const std::string& mode) {
 bool isCommandAllowed(CommandKind kind, CameraState current) {
   switch (kind) {
     case CommandKind::Discover:
+    case CommandKind::GetState:
     case CommandKind::SetSaveMode:
     case CommandKind::ResetFrameCounts:
     case CommandKind::SetHeaderOnly:

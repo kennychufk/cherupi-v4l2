@@ -95,6 +95,9 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::Discover:
                       handleDiscover(ws);
                       break;
+                    case command_parser::CommandKind::GetState:
+                      handleGetState(ws);
+                      break;
                     case command_parser::CommandKind::Configure:
                       handleConfigure(
                           ws, cmd.message.value("params", json::object()));
@@ -274,6 +277,19 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
 
   LOG_INFO("WebSocketServer",
            "Discovered " + std::to_string(count) + " cameras");
+  ws->send(response.dump(), uWS::OpCode::TEXT);
+}
+
+void WebSocketServer::handleGetState(uWS::WebSocket<false, true, int>* ws) {
+  const char* state_str;
+  switch (system_state.load()) {
+    case CameraState::CONFIGURED: state_str = "configured"; break;
+    case CameraState::RUNNING:    state_str = "running";    break;
+    default:                      state_str = "idle";       break;
+  }
+  json response;
+  response["type"]  = Protocol::TYPE_STATE;
+  response["state"] = state_str;
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
