@@ -180,4 +180,29 @@ TEST(CommandParserTest, StateGateSetLensPositionRequiresConfiguredOrRunning) {
                                                CameraState::RUNNING));
 }
 
+TEST(CommandParserTest, ValidSetExposureTimeManual) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_exposure_time","exposure_time":10000})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  const auto& cmd = std::get<ParsedCommand>(r);
+  EXPECT_EQ(cmd.kind, CommandKind::SetExposureTime);
+  EXPECT_EQ(cmd.message["exposure_time"].get<int32_t>(), 10000);
+}
+
+TEST(CommandParserTest, ValidSetExposureTimeAutoSentinel) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_exposure_time","exposure_time":-1})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::SetExposureTime);
+}
+
+TEST(CommandParserTest, StateGateSetExposureTimeRequiresConfiguredOrRunning) {
+  EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::SetExposureTime,
+                                                CameraState::IDLE));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::SetExposureTime,
+                                               CameraState::CONFIGURED));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::SetExposureTime,
+                                               CameraState::RUNNING));
+}
+
 }  // namespace

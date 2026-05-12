@@ -38,6 +38,9 @@ class CameraManager {
   // Apply the same focus setting to every discovered camera. lens_position
   // semantics: < 0 ⇒ continuous AF; ≥ 0 ⇒ manual at that dioptre value.
   void setLensPosition(float lens_position);
+  // Apply the same exposure setting to every discovered camera.
+  // exposure_time_us < 0 ⇒ auto AE; > 0 ⇒ manual shutter in microseconds.
+  void setExposureTime(int32_t exposure_time_us);
 
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;

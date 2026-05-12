@@ -58,4 +58,18 @@ TEST(CameraLifecycleTest, SetLensPositionAcceptedAcrossLifecycle) {
   ASSERT_TRUE(mgr.stopAll());
 }
 
+TEST(CameraLifecycleTest, SetExposureTimeAcceptedAcrossLifecycle) {
+  CameraManager mgr;
+  ASSERT_GE(mgr.discoverCameras(), 1u);
+  ASSERT_TRUE(mgr.configureAll(CameraConfig{}));
+  // CONFIGURED: stashed, applied at start().
+  mgr.setExposureTime(10000);
+  ASSERT_TRUE(mgr.startAll());
+  EXPECT_TRUE(mgr.areAnyRunning());
+  // RUNNING: switch to auto AE, then back to a different manual value.
+  mgr.setExposureTime(-1);
+  mgr.setExposureTime(20000);
+  ASSERT_TRUE(mgr.stopAll());
+}
+
 }  // namespace

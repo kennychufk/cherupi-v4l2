@@ -244,7 +244,31 @@ In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (
 
 **libcamera prerequisite:** the deployed libcamera tuning JSON for IMX519 must include the `rpi.af` algorithm block (the apt-installed Pi tuning ships with it). Without it, libcamera silently ignores `AfMode` / `LensPosition`. The IMX519 PDAF parsing patch is optional — without it, continuous AF still works via CDAF, just with slower hunt.
 
-### 4.13 Server response types (summary)
+### 4.13 `set_exposure_time`
+Set the exposure (shutter) mode. Required state: **CONFIGURED** or **RUNNING** (rejected in IDLE; no camera pipeline exists there).
+
+Single field `exposure_time` (integer, microseconds):
+
+- **`exposure_time < 0`** (e.g. `-1`) — engage auto AE (`ExposureTimeMode = ExposureTimeModeAuto`). This is also the server's default at first start.
+- **`exposure_time > 0`** — manual shutter at that duration (`ExposureTimeMode = ExposureTimeModeManual`, `ExposureTime = exposure_time`). Valid range: `[1, 1000000]` µs (1 µs to 1 s).
+- **`exposure_time == 0`** — rejected (not a physical shutter duration).
+
+The setting is **global** — every discovered camera receives the same value.
+
+**Request**
+```json
+{"cmd": "set_exposure_time", "exposure_time": -1}
+```
+```json
+{"cmd": "set_exposure_time", "exposure_time": 10000}
+```
+
+**Response (success)** → `status` (`"Exposure time: auto AE"` or `"Exposure time: manual @ <value> µs"`).
+**Response (failure)** → `error` (wrong state, missing or non-numeric `exposure_time`, `== 0`, or `> 1000000`).
+
+In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (via libcamera's initial `ControlList`). In **RUNNING** it is attached to the next requeued capture request and takes effect within ~1 frame. The setting persists across `stop_cameras` / `start_cameras` cycles within the same session.
+
+### 4.14 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|

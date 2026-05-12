@@ -163,3 +163,9 @@ void CameraManager::setLensPosition(float lens_position) {
                ") fanned out to " + std::to_string(cameras.size()) +
                " camera(s)");
 }
+
+void CameraManager::setExposureTime(int32_t exposure_time_us) {
+  for (auto& camera : cameras) camera->setExposureTime(exposure_time_us);
+  LOG_INFO("CameraManager", "setExposureTime fanned out to " +
+                                std::to_string(cameras.size()) + " camera(s)");
+}

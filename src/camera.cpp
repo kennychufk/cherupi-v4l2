@@ -163,6 +163,16 @@ bool Camera::start() {
   }
   applied_focus_generation_ = focus_generation_.load();
 
+  if (ae_auto_.load()) {
+    controls.set(libcamera::controls::ExposureTimeMode,
+                 static_cast<int32_t>(libcamera::controls::ExposureTimeModeAuto));
+  } else {
+    controls.set(libcamera::controls::ExposureTimeMode,
+                 static_cast<int32_t>(libcamera::controls::ExposureTimeModeManual));
+    controls.set(libcamera::controls::ExposureTime, exposure_time_us_.load());
+  }
+  applied_exposure_generation_ = exposure_generation_.load();
+
   should_stop = false;
   if (lcam->start(&controls) < 0) {
     LOG_ERROR("Camera",
@@ -310,6 +320,19 @@ requeue:
       }
       applied_focus_generation_ = gen;
     }
+    uint64_t exp_gen = exposure_generation_.load();
+    if (exp_gen != applied_exposure_generation_) {
+      libcamera::ControlList& reqctrls = request->controls();
+      if (ae_auto_.load()) {
+        reqctrls.set(libcamera::controls::ExposureTimeMode,
+                     static_cast<int32_t>(libcamera::controls::ExposureTimeModeAuto));
+      } else {
+        reqctrls.set(libcamera::controls::ExposureTimeMode,
+                     static_cast<int32_t>(libcamera::controls::ExposureTimeModeManual));
+        reqctrls.set(libcamera::controls::ExposureTime, exposure_time_us_.load());
+      }
+      applied_exposure_generation_ = exp_gen;
+    }
     lcam->queueRequest(request);
   }
 }
@@ -327,6 +350,21 @@ void Camera::setLensPosition(float lens_position) {
                            std::to_string(lens_position) + " dioptres");
   }
   focus_generation_.fetch_add(1);
+}
+
+void Camera::setExposureTime(int32_t exposure_time_us) {
+  if (exposure_time_us < 0) {
+    ae_auto_.store(true);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setExposureTime: auto AE");
+  } else {
+    exposure_time_us_.store(exposure_time_us);
+    ae_auto_.store(false);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setExposureTime: manual @ " +
+                           std::to_string(exposure_time_us) + " \xc2\xb5s");
+  }
+  exposure_generation_.fetch_add(1);
 }
 
 bool Camera::getFrameForStreaming(FrameData& frame) {

@@ -25,6 +25,10 @@ class Camera {
   // map clamps the actual range). Thread-safe; takes effect on the next
   // queued request when RUNNING, or at the next start() when CONFIGURED.
   void setLensPosition(float lens_position);
+  // Set exposure time. exposure_time_us < 0 ⇒ auto AE; > 0 ⇒ manual at that
+  // value in microseconds. Thread-safe; same generation-counter pattern as
+  // setLensPosition.
+  void setExposureTime(int32_t exposure_time_us);
   bool start();
   bool stop();
   // Release all libcamera resources acquired by configure() and transition
@@ -102,6 +106,11 @@ class Camera {
   std::atomic<float> lens_position_{0.0f};
   std::atomic<uint64_t> focus_generation_{0};
   uint64_t applied_focus_generation_ = 0;  // libcamera-completion thread only
+
+  std::atomic<bool>     ae_auto_{true};
+  std::atomic<int32_t>  exposure_time_us_{0};
+  std::atomic<uint64_t> exposure_generation_{0};
+  uint64_t              applied_exposure_generation_ = 0;  // libcamera-completion thread only
 
   void onRequestComplete(libcamera::Request* request);
   // Shared teardown for stop() and unconfigure(): unmap buffers, free

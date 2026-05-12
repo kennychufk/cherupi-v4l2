@@ -50,6 +50,8 @@ class WebSocketServer {
                            const nlohmann::json& msg);
   void handleSetLensPosition(uWS::WebSocket<false, true, int>* ws,
                              const nlohmann::json& msg);
+  void handleSetExposureTime(uWS::WebSocket<false, true, int>* ws,
+                             const nlohmann::json& msg);
 
   void sendStatus(uWS::WebSocket<false, true, int>* ws,
                   const std::string& message);

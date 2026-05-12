@@ -26,6 +26,7 @@ enum class CommandKind {
   ResetFrameCounts,
   SetHeaderOnly,
   SetLensPosition,
+  SetExposureTime,
 };
 
 struct ParsedCommand {

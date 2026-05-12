@@ -130,6 +130,9 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::SetLensPosition:
                       handleSetLensPosition(ws, cmd.message);
                       break;
+                    case command_parser::CommandKind::SetExposureTime:
+                      handleSetExposureTime(ws, cmd.message);
+                      break;
                   }
                 } catch (json::exception& e) {
                   LOG_ERROR("WebSocketServer",
@@ -503,6 +506,30 @@ void WebSocketServer::handleSetLensPosition(
   } else {
     sendStatus(ws, "Lens position: manual @ " + std::to_string(lp) +
                        " dioptres");
+  }
+}
+
+void WebSocketServer::handleSetExposureTime(
+    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::SetExposureTime, system_state)) {
+    sendError(ws, "set_exposure_time requires CONFIGURED or RUNNING state");
+    return;
+  }
+  if (!msg.contains("exposure_time") || !msg["exposure_time"].is_number()) {
+    sendError(ws, "set_exposure_time requires numeric 'exposure_time' field (microseconds)");
+    return;
+  }
+  int32_t et = msg["exposure_time"].get<int32_t>();
+  if (et == 0 || et > 1'000'000) {
+    sendError(ws, "exposure_time out of range (< 0 for auto AE, or [1, 1000000] \xc2\xb5s)");
+    return;
+  }
+  camera_manager->setExposureTime(et);
+  if (et < 0) {
+    sendStatus(ws, "Exposure time: auto AE");
+  } else {
+    sendStatus(ws, "Exposure time: manual @ " + std::to_string(et) + " \xc2\xb5s");
   }
 }
 
