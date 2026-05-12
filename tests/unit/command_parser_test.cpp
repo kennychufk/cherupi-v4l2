@@ -205,4 +205,38 @@ TEST(CommandParserTest, StateGateSetExposureTimeRequiresConfiguredOrRunning) {
                                                CameraState::RUNNING));
 }
 
+TEST(CommandParserTest, ValidSetFrameDurationLock) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_frame_duration","frame_duration":33333})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  const auto& cmd = std::get<ParsedCommand>(r);
+  EXPECT_EQ(cmd.kind, CommandKind::SetFrameDuration);
+  EXPECT_EQ(cmd.message["frame_duration"].get<int64_t>(), 33333);
+}
+
+TEST(CommandParserTest, ValidSetFrameDurationUnsetSentinel) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"set_frame_duration","frame_duration":-1})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::SetFrameDuration);
+}
+
+TEST(CommandParserTest, ValidGetFrameDurationLimits) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"get_frame_duration_limits"})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind,
+            CommandKind::GetFrameDurationLimits);
+}
+
+TEST(CommandParserTest, StateGateFrameDurationCmdsRequireConfiguredOrRunning) {
+  for (auto kind : {CommandKind::SetFrameDuration,
+                    CommandKind::GetFrameDurationLimits}) {
+    EXPECT_FALSE(command_parser::isCommandAllowed(kind, CameraState::IDLE));
+    EXPECT_TRUE(
+        command_parser::isCommandAllowed(kind, CameraState::CONFIGURED));
+    EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING));
+  }
+}
+
 }  // namespace

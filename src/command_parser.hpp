@@ -27,6 +27,8 @@ enum class CommandKind {
   SetHeaderOnly,
   SetLensPosition,
   SetExposureTime,
+  SetFrameDuration,
+  GetFrameDurationLimits,
 };
 
 struct ParsedCommand {

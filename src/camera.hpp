@@ -29,6 +29,21 @@ class Camera {
   // value in microseconds. Thread-safe; same generation-counter pattern as
   // setLensPosition.
   void setExposureTime(int32_t exposure_time_us);
+  // Set frame duration. frame_duration_us > 0 ⇒ lock FrameDurationLimits to
+  // {x, x} (fixed frame interval / framerate). ≤ 0 ⇒ unset: at start() the
+  // control is omitted (libcamera defaults); when transitioning to unset
+  // while RUNNING the camera's HW max range is applied so any previous lock
+  // is released. Thread-safe; same generation-counter pattern.
+  void setFrameDuration(int64_t frame_duration_us);
+  // Returns the currently-configured frame duration in microseconds, or 0 if
+  // unset (no fixed FrameDurationLimits applied).
+  int64_t getCurrentFrameDuration() const {
+    return frame_duration_us_.load();
+  }
+  // Returns {min, max} hardware FrameDurationLimits in microseconds from
+  // libcamera's ControlInfoMap. Returns {0, 0} if the control is not
+  // advertised. Requires the camera to be acquired (CONFIGURED or RUNNING).
+  std::pair<int64_t, int64_t> getFrameDurationLimitsHw() const;
   bool start();
   bool stop();
   // Release all libcamera resources acquired by configure() and transition
@@ -111,6 +126,13 @@ class Camera {
   std::atomic<int32_t>  exposure_time_us_{0};
   std::atomic<uint64_t> exposure_generation_{0};
   uint64_t              applied_exposure_generation_ = 0;  // libcamera-completion thread only
+
+  // Frame duration state. 0 ⇒ unset (no FrameDurationLimits applied); > 0 ⇒
+  // lock both min and max to this value. Same generation-counter pattern as
+  // focus/exposure for runtime updates on the libcamera-completion thread.
+  std::atomic<int64_t>  frame_duration_us_{0};
+  std::atomic<uint64_t> frame_duration_generation_{0};
+  uint64_t              applied_frame_duration_generation_ = 0;  // libcamera-completion thread only
 
   void onRequestComplete(libcamera::Request* request);
   // Shared teardown for stop() and unconfigure(): unmap buffers, free

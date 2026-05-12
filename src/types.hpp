@@ -187,6 +187,8 @@ constexpr const char* CMD_RESET_FRAME_COUNTS = "reset_frame_counts";
 constexpr const char* CMD_SET_HEADER_ONLY = "set_header_only";
 constexpr const char* CMD_SET_LENS_POSITION = "set_lens_position";
 constexpr const char* CMD_SET_EXPOSURE_TIME = "set_exposure_time";
+constexpr const char* CMD_SET_FRAME_DURATION = "set_frame_duration";
+constexpr const char* CMD_GET_FRAME_DURATION_LIMITS = "get_frame_duration_limits";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
@@ -194,4 +196,5 @@ constexpr const char* TYPE_STATE = "state";
 constexpr const char* TYPE_STATUS = "status";
 constexpr const char* TYPE_FRAME = "frame";
 constexpr const char* TYPE_ERROR = "error";
+constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
 }  // namespace Protocol

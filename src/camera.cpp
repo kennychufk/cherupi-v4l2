@@ -173,6 +173,14 @@ bool Camera::start() {
   }
   applied_exposure_generation_ = exposure_generation_.load();
 
+  int64_t fd_initial = frame_duration_us_.load();
+  if (fd_initial > 0) {
+    int64_t v[2] = {fd_initial, fd_initial};
+    controls.set(libcamera::controls::FrameDurationLimits,
+                 libcamera::Span<const int64_t, 2>(v));
+  }
+  applied_frame_duration_generation_ = frame_duration_generation_.load();
+
   should_stop = false;
   if (lcam->start(&controls) < 0) {
     LOG_ERROR("Camera",
@@ -333,6 +341,26 @@ requeue:
       }
       applied_exposure_generation_ = exp_gen;
     }
+    uint64_t fd_gen = frame_duration_generation_.load();
+    if (fd_gen != applied_frame_duration_generation_) {
+      libcamera::ControlList& reqctrls = request->controls();
+      int64_t fd = frame_duration_us_.load();
+      if (fd > 0) {
+        int64_t v[2] = {fd, fd};
+        reqctrls.set(libcamera::controls::FrameDurationLimits,
+                     libcamera::Span<const int64_t, 2>(v));
+      } else {
+        // Runtime "unset": release the lock by applying the HW max range
+        // (omitting the control would just leave the previous lock in place).
+        auto [hw_min, hw_max] = getFrameDurationLimitsHw();
+        if (hw_max > 0) {
+          int64_t v[2] = {hw_min, hw_max};
+          reqctrls.set(libcamera::controls::FrameDurationLimits,
+                       libcamera::Span<const int64_t, 2>(v));
+        }
+      }
+      applied_frame_duration_generation_ = fd_gen;
+    }
     lcam->queueRequest(request);
   }
 }
@@ -365,6 +393,32 @@ void Camera::setExposureTime(int32_t exposure_time_us) {
                            std::to_string(exposure_time_us) + " \xc2\xb5s");
   }
   exposure_generation_.fetch_add(1);
+}
+
+void Camera::setFrameDuration(int64_t frame_duration_us) {
+  if (frame_duration_us <= 0) {
+    frame_duration_us_.store(0);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setFrameDuration: unset");
+  } else {
+    frame_duration_us_.store(frame_duration_us);
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                           " setFrameDuration: locked @ " +
+                           std::to_string(frame_duration_us) + " \xc2\xb5s");
+  }
+  frame_duration_generation_.fetch_add(1);
+}
+
+std::pair<int64_t, int64_t> Camera::getFrameDurationLimitsHw() const {
+  if (!lcam_acquired_) return {0, 0};
+  const auto& cmap = lcam->controls();
+  auto it = cmap.find(&libcamera::controls::FrameDurationLimits);
+  if (it == cmap.end()) return {0, 0};
+  // The Raspberry Pi pipeline handler registers FrameDurationLimits with
+  // scalar int64_t min/max bounds (despite the control type being
+  // Span<int64_t, 2>).
+  const libcamera::ControlInfo& info = it->second;
+  return {info.min().get<int64_t>(), info.max().get<int64_t>()};
 }
 
 bool Camera::getFrameForStreaming(FrameData& frame) {

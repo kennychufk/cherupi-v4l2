@@ -133,6 +133,12 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::SetExposureTime:
                       handleSetExposureTime(ws, cmd.message);
                       break;
+                    case command_parser::CommandKind::SetFrameDuration:
+                      handleSetFrameDuration(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::GetFrameDurationLimits:
+                      handleGetFrameDurationLimits(ws);
+                      break;
                   }
                 } catch (json::exception& e) {
                   LOG_ERROR("WebSocketServer",
@@ -531,6 +537,52 @@ void WebSocketServer::handleSetExposureTime(
   } else {
     sendStatus(ws, "Exposure time: manual @ " + std::to_string(et) + " \xc2\xb5s");
   }
+}
+
+void WebSocketServer::handleSetFrameDuration(
+    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::SetFrameDuration, system_state)) {
+    sendError(ws, "set_frame_duration requires CONFIGURED or RUNNING state");
+    return;
+  }
+  if (!msg.contains("frame_duration") || !msg["frame_duration"].is_number()) {
+    sendError(ws, "set_frame_duration requires numeric 'frame_duration' field (microseconds)");
+    return;
+  }
+  int64_t fd = msg["frame_duration"].get<int64_t>();
+  if (fd > 1'000'000'000) {
+    sendError(ws, "frame_duration out of range (\xe2\x89\xa4 0 to unset, or [1, 1000000000] \xc2\xb5s)");
+    return;
+  }
+  camera_manager->setFrameDuration(fd);
+  if (fd <= 0) {
+    sendStatus(ws, "Frame duration: unset");
+  } else {
+    sendStatus(ws, "Frame duration: locked @ " + std::to_string(fd) + " \xc2\xb5s");
+  }
+}
+
+void WebSocketServer::handleGetFrameDurationLimits(
+    uWS::WebSocket<false, true, int>* ws) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::GetFrameDurationLimits, system_state)) {
+    sendError(ws, "get_frame_duration_limits requires CONFIGURED or RUNNING state");
+    return;
+  }
+  auto [hw_min, hw_max] = camera_manager->getFrameDurationLimitsHw();
+  int64_t current = camera_manager->getCurrentFrameDuration();
+
+  json response;
+  response["type"] = Protocol::TYPE_FRAME_DURATION_LIMITS;
+  response["min"] = hw_min;
+  response["max"] = hw_max;
+  if (current > 0) {
+    response["current"] = {{"min", current}, {"max", current}};
+  } else {
+    response["current"] = nullptr;
+  }
+  ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
 void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,

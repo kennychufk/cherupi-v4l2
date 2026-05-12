@@ -72,4 +72,32 @@ TEST(CameraLifecycleTest, SetExposureTimeAcceptedAcrossLifecycle) {
   ASSERT_TRUE(mgr.stopAll());
 }
 
+TEST(CameraLifecycleTest, SetFrameDurationAcceptedAcrossLifecycle) {
+  CameraManager mgr;
+  ASSERT_GE(mgr.discoverCameras(), 1u);
+  ASSERT_TRUE(mgr.configureAll(CameraConfig{}));
+  // CONFIGURED: stashed, applied at start().
+  mgr.setFrameDuration(33333);  // ~30 fps
+  EXPECT_EQ(mgr.getCurrentFrameDuration(), 33333);
+  ASSERT_TRUE(mgr.startAll());
+  EXPECT_TRUE(mgr.areAnyRunning());
+  // RUNNING: unset, then re-lock at a different value.
+  mgr.setFrameDuration(-1);
+  EXPECT_EQ(mgr.getCurrentFrameDuration(), 0);
+  mgr.setFrameDuration(16667);  // ~60 fps
+  EXPECT_EQ(mgr.getCurrentFrameDuration(), 16667);
+  ASSERT_TRUE(mgr.stopAll());
+}
+
+TEST(CameraLifecycleTest, FrameDurationLimitsHwAdvertisedAfterConfigure) {
+  CameraManager mgr;
+  ASSERT_GE(mgr.discoverCameras(), 1u);
+  ASSERT_TRUE(mgr.configureAll(CameraConfig{}));
+  auto [lo, hi] = mgr.getFrameDurationLimitsHw();
+  // Pi/IMX519 always advertises a non-trivial range. Don't pin the exact
+  // numbers (tuning-dependent), just sanity-check the relationship.
+  EXPECT_GT(lo, 0);
+  EXPECT_GT(hi, lo);
+}
+
 }  // namespace

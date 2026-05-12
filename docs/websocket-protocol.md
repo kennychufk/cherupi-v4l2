@@ -268,13 +268,65 @@ The setting is **global** — every discovered camera receives the same value.
 
 In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (via libcamera's initial `ControlList`). In **RUNNING** it is attached to the next requeued capture request and takes effect within ~1 frame. The setting persists across `stop_cameras` / `start_cameras` cycles within the same session.
 
-### 4.14 Server response types (summary)
+### 4.14 `set_frame_duration`
+Lock the per-frame interval (and therefore the framerate) by setting libcamera's `FrameDurationLimits` to `{frame_duration, frame_duration}`. Required state: **CONFIGURED** or **RUNNING** (rejected in IDLE; no camera pipeline exists there).
+
+Single field `frame_duration` (integer, microseconds):
+
+- **`frame_duration <= 0`** — **unset**. At the next `start_cameras` no `FrameDurationLimits` is applied (libcamera defaults — frame interval driven by exposure). When unset mid-stream, the previous lock is released by applying the sensor's hardware max range to the next requeued request.
+- **`frame_duration > 0`** — lock both min and max to that value. E.g. `33333` µs ≈ 30 fps, `16667` µs ≈ 60 fps. Valid range: `[1, 1000000000]` µs. libcamera silently clamps to the sensor's hardware-supported range; use `get_frame_duration_limits` to discover it.
+
+The setting is **global** — every discovered camera receives the same value. Server default at first start is **unset**.
+
+**Request**
+```json
+{"cmd": "set_frame_duration", "frame_duration": 33333}
+```
+```json
+{"cmd": "set_frame_duration", "frame_duration": -1}
+```
+
+**Response (success)** → `status` (`"Frame duration: unset"` or `"Frame duration: locked @ <value> µs"`).
+**Response (failure)** → `error` (wrong state, missing or non-numeric `frame_duration`, or `> 1000000000`).
+
+In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (via libcamera's initial `ControlList`). In **RUNNING** it is attached to the next requeued capture request and takes effect within ~1 frame. The setting persists across `stop_cameras` / `start_cameras` cycles within the same session.
+
+Note: with manual exposure (`set_exposure_time` > 0), the effective frame rate is bounded by `max(exposure_time, frame_duration)` — libcamera cannot deliver frames faster than the shutter integrates.
+
+### 4.15 `get_frame_duration_limits`
+Query the sensor's hardware `FrameDurationLimits` range and the currently-applied lock (if any). Required state: **CONFIGURED** or **RUNNING** (the limits come from libcamera's `ControlInfoMap`, which is only populated after `configure`).
+
+**Request**
+```json
+{"cmd": "get_frame_duration_limits"}
+```
+
+**Response**
+```json
+{
+  "type": "frame_duration_limits",
+  "min": 33,
+  "max": 120000000,
+  "current": {"min": 33333, "max": 33333}
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `min` | integer | Sensor hardware minimum frame duration in µs |
+| `max` | integer | Sensor hardware maximum frame duration in µs |
+| `current` | object \| `null` | `{min, max}` when a lock is in effect (currently `min == max`); `null` when unset |
+
+All discovered cameras run the same sensor (IMX519), so the response carries a single shared range rather than per-camera entries.
+
+### 4.16 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
 | `state` | `state` (`"idle"` \| `"configured"` \| `"running"`) | Reply to `get_state` |
 | `status` | `message`, optionally `frames_saved`, `bytes_written` | Successful command, state change |
+| `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `error` | `message` | Bad JSON, unknown command, wrong state, invalid arg, handler exception |
 
 ## 5. Binary Frame Protocol

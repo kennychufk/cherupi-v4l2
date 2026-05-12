@@ -169,3 +169,19 @@ void CameraManager::setExposureTime(int32_t exposure_time_us) {
   LOG_INFO("CameraManager", "setExposureTime fanned out to " +
                                 std::to_string(cameras.size()) + " camera(s)");
 }
+
+void CameraManager::setFrameDuration(int64_t frame_duration_us) {
+  for (auto& camera : cameras) camera->setFrameDuration(frame_duration_us);
+  LOG_INFO("CameraManager", "setFrameDuration fanned out to " +
+                                std::to_string(cameras.size()) + " camera(s)");
+}
+
+int64_t CameraManager::getCurrentFrameDuration() const {
+  if (cameras.empty()) return 0;
+  return cameras.front()->getCurrentFrameDuration();
+}
+
+std::pair<int64_t, int64_t> CameraManager::getFrameDurationLimitsHw() const {
+  if (cameras.empty()) return {0, 0};
+  return cameras.front()->getFrameDurationLimitsHw();
+}

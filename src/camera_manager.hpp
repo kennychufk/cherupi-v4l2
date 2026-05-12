@@ -41,6 +41,16 @@ class CameraManager {
   // Apply the same exposure setting to every discovered camera.
   // exposure_time_us < 0 ⇒ auto AE; > 0 ⇒ manual shutter in microseconds.
   void setExposureTime(int32_t exposure_time_us);
+  // Apply the same frame-duration lock to every discovered camera.
+  // frame_duration_us > 0 ⇒ lock FrameDurationLimits to {x, x}; ≤ 0 ⇒ unset.
+  void setFrameDuration(int64_t frame_duration_us);
+  // Currently-applied frame duration in microseconds (0 ⇒ unset). Read from
+  // the first camera since the setting is fanned out identically.
+  int64_t getCurrentFrameDuration() const;
+  // Hardware FrameDurationLimits {min, max} in microseconds, taken from the
+  // first camera. Returns {0, 0} if cameras aren't acquired or the control
+  // isn't advertised.
+  std::pair<int64_t, int64_t> getFrameDurationLimitsHw() const;
 
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;

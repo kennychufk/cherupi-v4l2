@@ -44,6 +44,10 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
     kind = CommandKind::SetLensPosition;
   } else if (cmd == Protocol::CMD_SET_EXPOSURE_TIME) {
     kind = CommandKind::SetExposureTime;
+  } else if (cmd == Protocol::CMD_SET_FRAME_DURATION) {
+    kind = CommandKind::SetFrameDuration;
+  } else if (cmd == Protocol::CMD_GET_FRAME_DURATION_LIMITS) {
+    kind = CommandKind::GetFrameDurationLimits;
   } else {
     return "Unknown command: " + cmd;
   }
@@ -79,6 +83,8 @@ bool isCommandAllowed(CommandKind kind, CameraState current) {
       return current == CameraState::RUNNING;
     case CommandKind::SetLensPosition:
     case CommandKind::SetExposureTime:
+    case CommandKind::SetFrameDuration:
+    case CommandKind::GetFrameDurationLimits:
       return current == CameraState::CONFIGURED ||
              current == CameraState::RUNNING;
   }
