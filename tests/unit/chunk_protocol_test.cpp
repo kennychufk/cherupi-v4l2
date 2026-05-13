@@ -9,17 +9,18 @@ namespace {
 
 TEST(ChunkProtocolTest, StructSizesMatchWireFormat) {
   // Wire format is packed; any silent drift in these sizes breaks every
-  // existing client.
+  // existing client. ChunkHeader grew from 40→52 bytes at protocol v3 (added
+  // timestamp_us uint64 + frame_duration_us uint32).
   EXPECT_EQ(sizeof(ChunkStartMarker), 8u);
-  EXPECT_EQ(sizeof(ChunkHeader), 40u);
+  EXPECT_EQ(sizeof(ChunkHeader), 52u);
   EXPECT_EQ(sizeof(ChunkData), 16u);
 }
 
 TEST(ChunkProtocolTest, StartMarkerByteLayout) {
   ChunkStartMarker marker{};
-  // 'CHUN' little-endian = 4E 55 48 43, version 2 = 02 00 00 00
+  // 'CHUN' little-endian = 4E 55 48 43, version 3 = 03 00 00 00
   const uint8_t expected[8] = {0x4E, 0x55, 0x48, 0x43,
-                               0x02, 0x00, 0x00, 0x00};
+                               0x03, 0x00, 0x00, 0x00};
   EXPECT_EQ(0, std::memcmp(&marker, expected, sizeof(expected)));
 }
 
@@ -67,6 +68,9 @@ TEST(ChunkProtocolTest, ChunkHeaderFieldOffsetsAreStable) {
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.height) - base, 28);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.pixel_format) - base, 32);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.frames_saved) - base, 36);
+  // v3 additions
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.timestamp_us) - base, 40);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.frame_duration_us) - base, 48);
 }
 
 }  // namespace

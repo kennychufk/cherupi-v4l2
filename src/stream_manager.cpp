@@ -501,6 +501,8 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
       frame_saver
           ? frame_saver->getFramesSavedForCamera(transfer.frame.camera_id)
           : 0;
+  header.timestamp_us = transfer.frame.timestamp_us;
+  header.frame_duration_us = transfer.frame.frame_duration_us;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,

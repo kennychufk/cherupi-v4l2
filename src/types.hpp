@@ -72,7 +72,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 2;
+  uint32_t version = 3;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -86,6 +86,16 @@ struct ChunkHeader {
   uint32_t height;
   uint32_t pixel_format;  // FourCC (e.g. YUV420 = V4L2_PIX_FMT_YUV420)
   uint32_t frames_saved;
+  // v3 additions: hardware-level frame timing from libcamera metadata.
+  // timestamp_us: monotonic hardware capture timestamp in µs (from
+  //   FrameMetadata::timestamp / 1000). Clients can diff consecutive
+  //   timestamps to compute actual inter-frame intervals (real FPS).
+  // frame_duration_us: actual frame duration reported by the ISP/IPA for this
+  //   frame (libcamera FrameDuration metadata, µs). Reflects real per-frame
+  //   cadence including any ISP scheduling overhead (e.g. multi-camera sharing).
+  //   0 if the metadata was not available.
+  uint64_t timestamp_us;
+  uint32_t frame_duration_us;
 } __attribute__((packed));
 
 struct ChunkData {
@@ -105,6 +115,8 @@ struct FrameData {
   uint32_t height = 0;
   uint32_t bytes_per_line = 0;
   uint32_t pixel_format = 0;  // FourCC
+  uint64_t timestamp_us = 0;      // hardware capture timestamp (µs)
+  uint32_t frame_duration_us = 0; // actual frame duration from ISP metadata (µs)
 
   FrameData() = default;
   FrameData(const FrameData& other)
@@ -114,7 +126,9 @@ struct FrameData {
         width(other.width),
         height(other.height),
         bytes_per_line(other.bytes_per_line),
-        pixel_format(other.pixel_format) {}
+        pixel_format(other.pixel_format),
+        timestamp_us(other.timestamp_us),
+        frame_duration_us(other.frame_duration_us) {}
 
   FrameData& operator=(const FrameData& other) {
     if (this != &other) {
@@ -125,6 +139,8 @@ struct FrameData {
       height = other.height;
       bytes_per_line = other.bytes_per_line;
       pixel_format = other.pixel_format;
+      timestamp_us = other.timestamp_us;
+      frame_duration_us = other.frame_duration_us;
     }
     return *this;
   }

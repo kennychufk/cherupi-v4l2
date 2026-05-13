@@ -305,19 +305,23 @@ Query the sensor's hardware `FrameDurationLimits` range and the currently-applie
 ```json
 {
   "type": "frame_duration_limits",
-  "min": 33,
+  "min": 33333,
   "max": 120000000,
+  "num_cameras": 4,
   "current": {"min": 33333, "max": 33333}
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
-| `min` | integer | Sensor hardware minimum frame duration in µs |
-| `max` | integer | Sensor hardware maximum frame duration in µs |
+| `min` | integer | Minimum frame duration in µs as reported by libcamera's `ControlInfoMap` for this camera |
+| `max` | integer | Maximum frame duration in µs as reported by libcamera |
+| `num_cameras` | integer | Number of logical libcamera cameras currently configured (always `1` with the Arducam quad-board which presents all physical sensors as a single camera) |
 | `current` | object \| `null` | `{min, max}` when a lock is in effect (currently `min == max`); `null` when unset |
 
 All discovered cameras run the same sensor (IMX519), so the response carries a single shared range rather than per-camera entries.
+
+**Important — advertised limits vs. achievable rate:** `min` is what libcamera's driver reports as the underlying IMX519 sensor's hardware capability. With a multi-sensor consolidation board (e.g. the Arducam quad-camera kit), the driver presents all 4 physical sensors as one logical camera and internally manages cycling or synchronising them. This internal overhead means the actual achievable frame duration is **higher than `min`** — empirically, with the Arducam 16MP IMX519 quad-camera kit on Pi 5, `min=33333 µs` (30 fps advertised) yields approximately **15 fps** in practice. Always use `frame_duration_us` from the binary frame header (§5.3) to measure the frame rate actually being delivered at runtime, rather than relying on `min`.
 
 ### 4.16 Server response types (summary)
 
@@ -351,9 +355,9 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | Offset | Field | Type | Value |
 |---|---|---|---|
 | 0 | `magic` | `uint32` | `0x4348554E` (`'CHUN'`) |
-| 4 | `version` | `uint32` | `2` |
+| 4 | `version` | `uint32` | `3` |
 
-### 5.3 `ChunkHeader` (40 bytes, follows the start marker in the same message)
+### 5.3 `ChunkHeader` (52 bytes, follows the start marker in the same message)
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -367,6 +371,8 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 28 | `height` | `uint32` | Pixels |
 | 32 | `pixel_format` | `uint32` | V4L2 FourCC (currently `V4L2_PIX_FMT_YUV420` = `'YU12'` = `0x32315559`) |
 | 36 | `frames_saved` | `uint32` | Saver's count for this camera at send time |
+| 40 | `timestamp_us` | `uint64` | Monotonic hardware capture timestamp in µs (from libcamera `FrameMetadata::timestamp / 1000`). Diff consecutive values for the same `camera_id` to compute actual inter-frame interval (real fps). `0` if unavailable. |
+| 48 | `frame_duration_us` | `uint32` | Actual frame duration in µs as reported by the IPA/ISP in libcamera `FrameDuration` metadata. Reflects real per-frame cadence including any multi-camera ISP scheduling overhead. `0` if the metadata was not present. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
 
@@ -437,4 +443,11 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 
 ## 8. Versioning
 
-The binary protocol version is carried in `ChunkStartMarker.version` (currently `2`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
+The binary protocol version is carried in `ChunkStartMarker.version` (currently `3`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
+
+### Version history
+
+| Version | Change |
+|---|---|
+| `2` | Baseline: `ChunkHeader` 40 bytes, `ChunkStartMarker` 8 bytes |
+| `3` | `ChunkHeader` extended to 52 bytes: added `timestamp_us` (uint64, offset 40) and `frame_duration_us` (uint32, offset 48). `get_frame_duration_limits` response gains `num_cameras` field. |

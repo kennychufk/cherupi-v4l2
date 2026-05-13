@@ -138,6 +138,25 @@ bool Camera::configure(size_t buffer_count) {
                std::to_string(stream_cfg.size.width) + "x" +
                std::to_string(stream_cfg.size.height) + " stride=" +
                std::to_string(stream_cfg.stride));
+
+  // Log the sensor's hardware FrameDurationLimits so callers can see what
+  // FPS range libcamera advertises for this camera in isolation.
+  auto [hw_min, hw_max] = getFrameDurationLimitsHw();
+  if (hw_min > 0 || hw_max > 0) {
+    double max_fps = hw_min > 0 ? (1e6 / hw_min) : 0.0;
+    double min_fps = hw_max > 0 ? (1e6 / hw_max) : 0.0;
+    LOG_INFO("Camera",
+             "Camera " + std::to_string(camera_id) +
+                 " HW FrameDurationLimits: min=" + std::to_string(hw_min) +
+                 " µs (" + std::to_string(max_fps).substr(0, 5) +
+                 " fps max), max=" + std::to_string(hw_max) + " µs (" +
+                 std::to_string(min_fps).substr(0, 4) + " fps min)");
+    LOG_INFO("Camera",
+             "NOTE: HW limits reflect the underlying IMX519 sensor spec. "
+             "Multi-sensor boards (e.g. Arducam quad-kit) consolidate "
+             "physical sensors into one logical camera and may achieve "
+             "lower fps than advertised due to internal driver overhead.");
+  }
   return true;
 }
 
@@ -178,6 +197,15 @@ bool Camera::start() {
     int64_t v[2] = {fd_initial, fd_initial};
     controls.set(libcamera::controls::FrameDurationLimits,
                  libcamera::Span<const int64_t, 2>(v));
+    LOG_INFO("Camera",
+             "Camera " + std::to_string(camera_id) +
+                 " start: applying FrameDurationLimits lock @ " +
+                 std::to_string(fd_initial) + " µs (" +
+                 std::to_string(1e6 / fd_initial).substr(0, 5) + " fps)");
+  } else {
+    LOG_INFO("Camera",
+             "Camera " + std::to_string(camera_id) +
+                 " start: no FrameDurationLimits applied (libcamera default)");
   }
   applied_frame_duration_generation_ = frame_duration_generation_.load();
 
@@ -278,6 +306,42 @@ void Camera::onRequestComplete(libcamera::Request* request) {
   }
 
   {
+    // Extract hardware timestamp and actual frame duration from libcamera
+    // metadata. These reflect the real ISP-level cadence rather than the
+    // sensor's theoretical limits, so they expose any multi-camera ISP
+    // bandwidth sharing overhead.
+    uint64_t hw_ts_ns = buf->metadata().timestamp;  // nanoseconds
+    uint64_t hw_ts_us = hw_ts_ns / 1000;            // microseconds
+
+    int64_t actual_fd_us = 0;
+    auto fd_meta = request->metadata().get(libcamera::controls::FrameDuration);
+    if (fd_meta) actual_fd_us = *fd_meta;
+
+    // Periodic FPS diagnostics at INFO level (every 30 frames per camera).
+    if (last_frame_ts_ns_ > 0) {
+      uint64_t interval_ns = hw_ts_ns - last_frame_ts_ns_;
+      ++fps_log_counter_;
+      if (fps_log_counter_ >= 30) {
+        double actual_fps = 1e9 / static_cast<double>(interval_ns);
+        LOG_INFO("Camera",
+                 "Camera " + std::to_string(camera_id) +
+                     " frame#" + std::to_string(frame_counter) +
+                     " hw_interval=" + std::to_string(interval_ns / 1000) +
+                     " µs  actual_fps=" +
+                     std::to_string(actual_fps).substr(0, 5) +
+                     "  IPA_frame_duration=" + std::to_string(actual_fd_us) +
+                     " µs");
+        fps_log_counter_ = 0;
+      }
+    }
+    last_frame_ts_ns_ = hw_ts_ns;
+
+    LOG_DEBUG("Camera",
+              "Camera " + std::to_string(camera_id) +
+                  " frame#" + std::to_string(frame_counter) +
+                  " ts=" + std::to_string(hw_ts_us) +
+                  " µs  IPA_fd=" + std::to_string(actual_fd_us) + " µs");
+
     FrameData frame;
     frame.camera_id = camera_id;
     frame.frame_id = frame_counter++;
@@ -285,6 +349,8 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     frame.height = stream_cfg.size.height;
     frame.bytes_per_line = stream_cfg.stride;
     frame.pixel_format = stream_cfg.pixelFormat.fourcc();
+    frame.timestamp_us = hw_ts_us;
+    frame.frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
 
     size_t total = 0;
     for (const auto& plane : buf->planes()) total += plane.length;

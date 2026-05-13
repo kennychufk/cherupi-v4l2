@@ -572,11 +572,13 @@ void WebSocketServer::handleGetFrameDurationLimits(
   }
   auto [hw_min, hw_max] = camera_manager->getFrameDurationLimitsHw();
   int64_t current = camera_manager->getCurrentFrameDuration();
+  size_t num_cameras = camera_manager->getCameraCount();
 
   json response;
   response["type"] = Protocol::TYPE_FRAME_DURATION_LIMITS;
   response["min"] = hw_min;
   response["max"] = hw_max;
+  response["num_cameras"] = num_cameras;
   if (current > 0) {
     response["current"] = {{"min", current}, {"max", current}};
   } else {

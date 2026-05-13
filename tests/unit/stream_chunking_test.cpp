@@ -62,7 +62,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
   EXPECT_EQ(marker.magic, 0x4348554Eu);
-  EXPECT_EQ(marker.version, 2u);
+  EXPECT_EQ(marker.version, 3u);
 
   ChunkHeader header{};
   std::memcpy(&header, sink.messages[0].data() + sizeof(marker),

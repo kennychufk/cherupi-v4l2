@@ -112,6 +112,10 @@ class Camera {
 
   std::atomic<bool> should_stop{false};
 
+  // Per-camera frame timing diagnostics (libcamera completion thread only).
+  uint64_t last_frame_ts_ns_ = 0;  // hardware timestamp of previous frame (ns)
+  uint32_t fps_log_counter_ = 0;   // counts frames between periodic FPS logs
+
   // Focus state. af_continuous_ true ⇒ AfModeContinuous; false ⇒ AfModeManual
   // at lens_position_ dioptres. focus_generation_ is bumped on every
   // setLensPosition; the libcamera-completion thread compares it against
