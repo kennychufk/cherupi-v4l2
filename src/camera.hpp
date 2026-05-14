@@ -19,7 +19,7 @@ class Camera {
   ~Camera();
 
   bool configure(size_t buffer_count = 4);
-  void setAwbConfig(const AwbConfig& cfg) { config.awb = cfg; }
+  void setConfig(const CameraConfig& cfg) { config = cfg; }
   // Set focus. lens_position < 0 ⇒ continuous AF; ≥ 0 ⇒ manual at that lens
   // position in dioptres (~0 = infinity, ~10 = closest macro; per-tuning
   // map clamps the actual range). Thread-safe; takes effect on the next
@@ -110,6 +110,7 @@ class Camera {
   FrameData streaming_frame;
   bool streaming_frame_in_use = false;
 
+  libcamera::Stream* raw_stream_{nullptr};
   std::atomic<bool> should_stop{false};
 
   // Per-camera frame timing diagnostics (libcamera completion thread only).

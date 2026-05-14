@@ -69,7 +69,7 @@ bool CameraManager::configureAll(const CameraConfig& config,
   default_config = config;
 
   for (auto& camera : cameras) {
-    camera->setAwbConfig(config.awb);
+    camera->setConfig(config);
     LOG_INFO("CameraManager",
              "Configuring camera " + std::to_string(camera->getId()));
     if (!camera->configure(buffer_count)) {

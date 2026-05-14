@@ -27,7 +27,8 @@ bool Camera::configure(size_t buffer_count) {
   }
   lcam_acquired_ = true;
 
-  cam_config = lcam->generateConfiguration({libcamera::StreamRole::VideoRecording});
+  cam_config = lcam->generateConfiguration(
+      {libcamera::StreamRole::VideoRecording, libcamera::StreamRole::Raw});
   if (!cam_config) {
     LOG_ERROR("Camera", "Failed to generate configuration for camera " +
                             std::to_string(camera_id));
@@ -39,6 +40,21 @@ bool Camera::configure(size_t buffer_count) {
   stream_cfg.pixelFormat = libcamera::formats::YUV420;
   stream_cfg.size = libcamera::Size(config.width, config.height);
   stream_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
+
+  // Raw stream + sensorConfig together force the PiSP backend to select the
+  // native sensor mode for this resolution. pixelFormat Bayer order is ignored
+  // by the pipeline handler (it substitutes the correct order); bit depth and
+  // packing are what matter for mode selection.
+  if (cam_config->size() > 1) {
+    libcamera::StreamConfiguration& raw_cfg = cam_config->at(1);
+    raw_cfg.size = libcamera::Size(config.width, config.height);
+    raw_cfg.pixelFormat = libcamera::formats::SBGGR10_CSI2P;
+    raw_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
+
+    cam_config->sensorConfig = libcamera::SensorConfiguration();
+    cam_config->sensorConfig->outputSize = libcamera::Size(config.width, config.height);
+    cam_config->sensorConfig->bitDepth = 10;
+  }
 
   libcamera::CameraConfiguration::Status status = cam_config->validate();
   if (status == libcamera::CameraConfiguration::Invalid) {
@@ -68,6 +84,14 @@ bool Camera::configure(size_t buffer_count) {
   libcamera::Stream* stream = stream_cfg.stream();
   if (allocator->allocate(stream) < 0) {
     LOG_ERROR("Camera", "Failed to allocate buffers for camera " +
+                            std::to_string(camera_id));
+    releaseConfiguredResources();
+    return false;
+  }
+
+  raw_stream_ = (cam_config->size() > 1) ? cam_config->at(1).stream() : nullptr;
+  if (raw_stream_ && allocator->allocate(raw_stream_) < 0) {
+    LOG_ERROR("Camera", "Failed to allocate raw buffers for camera " +
                             std::to_string(camera_id));
     releaseConfiguredResources();
     return false;
@@ -127,6 +151,15 @@ bool Camera::configure(size_t buffer_count) {
                               std::to_string(camera_id));
       releaseConfiguredResources();
       return false;
+    }
+    if (raw_stream_) {
+      const auto& raw_bufs = allocator->buffers(raw_stream_);
+      if (i < raw_bufs.size() && req->addBuffer(raw_stream_, raw_bufs[i].get()) < 0) {
+        LOG_ERROR("Camera", "Failed to add raw buffer to request for camera " +
+                                std::to_string(camera_id));
+        releaseConfiguredResources();
+        return false;
+      }
     }
     requests.push_back(std::move(req));
   }
@@ -281,7 +314,9 @@ void Camera::releaseConfiguredResources() {
   requests.clear();
   if (allocator && cam_config) {
     allocator->free(cam_config->at(0).stream());
+    if (raw_stream_) allocator->free(raw_stream_);
   }
+  raw_stream_ = nullptr;
   allocator.reset();
   cam_config.reset();
   if (lcam_acquired_) {
