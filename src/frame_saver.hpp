@@ -52,6 +52,10 @@ class FrameSaver {
   void writerThreadFunc();
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
   bool detectCheckerboard(const FrameData& frame);
+  // CHECKERBOARD2X2: split the (already full-res or subsampled per
+  // `checkerboard_full_res_detection`) Y plane into 4 equal quadrants and run
+  // detection on each in parallel; returns true if any sub-frame detects.
+  bool detectCheckerboard2x2(const FrameData& frame);
   bool createOutputDirectory();  // New method for directory creation
 
  public:

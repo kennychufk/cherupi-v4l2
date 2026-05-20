@@ -167,7 +167,7 @@ struct CameraConfig {
 };
 
 // Frame saving modes
-enum class SaveMode { NONE, BUFFER, BATCH, CHECKERBOARD };
+enum class SaveMode { NONE, BUFFER, BATCH, CHECKERBOARD, CHECKERBOARD2X2 };
 
 // Camera state
 enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };

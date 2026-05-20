@@ -8,7 +8,7 @@ WebSocket protocol. Covers:
 - Single-client enforcement (second connection gets 503)
 - CHUN/CHNK binary frame format (header fields, chunk reassembly, frame_uuid uniqueness)
 - Header-only mode
-- Save modes: NONE / BUFFER / BATCH / CHECKERBOARD
+- Save modes: NONE / BUFFER / BATCH / CHECKERBOARD / CHECKERBOARD2X2
 
 All tests require **live IMX519 hardware** connected to the Pi 5. There is no
 fake-camera backend in the server (by design).

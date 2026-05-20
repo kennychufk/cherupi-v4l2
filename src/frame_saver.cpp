@@ -5,13 +5,18 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "frame_saver_helpers.hpp"
 
@@ -31,7 +36,8 @@ void FrameSaver::configure(const SaveConfig& cfg) {
   }
 
   // Initialize checkerboard detector if needed
-  if (config.mode == SaveMode::CHECKERBOARD) {
+  if (config.mode == SaveMode::CHECKERBOARD ||
+      config.mode == SaveMode::CHECKERBOARD2X2) {
     checkerboard_detector = std::make_unique<CheckerboardDetector>(
         config.checkerboard_cols, config.checkerboard_rows);
   }
@@ -121,7 +127,8 @@ void FrameSaver::start() {
     buffered_frames.clear();
     buffered_frames.reserve(10000);
   } else if (config.mode == SaveMode::BATCH ||
-             config.mode == SaveMode::CHECKERBOARD) {
+             config.mode == SaveMode::CHECKERBOARD ||
+             config.mode == SaveMode::CHECKERBOARD2X2) {
     // Start writer threads
     for (size_t i = 0; i < config.writer_threads; i++) {
       writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
@@ -132,7 +139,9 @@ void FrameSaver::start() {
 void FrameSaver::stop() {
   enabled = false;
 
-  if (config.mode == SaveMode::BATCH || config.mode == SaveMode::CHECKERBOARD) {
+  if (config.mode == SaveMode::BATCH ||
+      config.mode == SaveMode::CHECKERBOARD ||
+      config.mode == SaveMode::CHECKERBOARD2X2) {
     // Signal threads to stop
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -150,7 +159,9 @@ void FrameSaver::stop() {
   }
 
   // Log checkerboard detection statistics
-  if (config.mode == SaveMode::CHECKERBOARD && frames_checked > 0) {
+  if ((config.mode == SaveMode::CHECKERBOARD ||
+       config.mode == SaveMode::CHECKERBOARD2X2) &&
+      frames_checked > 0) {
     std::cout << "Checkerboard detection stats: " << checkerboards_detected
               << " detected out of " << frames_checked << " checked ("
               << (100.0 * checkerboards_detected / frames_checked) << "%)"
@@ -176,10 +187,14 @@ void FrameSaver::saveFrame(const FrameData& frame) {
       write_queue.push(std::move(task));
     }
     queue_cv.notify_one();
-  } else if (config.mode == SaveMode::CHECKERBOARD) {
+  } else if (config.mode == SaveMode::CHECKERBOARD ||
+             config.mode == SaveMode::CHECKERBOARD2X2) {
     frames_checked++;
 
-    if (detectCheckerboard(frame)) {
+    const bool detected = (config.mode == SaveMode::CHECKERBOARD)
+                              ? detectCheckerboard(frame)
+                              : detectCheckerboard2x2(frame);
+    if (detected) {
       checkerboards_detected++;
 
       WriteTask task;
@@ -216,6 +231,69 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
           .count();
   LOG_INFO("FrameSaver", "Checkerboard detected: " + std::to_string(detected) +
                              " Total: " + std::to_string(total_time) + "ms");
+  return detected;
+}
+
+bool FrameSaver::detectCheckerboard2x2(const FrameData& frame) {
+  auto start_tp = std::chrono::steady_clock::now();
+
+  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+      frame, config.checkerboard_full_res_detection);
+  const int full_width = config.checkerboard_full_res_detection
+                             ? static_cast<int>(frame.width)
+                             : static_cast<int>(frame.width / 2);
+  const int full_height = config.checkerboard_full_res_detection
+                              ? static_cast<int>(frame.height)
+                              : static_cast<int>(frame.height / 2);
+  const int sub_w = full_width / 2;
+  const int sub_h = full_height / 2;
+  if (sub_w <= 0 || sub_h <= 0) return false;
+
+  // Quadrants: (row, col) ∈ {(0,0),(0,1),(1,0),(1,1)}. The Y buffer is packed
+  // with stride == full_width; each sub-frame is a stride-aware view of one
+  // quadrant, so detection runs without copying.
+  const uint8_t* base = grayscale_data.data();
+  auto run_detect = [&](int row, int col) -> bool {
+    const uint8_t* src =
+        base + static_cast<size_t>(row) * sub_h * full_width +
+        static_cast<size_t>(col) * sub_w;
+    return checkerboard_detector->detect(src, sub_w, sub_h,
+                                         static_cast<size_t>(full_width));
+  };
+
+  constexpr std::array<std::pair<int, int>, 4> kQuadrants = {
+      {{0, 0}, {0, 1}, {1, 0}, {1, 1}}};
+  const size_t pool_size =
+      std::clamp<size_t>(config.checkerboard_num_threads, 1, 4);
+
+  bool detected = false;
+  for (size_t i = 0; i < kQuadrants.size(); i += pool_size) {
+    const size_t batch = std::min(pool_size, kQuadrants.size() - i);
+    if (batch == 1) {
+      if (run_detect(kQuadrants[i].first, kQuadrants[i].second)) {
+        detected = true;
+      }
+    } else {
+      std::vector<std::future<bool>> futures;
+      futures.reserve(batch);
+      for (size_t k = 0; k < batch; ++k) {
+        const auto& q = kQuadrants[i + k];
+        futures.emplace_back(
+            std::async(std::launch::async, run_detect, q.first, q.second));
+      }
+      for (auto& f : futures) {
+        if (f.get()) detected = true;
+      }
+    }
+  }
+
+  auto end_tp = std::chrono::steady_clock::now();
+  auto total_time =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
+          .count();
+  LOG_INFO("FrameSaver",
+           "Checkerboard2x2 detected: " + std::to_string(detected) +
+               " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 

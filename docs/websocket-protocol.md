@@ -137,7 +137,7 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 **Request**
 ```json
-{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard", "params": {
+{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2", "params": {
   "output_dir": ".",
   "prepend_timestamp_to_dir": false,
   "batch_size": 10,
@@ -157,8 +157,9 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 | `buffer` | Ring-buffer in RAM; flushed to disk on `stop_cameras` |
 | `batch` | Multi-threaded writer; `writer_threads` workers, flushes every `batch_size` frames |
 | `checkerboard` | Only save frames in which an OpenCV checkerboard is detected |
+| `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and save the whole frame if **any** quadrant contains an OpenCV checkerboard. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
 
-`checkerboard_*` fields apply only to `checkerboard` mode. If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
+`checkerboard_*` fields apply to `checkerboard` and `checkerboard2x2` modes. If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
 
 **Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
 

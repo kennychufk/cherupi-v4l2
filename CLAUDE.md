@@ -62,6 +62,7 @@ A per-camera `ERROR` state exists but is not currently a state-machine target.
 - `BUFFER` — in-memory ring
 - `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
 - `CHECKERBOARD` — save only frames where a checkerboard is detected (`rows`, `cols`, `full_res_detection`, `num_threads`)
+- `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants and save if any quadrant detects a checkerboard. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
 - Output directory optionally prepended with timestamp.
 
 ## Build

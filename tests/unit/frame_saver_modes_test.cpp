@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -162,6 +163,141 @@ TEST_F(FrameSaverTempDir, CountersIncrementPerCamera) {
   EXPECT_EQ(saver.getFramesSavedForCamera(99), 0u);
 
   saver.stop();
+}
+
+// Load the checkerboard PGM fixture and return (data, width, height).
+struct Pgm {
+  int width = 0;
+  int height = 0;
+  std::vector<uint8_t> data;
+};
+static Pgm loadCheckerboardFixture() {
+  std::ifstream f(std::string(CHERUPI_TEST_FIXTURES_DIR) +
+                      "/checkerboard_8x11.pgm",
+                  std::ios::binary);
+  std::string magic;
+  f >> magic;
+  Pgm out;
+  if (magic != "P5") return out;
+  int maxval;
+  f >> out.width >> out.height >> maxval;
+  f.get();
+  out.data.resize(static_cast<size_t>(out.width) * out.height);
+  f.read(reinterpret_cast<char*>(out.data.data()), out.data.size());
+  return out;
+}
+
+// Synthesize a YUV420 frame whose Y plane is `2*board_w x 2*board_h` and
+// optionally has the supplied board pasted into its top-left quadrant. UV
+// planes are filled with mid-gray (irrelevant for detection).
+static FrameData makeYuvFrameWithOptionalBoard(uint32_t camera_id,
+                                                uint32_t frame_id,
+                                                const Pgm& board,
+                                                bool paste) {
+  FrameData frame;
+  frame.camera_id = camera_id;
+  frame.frame_id = frame_id;
+  frame.width = static_cast<uint32_t>(board.width) * 2;
+  frame.height = static_cast<uint32_t>(board.height) * 2;
+  frame.bytes_per_line = frame.width;
+  frame.pixel_format = 0x32315559;  // 'YU12' (YUV420)
+  const size_t y_bytes = static_cast<size_t>(frame.width) * frame.height;
+  const size_t uv_bytes = y_bytes / 2;
+  frame.data.assign(y_bytes + uv_bytes, 128);
+  if (paste) {
+    for (int y = 0; y < board.height; ++y) {
+      std::memcpy(frame.data.data() + static_cast<size_t>(y) * frame.width,
+                  board.data.data() + static_cast<size_t>(y) * board.width,
+                  static_cast<size_t>(board.width));
+    }
+  }
+  return frame;
+}
+
+TEST_F(FrameSaverTempDir, Checkerboard2x2SavesWhenAnyQuadrantHasBoard) {
+  // Fixture occupies the top-left quadrant of the Y plane; with
+  // full_res_detection=true the saver splits the full Y into 4 W/2 x H/2
+  // quadrants and detection should hit on the top-left only.
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/42, board,
+                                    /*paste=*/true);
+
+  SaveConfig cfg;
+  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  cfg.output_dir = dir.string();
+  cfg.checkerboard_cols = 11;
+  cfg.checkerboard_rows = 8;
+  cfg.checkerboard_full_res_detection = true;
+  cfg.checkerboard_num_threads = 4;
+  cfg.writer_threads = 1;
+
+  FrameSaver saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+  saver.stop();
+
+  EXPECT_EQ(saver.getFramesChecked(), 1u);
+  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);
+  EXPECT_EQ(saver.getFramesSaved(), 1u);
+  EXPECT_TRUE(fs::exists(dir / "cam0-42.yuv"));
+}
+
+TEST_F(FrameSaverTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  // Same frame geometry as above, but no board pasted — uniform mid-gray Y.
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/1, board,
+                                    /*paste=*/false);
+
+  SaveConfig cfg;
+  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  cfg.output_dir = dir.string();
+  cfg.checkerboard_full_res_detection = true;
+  cfg.checkerboard_num_threads = 4;
+  cfg.writer_threads = 1;
+
+  FrameSaver saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+  saver.stop();
+
+  EXPECT_EQ(saver.getFramesChecked(), 1u);
+  EXPECT_EQ(saver.getCheckerboardsDetected(), 0u);
+  EXPECT_EQ(saver.getFramesSaved(), 0u);
+  int count = 0;
+  for ([[maybe_unused]] auto& _ : fs::directory_iterator(dir)) ++count;
+  EXPECT_EQ(count, 0);
+}
+
+TEST_F(FrameSaverTempDir, Checkerboard2x2HonoursThreadPoolSize) {
+  // num_threads=1 forces sequential evaluation. Result must still be
+  // correct (any-quadrant OR).
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/3, /*frame_id=*/7, board,
+                                    /*paste=*/true);
+
+  SaveConfig cfg;
+  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  cfg.output_dir = dir.string();
+  cfg.checkerboard_full_res_detection = true;
+  cfg.checkerboard_num_threads = 1;
+  cfg.writer_threads = 1;
+
+  FrameSaver saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+  saver.stop();
+
+  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);
+  EXPECT_TRUE(fs::exists(dir / "cam3-7.yuv"));
 }
 
 TEST(FrameSaverTimestampDir, PrependTimestampProducesPrefixedDirectoryName) {

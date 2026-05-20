@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -51,6 +52,33 @@ TEST(CheckerboardDetectorTest, RejectsNonCheckerboard) {
   ASSERT_GT(img.width, 0);
   CheckerboardDetector det(11, 8);
   EXPECT_FALSE(det.detect(img.data.data(), img.width, img.height));
+}
+
+TEST(CheckerboardDetectorTest, DetectsSubRectangleViaStride) {
+  // Pack the fixture into one quadrant of a 2x-larger gray buffer and ask the
+  // detector to view only that quadrant via stride. Mirrors what the
+  // CHECKERBOARD2X2 save mode does when it points each detect() at one
+  // quadrant of a packed Y plane without copying.
+  auto img = loadPgm(std::string(CHERUPI_TEST_FIXTURES_DIR) +
+                     "/checkerboard_8x11.pgm");
+  ASSERT_GT(img.width, 0);
+
+  const int full_w = img.width * 2;
+  const int full_h = img.height * 2;
+  std::vector<uint8_t> big(static_cast<size_t>(full_w) * full_h, 128);
+  for (int y = 0; y < img.height; ++y) {
+    std::memcpy(big.data() + static_cast<size_t>(y) * full_w,
+                img.data.data() + static_cast<size_t>(y) * img.width,
+                static_cast<size_t>(img.width));
+  }
+
+  CheckerboardDetector det(11, 8);
+  // Top-left quadrant holds the board.
+  EXPECT_TRUE(det.detect(big.data(), img.width, img.height,
+                         static_cast<size_t>(full_w)));
+  // Top-right quadrant is uniform gray — no board.
+  EXPECT_FALSE(det.detect(big.data() + img.width, img.width, img.height,
+                          static_cast<size_t>(full_w)));
 }
 
 TEST(CheckerboardDetectorTest, StatelessAcrossCalls) {

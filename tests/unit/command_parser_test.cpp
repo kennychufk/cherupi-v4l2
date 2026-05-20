@@ -51,6 +51,8 @@ TEST(CommandParserTest, SaveModeLookup) {
   EXPECT_EQ(command_parser::parseSaveMode("batch"), SaveMode::BATCH);
   EXPECT_EQ(command_parser::parseSaveMode("checkerboard"),
             SaveMode::CHECKERBOARD);
+  EXPECT_EQ(command_parser::parseSaveMode("checkerboard2x2"),
+            SaveMode::CHECKERBOARD2X2);
   EXPECT_EQ(command_parser::parseSaveMode("bogus"), std::nullopt);
 }
 

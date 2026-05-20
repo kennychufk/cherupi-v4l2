@@ -60,6 +60,7 @@ std::optional<SaveMode> parseSaveMode(const std::string& mode) {
   if (mode == "buffer") return SaveMode::BUFFER;
   if (mode == "batch") return SaveMode::BATCH;
   if (mode == "checkerboard") return SaveMode::CHECKERBOARD;
+  if (mode == "checkerboard2x2") return SaveMode::CHECKERBOARD2X2;
   return std::nullopt;
 }
 

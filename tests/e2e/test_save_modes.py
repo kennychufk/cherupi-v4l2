@@ -97,6 +97,34 @@ def test_save_mode_checkerboard_finds_nothing(
     client.stop_cameras()  # should not raise
 
 
+def test_save_mode_checkerboard2x2_finds_nothing(
+    client: CherupiClient,
+    discovered_cameras: list[dict],
+    tmp_output_dir: Path,
+) -> None:
+    """CHECKERBOARD2X2 with no target visible — just asserts the mode runs cleanly.
+
+    Mirrors the CHECKERBOARD test above. The 2x2 mode splits each frame into 4
+    quadrants and detects per-quadrant in parallel; with no board in view, no
+    files should land, but the pipeline must still shut down cleanly.
+    """
+    out = tmp_output_dir / "checkerboard2x2"
+    out.mkdir()
+    client.configure(width=1456, height=1088)
+    client.set_save_mode(
+        "checkerboard2x2",
+        output_dir=str(out),
+        checkerboard_rows=8,
+        checkerboard_cols=11,
+        checkerboard_num_threads=4,
+    )
+    client.start_cameras()
+    client.start_stream(discovered_cameras[0]["id"])
+    time.sleep(2.0)
+    client.stop_stream(discovered_cameras[0]["id"])
+    client.stop_cameras()  # should not raise
+
+
 def test_save_mode_none(
     client: CherupiClient,
     discovered_cameras: list[dict],
@@ -122,7 +150,9 @@ def test_save_mode_none(
     assert not _yuv_files(out), f"Expected no files in {out}"
 
 
-@pytest.mark.parametrize("mode", ["none", "buffer", "batch", "checkerboard"])
+@pytest.mark.parametrize(
+    "mode", ["none", "buffer", "batch", "checkerboard", "checkerboard2x2"]
+)
 def test_set_save_mode_accepted_in_any_state(
     client: CherupiClient, mode: str, tmp_output_dir: Path
 ) -> None:
