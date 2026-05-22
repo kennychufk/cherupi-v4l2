@@ -472,15 +472,40 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   std::lock_guard<std::mutex> lock(sink_mutex);
   if (!sink) return false;
 
+  // Pull a cached detection result (if any) for this exact frame. The saver
+  // writes the cache synchronously in the capture-thread path before this
+  // streaming-thread sees the frame (camera.cpp orders onFrameCaptured ahead
+  // of latest_frame publish), so the cache is populated by the time we get
+  // here in checkerboard / checkerboard2x2 modes.
+  std::vector<CornerSet> corner_sets;
+  if (frame_saver) {
+    const SaveMode mode = frame_saver->getMode();
+    if (mode == SaveMode::CHECKERBOARD || mode == SaveMode::CHECKERBOARD2X2) {
+      auto cached = frame_saver->getDetectionForFrame(
+          transfer.frame.camera_id, transfer.frame.frame_id);
+      if (cached) corner_sets = std::move(cached->sets);
+    }
+  }
+
+  // Compute the variable corner-block size up front so we can encode it in
+  // ChunkHeader before the bytes go out.
+  uint32_t corner_block_size = 0;
+  for (const auto& set : corner_sets) {
+    corner_block_size += static_cast<uint32_t>(sizeof(CornerSetHeader));
+    corner_block_size += static_cast<uint32_t>(set.corners.size() *
+                                               2 * sizeof(float));
+  }
+
   std::vector<uint8_t> message;
-  message.reserve(sizeof(ChunkStartMarker) + sizeof(ChunkHeader));
+  message.reserve(sizeof(ChunkStartMarker) + sizeof(ChunkHeader) +
+                  corner_block_size);
 
   ChunkStartMarker start_marker;
   const uint8_t* start_bytes = reinterpret_cast<const uint8_t*>(&start_marker);
   message.insert(message.end(), start_bytes,
                  start_bytes + sizeof(ChunkStartMarker));
 
-  ChunkHeader header;
+  ChunkHeader header{};
   header.frame_uuid = transfer.frame_uuid;
   header.frame_id = transfer.frame.frame_id;
   header.camera_id = transfer.frame.camera_id;
@@ -503,10 +528,29 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
           : 0;
   header.timestamp_us = transfer.frame.timestamp_us;
   header.frame_duration_us = transfer.frame.frame_duration_us;
+  header.corner_block_size = corner_block_size;
+  header.num_corner_sets = static_cast<uint16_t>(corner_sets.size());
+  header.reserved = 0;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,
                  header_bytes + sizeof(ChunkHeader));
+
+  // Append the variable-size CornerBlock: { CornerSetHeader, corner xy floats }
+  // per set, packed back-to-back.
+  for (const auto& set : corner_sets) {
+    CornerSetHeader sh{};
+    sh.set_id = set.set_id;
+    sh.flags = 0x01;  // bit 0: full-frame Y-plane pixel coords
+    sh.num_corners = static_cast<uint16_t>(set.corners.size());
+    const uint8_t* sh_bytes = reinterpret_cast<const uint8_t*>(&sh);
+    message.insert(message.end(), sh_bytes, sh_bytes + sizeof(CornerSetHeader));
+    for (const auto& p : set.corners) {
+      float xy[2] = {p.x, p.y};
+      const uint8_t* xy_bytes = reinterpret_cast<const uint8_t*>(xy);
+      message.insert(message.end(), xy_bytes, xy_bytes + sizeof(xy));
+    }
+  }
 
   send_in_progress = true;
   bool ok = sink->send(message.data(), message.size());

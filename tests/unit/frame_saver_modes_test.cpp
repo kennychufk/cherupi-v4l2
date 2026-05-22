@@ -274,6 +274,53 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
   EXPECT_EQ(count, 0);
 }
 
+TEST_F(FrameSaverTempDir, Checkerboard2x2CachesPerCameraDetectionForStreamer) {
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/2, /*frame_id=*/55, board,
+                                    /*paste=*/true);
+
+  SaveConfig cfg;
+  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  cfg.output_dir = dir.string();
+  cfg.checkerboard_cols = 11;
+  cfg.checkerboard_rows = 8;
+  cfg.checkerboard_full_res_detection = true;
+  cfg.checkerboard_num_threads = 4;
+  cfg.writer_threads = 1;
+
+  FrameSaver saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+
+  auto cached = saver.getDetectionForFrame(2, 55);
+  ASSERT_TRUE(cached.has_value());
+  ASSERT_EQ(cached->sets.size(), 1u);
+  EXPECT_EQ(cached->sets[0].set_id, 0u);  // top-left quadrant
+  EXPECT_EQ(cached->sets[0].corners.size(), 11u * 8u);
+  for (const auto& p : cached->sets[0].corners) {
+    // Translated to full-frame Y pixels; top-left quadrant occupies
+    // [0, W/2) × [0, H/2).
+    EXPECT_GT(p.x, 0.0f);
+    EXPECT_LT(p.x, static_cast<float>(frame.width) / 2.0f);
+    EXPECT_GT(p.y, 0.0f);
+    EXPECT_LT(p.y, static_cast<float>(frame.height) / 2.0f);
+  }
+
+  // Different frame_id → cache miss.
+  EXPECT_FALSE(saver.getDetectionForFrame(2, 56).has_value());
+  // Different camera_id → cache miss.
+  EXPECT_FALSE(saver.getDetectionForFrame(3, 55).has_value());
+
+  // Reset wipes the cache (frame_id counters reset, so old entries are stale).
+  saver.resetFramesSavedCounts();
+  EXPECT_FALSE(saver.getDetectionForFrame(2, 55).has_value());
+
+  saver.stop();
+}
+
 TEST_F(FrameSaverTempDir, Checkerboard2x2HonoursThreadPoolSize) {
   // num_threads=1 forces sequential evaluation. Result must still be
   // correct (any-quadrant OR).

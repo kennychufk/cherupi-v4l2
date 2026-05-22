@@ -356,9 +356,9 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | Offset | Field | Type | Value |
 |---|---|---|---|
 | 0 | `magic` | `uint32` | `0x4348554E` (`'CHUN'`) |
-| 4 | `version` | `uint32` | `3` |
+| 4 | `version` | `uint32` | `4` |
 
-### 5.3 `ChunkHeader` (52 bytes, follows the start marker in the same message)
+### 5.3 `ChunkHeader` (60 bytes, follows the start marker in the same message)
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -374,10 +374,37 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 36 | `frames_saved` | `uint32` | Saver's count for this camera at send time |
 | 40 | `timestamp_us` | `uint64` | Monotonic hardware capture timestamp in µs (from libcamera `FrameMetadata::timestamp / 1000`). Diff consecutive values for the same `camera_id` to compute actual inter-frame interval (real fps). `0` if unavailable. |
 | 48 | `frame_duration_us` | `uint32` | Actual frame duration in µs as reported by the IPA/ISP in libcamera `FrameDuration` metadata. Reflects real per-frame cadence including any multi-camera ISP scheduling overhead. `0` if the metadata was not present. |
+| 52 | `corner_block_size` | `uint32` | Size in bytes of the `CornerBlock` that follows this header in the same WS message. `0` when no corner block is present. |
+| 56 | `num_corner_sets` | `uint16` | Number of `CornerSetHeader` entries packed in the `CornerBlock`. `0` when the block is absent. For `checkerboard` mode this is `0` or `1`; for `checkerboard2x2` it is `0..4`. |
+| 58 | `reserved` | `uint16` | Reserved for future use; always `0` in v4. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
 
-### 5.4 `ChunkData` (16 bytes header, followed by `chunk_size` payload bytes in the same WS message)
+### 5.4 `CornerBlock` (variable, present only when `num_corner_sets > 0`)
+
+Immediately follows `ChunkHeader` in the same WebSocket message. Carries the checkerboard corner coordinates produced by the on-device detector when the save mode is `checkerboard` or `checkerboard2x2`. The block is `num_corner_sets` copies of `CornerSetHeader` plus their corner coordinates, packed back-to-back:
+
+```
+CornerSetHeader (4 bytes)        // set 0
+num_corners × { float x, float y } // set 0 corners
+CornerSetHeader (4 bytes)        // set 1
+num_corners × { float x, float y } // set 1 corners
+…
+```
+
+`CornerSetHeader` layout (4 bytes):
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `set_id` | `uint8` | `0` for `checkerboard` mode (whole frame). For `checkerboard2x2`, `row * 2 + col` (0..3), where `row` and `col` are `0` for top/left and `1` for bottom/right. |
+| 1 | `flags` | `uint8` | Bit 0 set ⇒ coordinates are in full-frame Y-plane pixel space (always `1` in v4). Other bits reserved. |
+| 2 | `num_corners` | `uint16` | `= checkerboard_rows × checkerboard_cols` (e.g. `88` for the default 11×8). |
+
+Corner coordinates follow the header as `num_corners × { float x; float y; }` (little-endian IEEE-754), each `8` bytes, in full-frame Y-plane pixel space regardless of the saver's `checkerboard_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
+
+The block is only emitted when the streamer finds a cached detection result for the exact `(camera_id, frame_id)` it is about to send. If the streamer races ahead of the detector for that frame, the block is omitted (`corner_block_size = 0`, `num_corner_sets = 0`). The detection cache is invalidated by `reset_frame_counts` and by `start_cameras`.
+
+### 5.5 `ChunkData` (16 bytes header, followed by `chunk_size` payload bytes in the same WS message)
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -391,11 +418,11 @@ Concatenating the payloads in `chunk_index` order reproduces the raw frame buffe
 
 - **YUV420 (I420)** planar: `Y` plane (`bytes_per_line × height`), then `U` (`width/2 × height/2`), then `V` (`width/2 × height/2`). Total ≈ `width × height × 3 / 2`.
 
-### 5.5 Multi-camera multiplexing
+### 5.6 Multi-camera multiplexing
 
 With multiple cameras streaming, the server uses round-robin scheduling. One frame is delivered atomically (its start marker + header + all `CHNK` packets in sequence) before switching to the next camera. Clients demultiplex on `camera_id`, and should still prefer `frame_uuid` for reassembly.
 
-### 5.6 Backpressure & frame skipping
+### 5.7 Backpressure & frame skipping
 
 The server monitors `ws.getBufferedAmount()` with hysteresis (enter at 512 KiB, exit at 128 KiB) and throttles the per-chunk send rate via an adaptive controller. Under sustained pressure the server drops older frames rather than queueing — only the latest frame per camera is retained for transmission. `frame_id` therefore may jump; gaps are expected and not an error.
 
@@ -452,3 +479,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 |---|---|
 | `2` | Baseline: `ChunkHeader` 40 bytes, `ChunkStartMarker` 8 bytes |
 | `3` | `ChunkHeader` extended to 52 bytes: added `timestamp_us` (uint64, offset 40) and `frame_duration_us` (uint32, offset 48). `get_frame_duration_limits` response gains `num_cameras` field. |
+| `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |

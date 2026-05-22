@@ -402,6 +402,15 @@ void Camera::onRequestComplete(libcamera::Request* request) {
       offset += len;
     }
 
+    // Run the captured-frame callback (saveFrame, including any synchronous
+    // checkerboard detection) BEFORE publishing the frame for streaming.
+    // Detection writes its result into FrameSaver's per-camera cache, and the
+    // streamer queries that cache keyed by frame_id. Publishing first would
+    // let the streamer pull frame N while detection for N is still mid-flight,
+    // causing a guaranteed cache miss on every frame (detection ≈360 ms ≫
+    // single-frame interval). With detection ahead of publish, the cache is
+    // populated by the time the streamer sees `latest_frame`.
+    if (onFrameCaptured) onFrameCaptured(frame);
     {
       std::lock_guard<std::mutex> lock(latest_frame_mutex);
       latest_frame = frame;
@@ -409,7 +418,6 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     }
     new_frame_cv.notify_one();
     if (onFrameAvailable) onFrameAvailable();
-    if (onFrameCaptured) onFrameCaptured(frame);
   }
 
 requeue:

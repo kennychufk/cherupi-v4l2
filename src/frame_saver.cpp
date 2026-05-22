@@ -120,6 +120,10 @@ void FrameSaver::start() {
 
   // Reset per-camera counters
   frames_saved_per_camera.clear();
+  {
+    std::lock_guard<std::mutex> lock(detection_mutex);
+    latest_detection_per_camera.clear();
+  }
 
   if (config.mode == SaveMode::BUFFER) {
     // Reserve space for buffered frames
@@ -191,9 +195,21 @@ void FrameSaver::saveFrame(const FrameData& frame) {
              config.mode == SaveMode::CHECKERBOARD2X2) {
     frames_checked++;
 
+    std::vector<CornerSet> sets;
     const bool detected = (config.mode == SaveMode::CHECKERBOARD)
-                              ? detectCheckerboard(frame)
-                              : detectCheckerboard2x2(frame);
+                              ? detectCheckerboard(frame, sets)
+                              : detectCheckerboard2x2(frame, sets);
+
+    // Cache the result (possibly empty) so the streamer can attach corners
+    // to the matching frame even when no board was found. Last-write-wins
+    // per camera; only the most recent frame_id is retained.
+    {
+      std::lock_guard<std::mutex> lock(detection_mutex);
+      FrameDetection& fd = latest_detection_per_camera[frame.camera_id];
+      fd.frame_id = frame.frame_id;
+      fd.sets = std::move(sets);
+    }
+
     if (detected) {
       checkerboards_detected++;
 
@@ -212,8 +228,10 @@ void FrameSaver::saveFrame(const FrameData& frame) {
   }
 }
 
-bool FrameSaver::detectCheckerboard(const FrameData& frame) {
+bool FrameSaver::detectCheckerboard(const FrameData& frame,
+                                    std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
+  out_sets.clear();
 
   std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
       frame, config.checkerboard_full_res_detection);
@@ -222,8 +240,26 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
   int out_height =
       config.checkerboard_full_res_detection ? frame.height : frame.height / 2;
 
+  std::vector<cv::Point2f> corners;
   bool detected = checkerboard_detector->detect(grayscale_data.data(),
-                                                out_width, out_height);
+                                                out_width, out_height,
+                                                /*stride=*/0, &corners);
+
+  if (detected) {
+    // When detection ran on the subsampled Y plane, corner coordinates are in
+    // (W/2, H/2) space; multiply by 2 to map back to full-frame Y pixels.
+    const float scale = config.checkerboard_full_res_detection ? 1.0f : 2.0f;
+    if (scale != 1.0f) {
+      for (auto& p : corners) {
+        p.x *= scale;
+        p.y *= scale;
+      }
+    }
+    CornerSet set;
+    set.set_id = 0;
+    set.corners = std::move(corners);
+    out_sets.push_back(std::move(set));
+  }
 
   auto end_tp = std::chrono::steady_clock::now();
   auto total_time =
@@ -234,8 +270,10 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame) {
   return detected;
 }
 
-bool FrameSaver::detectCheckerboard2x2(const FrameData& frame) {
+bool FrameSaver::detectCheckerboard2x2(const FrameData& frame,
+                                       std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
+  out_sets.clear();
 
   std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
       frame, config.checkerboard_full_res_detection);
@@ -249,16 +287,24 @@ bool FrameSaver::detectCheckerboard2x2(const FrameData& frame) {
   const int sub_h = full_height / 2;
   if (sub_w <= 0 || sub_h <= 0) return false;
 
-  // Quadrants: (row, col) ∈ {(0,0),(0,1),(1,0),(1,1)}. The Y buffer is packed
-  // with stride == full_width; each sub-frame is a stride-aware view of one
-  // quadrant, so detection runs without copying.
+  // Subsampled-mode coords need a final ×2 to land in full-frame Y pixels.
+  const float scale = config.checkerboard_full_res_detection ? 1.0f : 2.0f;
+
+  // Per-quadrant detection job. Each job writes its own slot in `results` so
+  // we never share a mutable vector across threads.
+  struct QuadrantResult {
+    bool detected = false;
+    std::vector<cv::Point2f> corners;
+  };
+  std::array<QuadrantResult, 4> results;
+
   const uint8_t* base = grayscale_data.data();
-  auto run_detect = [&](int row, int col) -> bool {
+  auto run_detect = [&](int row, int col, QuadrantResult* out) {
     const uint8_t* src =
         base + static_cast<size_t>(row) * sub_h * full_width +
         static_cast<size_t>(col) * sub_w;
-    return checkerboard_detector->detect(src, sub_w, sub_h,
-                                         static_cast<size_t>(full_width));
+    out->detected = checkerboard_detector->detect(
+        src, sub_w, sub_h, static_cast<size_t>(full_width), &out->corners);
   };
 
   constexpr std::array<std::pair<int, int>, 4> kQuadrants = {
@@ -266,25 +312,39 @@ bool FrameSaver::detectCheckerboard2x2(const FrameData& frame) {
   const size_t pool_size =
       std::clamp<size_t>(config.checkerboard_num_threads, 1, 4);
 
-  bool detected = false;
   for (size_t i = 0; i < kQuadrants.size(); i += pool_size) {
     const size_t batch = std::min(pool_size, kQuadrants.size() - i);
     if (batch == 1) {
-      if (run_detect(kQuadrants[i].first, kQuadrants[i].second)) {
-        detected = true;
-      }
+      run_detect(kQuadrants[i].first, kQuadrants[i].second, &results[i]);
     } else {
-      std::vector<std::future<bool>> futures;
+      std::vector<std::future<void>> futures;
       futures.reserve(batch);
       for (size_t k = 0; k < batch; ++k) {
         const auto& q = kQuadrants[i + k];
+        QuadrantResult* slot = &results[i + k];
         futures.emplace_back(
-            std::async(std::launch::async, run_detect, q.first, q.second));
+            std::async(std::launch::async, run_detect, q.first, q.second, slot));
       }
-      for (auto& f : futures) {
-        if (f.get()) detected = true;
-      }
+      for (auto& f : futures) f.get();
     }
+  }
+
+  bool detected = false;
+  for (size_t i = 0; i < kQuadrants.size(); ++i) {
+    if (!results[i].detected) continue;
+    detected = true;
+    const int row = kQuadrants[i].first;
+    const int col = kQuadrants[i].second;
+    // Translate quadrant-local cv coords → full-Y-plane → full-frame pixels.
+    const float ox = static_cast<float>(col * sub_w);
+    const float oy = static_cast<float>(row * sub_h);
+    CornerSet set;
+    set.set_id = static_cast<uint8_t>(row * 2 + col);
+    set.corners.reserve(results[i].corners.size());
+    for (const auto& p : results[i].corners) {
+      set.corners.emplace_back((p.x + ox) * scale, (p.y + oy) * scale);
+    }
+    out_sets.push_back(std::move(set));
   }
 
   auto end_tp = std::chrono::steady_clock::now();

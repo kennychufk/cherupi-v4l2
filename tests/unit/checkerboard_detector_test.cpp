@@ -81,6 +81,26 @@ TEST(CheckerboardDetectorTest, DetectsSubRectangleViaStride) {
                           static_cast<size_t>(full_w)));
 }
 
+TEST(CheckerboardDetectorTest, ReturnsCornersWhenOutParamProvided) {
+  auto img = loadPgm(std::string(CHERUPI_TEST_FIXTURES_DIR) +
+                     "/checkerboard_8x11.pgm");
+  ASSERT_GT(img.width, 0);
+
+  CheckerboardDetector det(11, 8);
+  std::vector<cv::Point2f> corners;
+  ASSERT_TRUE(det.detect(img.data.data(), img.width, img.height,
+                         /*stride=*/0, &corners));
+  EXPECT_EQ(corners.size(), 11u * 8u);
+
+  // Negative case clears the vector even if it was previously populated.
+  auto neg = loadPgm(std::string(CHERUPI_TEST_FIXTURES_DIR) +
+                     "/no_checkerboard.pgm");
+  ASSERT_GT(neg.width, 0);
+  EXPECT_FALSE(det.detect(neg.data.data(), neg.width, neg.height,
+                          /*stride=*/0, &corners));
+  EXPECT_TRUE(corners.empty());
+}
+
 TEST(CheckerboardDetectorTest, StatelessAcrossCalls) {
   auto pos = loadPgm(std::string(CHERUPI_TEST_FIXTURES_DIR) +
                      "/checkerboard_8x11.pgm");

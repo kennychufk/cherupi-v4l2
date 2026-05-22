@@ -72,7 +72,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 3;
+  uint32_t version = 4;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -96,6 +96,29 @@ struct ChunkHeader {
   //   0 if the metadata was not available.
   uint64_t timestamp_us;
   uint32_t frame_duration_us;
+  // v4 additions: variable-size checkerboard corner block. When the save mode
+  // is `checkerboard` or `checkerboard2x2` and detection found at least one
+  // board, the same WS message that carries this ChunkHeader also carries a
+  // CornerBlock immediately after. The block is laid out as
+  // `num_corner_sets × (CornerSetHeader + num_corners × {float x, float y})`.
+  // Coordinates are in full-frame Y-plane pixels regardless of the saver's
+  // internal `checkerboard_full_res_detection` setting or 2x2 quadrant split.
+  // Both fields are 0 when no corner block follows.
+  uint32_t corner_block_size;
+  uint16_t num_corner_sets;
+  uint16_t reserved;
+} __attribute__((packed));
+
+// Per corner-set header inside the CornerBlock (v4+). For `checkerboard` mode
+// the single emitted set has set_id=0. For `checkerboard2x2`, one set is
+// emitted per detecting quadrant with set_id = row*2 + col (0..3, where row
+// and col are 0 for top/left and 1 for bottom/right).
+struct CornerSetHeader {
+  uint8_t set_id;
+  // bit 0: coordinates are in full-frame Y-plane pixel space (always 1 in v4)
+  uint8_t flags;
+  uint16_t num_corners;  // = checkerboard_rows × checkerboard_cols
+  // followed by num_corners × { float x; float y; }  (8 bytes each)
 } __attribute__((packed));
 
 struct ChunkData {
