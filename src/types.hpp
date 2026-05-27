@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -72,7 +73,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 4;
+  uint32_t version = 5;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -107,6 +108,16 @@ struct ChunkHeader {
   uint32_t corner_block_size;
   uint16_t num_corner_sets;
   uint16_t reserved;
+  // v5 additions: per-frame focus metadata reported by the libcamera IPA for
+  // this exact frame (EXIF-style), valid in manual, auto and continuous AF.
+  // lens_position: focus distance the IPA actually applied, in dioptres
+  //   (reciprocal metres; 0 = infinity). NaN when libcamera reported no
+  //   LensPosition for the frame (e.g. sensor module without a focuser).
+  // af_state: libcamera AfState enum (0=Idle, 1=Scanning, 2=Focused,
+  //   3=Failed). 0xFF when no AfState was reported for the frame.
+  float lens_position;
+  uint8_t af_state;
+  uint8_t reserved2[3];
 } __attribute__((packed));
 
 // Per corner-set header inside the CornerBlock (v4+). For `checkerboard` mode
@@ -140,6 +151,10 @@ struct FrameData {
   uint32_t pixel_format = 0;  // FourCC
   uint64_t timestamp_us = 0;      // hardware capture timestamp (µs)
   uint32_t frame_duration_us = 0; // actual frame duration from ISP metadata (µs)
+  // Per-frame focus metadata from the libcamera IPA (see ChunkHeader v5).
+  // NaN / 0xFF mean "not reported for this frame".
+  float lens_position = std::numeric_limits<float>::quiet_NaN();  // dioptres
+  uint8_t af_state = 0xFF;  // libcamera AfState enum, 0xFF = unavailable
 
   FrameData() = default;
   FrameData(const FrameData& other)
@@ -151,7 +166,9 @@ struct FrameData {
         bytes_per_line(other.bytes_per_line),
         pixel_format(other.pixel_format),
         timestamp_us(other.timestamp_us),
-        frame_duration_us(other.frame_duration_us) {}
+        frame_duration_us(other.frame_duration_us),
+        lens_position(other.lens_position),
+        af_state(other.af_state) {}
 
   FrameData& operator=(const FrameData& other) {
     if (this != &other) {
@@ -164,6 +181,8 @@ struct FrameData {
       pixel_format = other.pixel_format;
       timestamp_us = other.timestamp_us;
       frame_duration_us = other.frame_duration_us;
+      lens_position = other.lens_position;
+      af_state = other.af_state;
     }
     return *this;
   }

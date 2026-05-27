@@ -531,6 +531,11 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.corner_block_size = corner_block_size;
   header.num_corner_sets = static_cast<uint16_t>(corner_sets.size());
   header.reserved = 0;
+  header.lens_position = transfer.frame.lens_position;
+  header.af_state = transfer.frame.af_state;
+  header.reserved2[0] = 0;
+  header.reserved2[1] = 0;
+  header.reserved2[2] = 0;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,

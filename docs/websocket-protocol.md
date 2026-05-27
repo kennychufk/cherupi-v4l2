@@ -243,6 +243,8 @@ The setting is **global** — every discovered camera receives the same value.
 
 In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (via libcamera's initial `ControlList`). In **RUNNING** it is attached to the next requeued capture request and takes effect within ~1 frame. The setting persists across `stop_cameras` / `start_cameras` cycles within the same session.
 
+This command only *requests* a focus state. To read back the focus the IPA actually applied to each delivered frame — including the per-frame position chosen by continuous/auto AF — use the `lens_position` and `af_state` fields in the binary frame header (§5.3).
+
 **libcamera prerequisite:** the deployed libcamera tuning JSON for IMX519 must include the `rpi.af` algorithm block (the apt-installed Pi tuning ships with it). Without it, libcamera silently ignores `AfMode` / `LensPosition`. The IMX519 PDAF parsing patch is optional — without it, continuous AF still works via CDAF, just with slower hunt.
 
 ### 4.13 `set_exposure_time`
@@ -358,7 +360,7 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 0 | `magic` | `uint32` | `0x4348554E` (`'CHUN'`) |
 | 4 | `version` | `uint32` | `4` |
 
-### 5.3 `ChunkHeader` (60 bytes, follows the start marker in the same message)
+### 5.3 `ChunkHeader` (68 bytes, follows the start marker in the same message)
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -376,7 +378,10 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 48 | `frame_duration_us` | `uint32` | Actual frame duration in µs as reported by the IPA/ISP in libcamera `FrameDuration` metadata. Reflects real per-frame cadence including any multi-camera ISP scheduling overhead. `0` if the metadata was not present. |
 | 52 | `corner_block_size` | `uint32` | Size in bytes of the `CornerBlock` that follows this header in the same WS message. `0` when no corner block is present. |
 | 56 | `num_corner_sets` | `uint16` | Number of `CornerSetHeader` entries packed in the `CornerBlock`. `0` when the block is absent. For `checkerboard` mode this is `0` or `1`; for `checkerboard2x2` it is `0..4`. |
-| 58 | `reserved` | `uint16` | Reserved for future use; always `0` in v4. |
+| 58 | `reserved` | `uint16` | Reserved for future use; always `0`. |
+| 60 | `lens_position` | `float` | Focus distance the libcamera IPA actually applied to this frame, in dioptres (reciprocal metres; `0.0` = infinity). Reported per-frame in manual, auto and continuous AF — the EXIF-style focus record. **`NaN`** when libcamera reported no `LensPosition` for the frame (e.g. a sensor module with no focuser). Check with `isnan` before using; do not treat `0.0` as "unavailable". |
+| 64 | `af_state` | `uint8` | libcamera `AfState` for this frame: `0`=Idle, `1`=Scanning, `2`=Focused, `3`=Failed. **`0xFF`** when no `AfState` was reported. Use to tell whether continuous/auto AF had settled (`2`) when `lens_position` was sampled. |
+| 65 | `reserved2` | `uint8[3]` | Padding; always `0`. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
 
@@ -471,7 +476,7 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 
 ## 8. Versioning
 
-The binary protocol version is carried in `ChunkStartMarker.version` (currently `3`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
+The binary protocol version is carried in `ChunkStartMarker.version` (currently `5`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
 
 ### Version history
 
@@ -480,3 +485,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `2` | Baseline: `ChunkHeader` 40 bytes, `ChunkStartMarker` 8 bytes |
 | `3` | `ChunkHeader` extended to 52 bytes: added `timestamp_us` (uint64, offset 40) and `frame_duration_us` (uint32, offset 48). `get_frame_duration_limits` response gains `num_cameras` field. |
 | `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |
+| `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. |

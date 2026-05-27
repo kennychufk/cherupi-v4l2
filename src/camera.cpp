@@ -3,6 +3,7 @@
 #include <sys/mman.h>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <map>
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
@@ -352,6 +353,17 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     auto fd_meta = request->metadata().get(libcamera::controls::FrameDuration);
     if (fd_meta) actual_fd_us = *fd_meta;
 
+    // Per-frame focus metadata reported by the IPA for this exact frame.
+    // Present in manual, auto and continuous AF; absent on focuser-less
+    // modules. lens_position is in dioptres (0 = infinity).
+    float lens_position = std::numeric_limits<float>::quiet_NaN();
+    auto lp_meta = request->metadata().get(libcamera::controls::LensPosition);
+    if (lp_meta) lens_position = *lp_meta;
+
+    uint8_t af_state = 0xFF;
+    auto afs_meta = request->metadata().get(libcamera::controls::AfState);
+    if (afs_meta) af_state = static_cast<uint8_t>(*afs_meta);
+
     // Periodic FPS diagnostics at INFO level (every 30 frames per camera).
     if (last_frame_ts_ns_ > 0) {
       uint64_t interval_ns = hw_ts_ns - last_frame_ts_ns_;
@@ -386,6 +398,8 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     frame.pixel_format = stream_cfg.pixelFormat.fourcc();
     frame.timestamp_us = hw_ts_us;
     frame.frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
+    frame.lens_position = lens_position;
+    frame.af_state = af_state;
 
     size_t total = 0;
     for (const auto& plane : buf->planes()) total += plane.length;
