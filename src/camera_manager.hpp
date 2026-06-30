@@ -51,6 +51,10 @@ class CameraManager {
   // first camera. Returns {0, 0} if cameras aren't acquired or the control
   // isn't advertised.
   std::pair<int64_t, int64_t> getFrameDurationLimitsHw() const;
+  // Hardware LensPosition range {min, max, def} in dioptres, taken from the
+  // first camera (all cameras run the same sensor). Fields are NaN if there
+  // are no cameras, they aren't acquired, or the control isn't advertised.
+  LensPositionLimits getLensPositionLimitsHw() const;
 
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;

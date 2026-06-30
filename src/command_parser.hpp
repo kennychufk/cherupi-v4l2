@@ -29,6 +29,7 @@ enum class CommandKind {
   SetExposureTime,
   SetFrameDuration,
   GetFrameDurationLimits,
+  GetLensPositionLimits,
 };
 
 struct ParsedCommand {

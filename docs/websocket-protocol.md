@@ -226,7 +226,7 @@ Set the focus mode. Required state: **CONFIGURED** or **RUNNING** (rejected in I
 Single field `lens_position` (number, dioptres):
 
 - **`lens_position < 0`** (e.g. `-1`) — engage continuous autofocus (`AfMode = AfModeContinuous`). This is also the server's default at first start, so a fresh session is already in autofocus without sending this command.
-- **`lens_position >= 0`** — manual focus at that lens position (`AfMode = AfModeManual`, `LensPosition = lens_position`). Typical IMX519 useful range is roughly `0.0` (infinity) to `~10.0` (closest macro); the libcamera tuning JSON's `rpi.af` `map` clamps the actual usable range. The server caps positive values at `32.0` to reject obvious garbage.
+- **`lens_position >= 0`** — manual focus at that lens position (`AfMode = AfModeManual`, `LensPosition = lens_position`). Typical IMX519 useful range is roughly `0.0` (infinity) to `~10.0` (closest macro); the libcamera tuning JSON's `rpi.af` `map` clamps the actual usable range. The server caps positive values at `32.0` to reject obvious garbage — this cap is a sanity bound, **not** the hardware range; use `get_lens_position_limits` (§4.16) to discover the real `min`/`max`.
 
 The setting is **global** — every discovered camera receives the same value.
 
@@ -326,7 +326,37 @@ All discovered cameras run the same sensor (IMX519), so the response carries a s
 
 **Important — advertised limits vs. achievable rate:** `min` is what libcamera's driver reports as the underlying IMX519 sensor's hardware capability. With a multi-sensor consolidation board (e.g. the Arducam quad-camera kit), the driver presents all 4 physical sensors as one logical camera and internally manages cycling or synchronising them. This internal overhead means the actual achievable frame duration is **higher than `min`** — empirically, with the Arducam 16MP IMX519 quad-camera kit on Pi 5, `min=33333 µs` (30 fps advertised) yields approximately **15 fps** in practice. Always use `frame_duration_us` from the binary frame header (§5.3) to measure the frame rate actually being delivered at runtime, rather than relying on `min`.
 
-### 4.16 Server response types (summary)
+### 4.16 `get_lens_position_limits`
+Query the camera's hardware `LensPosition` range — the focus range the IPA advertises. Required state: **CONFIGURED** or **RUNNING** (the limits come from libcamera's `ControlInfoMap`, which is only populated after `configure`).
+
+**Request**
+```json
+{"cmd": "get_lens_position_limits"}
+```
+
+**Response**
+```json
+{
+  "type": "lens_position_limits",
+  "min": 0.0,
+  "max": 10.0,
+  "default": 1.0,
+  "num_cameras": 4
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `min` | number \| `null` | Minimum lens position in dioptres (`0.0` = infinity focus) from libcamera's `ControlInfoMap`. `null` when the module has no focuser (fixed focus) or the control is otherwise unavailable. |
+| `max` | number \| `null` | Maximum lens position in dioptres (closest macro; closest focus distance ≈ `1 / max` metres). `null` as above. |
+| `default` | number \| `null` | The IPA's default lens position in dioptres. `null` if the pipeline advertises no default, or as above. |
+| `num_cameras` | integer | Number of logical libcamera cameras currently configured (always `1` with the Arducam quad-board, which presents all physical sensors as a single camera). |
+
+All discovered cameras run the same sensor (IMX519), so the response carries a single shared range rather than per-camera entries.
+
+Unlike `get_frame_duration_limits` (which uses `{0, 0}` to mean "unavailable"), the lens-range fields use JSON `null` for "unavailable", because `0` dioptres (infinity focus) is itself a valid limit. Clients should fall back to a sensible default range when a field is `null`.
+
+### 4.17 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
@@ -334,6 +364,7 @@ All discovered cameras run the same sensor (IMX519), so the response carries a s
 | `state` | `state` (`"idle"` \| `"configured"` \| `"running"`) | Reply to `get_state` |
 | `status` | `message`, optionally `frames_saved`, `bytes_written` | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
+| `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
 | `error` | `message` | Bad JSON, unknown command, wrong state, invalid arg, handler exception |
 
 ## 5. Binary Frame Protocol
@@ -485,4 +516,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `2` | Baseline: `ChunkHeader` 40 bytes, `ChunkStartMarker` 8 bytes |
 | `3` | `ChunkHeader` extended to 52 bytes: added `timestamp_us` (uint64, offset 40) and `frame_duration_us` (uint32, offset 48). `get_frame_duration_limits` response gains `num_cameras` field. |
 | `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |
-| `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. |
+| `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. Companion text command `get_lens_position_limits` / `lens_position_limits` response added (§4.16) to expose the hardware `LensPosition` range; text-only, no binary change. |

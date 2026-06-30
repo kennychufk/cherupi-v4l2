@@ -55,6 +55,7 @@ class WebSocketServer {
   void handleSetFrameDuration(uWS::WebSocket<false, true, int>* ws,
                               const nlohmann::json& msg);
   void handleGetFrameDurationLimits(uWS::WebSocket<false, true, int>* ws);
+  void handleGetLensPositionLimits(uWS::WebSocket<false, true, int>* ws);
 
   void sendStatus(uWS::WebSocket<false, true, int>* ws,
                   const std::string& message);

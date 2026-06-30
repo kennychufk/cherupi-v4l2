@@ -139,6 +139,9 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::GetFrameDurationLimits:
                       handleGetFrameDurationLimits(ws);
                       break;
+                    case command_parser::CommandKind::GetLensPositionLimits:
+                      handleGetLensPositionLimits(ws);
+                      break;
                   }
                 } catch (json::exception& e) {
                   LOG_ERROR("WebSocketServer",
@@ -584,6 +587,28 @@ void WebSocketServer::handleGetFrameDurationLimits(
   } else {
     response["current"] = nullptr;
   }
+  ws->send(response.dump(), uWS::OpCode::TEXT);
+}
+
+void WebSocketServer::handleGetLensPositionLimits(
+    uWS::WebSocket<false, true, int>* ws) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::GetLensPositionLimits, system_state)) {
+    sendError(ws, "get_lens_position_limits requires CONFIGURED or RUNNING state");
+    return;
+  }
+  LensPositionLimits limits = camera_manager->getLensPositionLimitsHw();
+  size_t num_cameras = camera_manager->getCameraCount();
+
+  // NaN fields (fixed-focus module / control unavailable) serialise to JSON
+  // null via nlohmann's default dump() handling, which clients read as "no
+  // hardware-reported limit".
+  json response;
+  response["type"] = Protocol::TYPE_LENS_POSITION_LIMITS;
+  response["min"] = limits.min;
+  response["max"] = limits.max;
+  response["default"] = limits.def;
+  response["num_cameras"] = num_cameras;
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 

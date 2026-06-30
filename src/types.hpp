@@ -247,6 +247,7 @@ constexpr const char* CMD_SET_LENS_POSITION = "set_lens_position";
 constexpr const char* CMD_SET_EXPOSURE_TIME = "set_exposure_time";
 constexpr const char* CMD_SET_FRAME_DURATION = "set_frame_duration";
 constexpr const char* CMD_GET_FRAME_DURATION_LIMITS = "get_frame_duration_limits";
+constexpr const char* CMD_GET_LENS_POSITION_LIMITS = "get_lens_position_limits";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
@@ -255,4 +256,16 @@ constexpr const char* TYPE_STATUS = "status";
 constexpr const char* TYPE_FRAME = "frame";
 constexpr const char* TYPE_ERROR = "error";
 constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
+constexpr const char* TYPE_LENS_POSITION_LIMITS = "lens_position_limits";
 }  // namespace Protocol
+
+// Hardware LensPosition range from libcamera's ControlInfoMap, in dioptres
+// (min ~0 = infinity, max = closest macro). `def` is the IPA's default lens
+// position. Any field is NaN when the control is unavailable (no focuser, or
+// cameras not acquired) — distinguishes "0 dioptres" (a valid value) from
+// "unknown".
+struct LensPositionLimits {
+  float min;
+  float max;
+  float def;
+};

@@ -1,6 +1,7 @@
 #include "camera_manager.hpp"
 
 #include <algorithm>
+#include <limits>
 
 CameraManager::CameraManager() {
   lcam_manager = std::make_unique<libcamera::CameraManager>();
@@ -184,4 +185,10 @@ int64_t CameraManager::getCurrentFrameDuration() const {
 std::pair<int64_t, int64_t> CameraManager::getFrameDurationLimitsHw() const {
   if (cameras.empty()) return {0, 0};
   return cameras.front()->getFrameDurationLimitsHw();
+}
+
+LensPositionLimits CameraManager::getLensPositionLimitsHw() const {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  if (cameras.empty()) return {nan, nan, nan};
+  return cameras.front()->getLensPositionLimitsHw();
 }

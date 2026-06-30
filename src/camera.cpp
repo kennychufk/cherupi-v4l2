@@ -2,6 +2,7 @@
 
 #include <sys/mman.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -190,6 +191,18 @@ bool Camera::configure(size_t buffer_count) {
              "Multi-sensor boards (e.g. Arducam quad-kit) consolidate "
              "physical sensors into one logical camera and may achieve "
              "lower fps than advertised due to internal driver overhead.");
+  }
+
+  // Log the sensor's hardware LensPosition range (dioptres) if it has a
+  // focuser, so callers can see the AF range libcamera advertises.
+  LensPositionLimits lens_limits = getLensPositionLimitsHw();
+  if (!std::isnan(lens_limits.min) || !std::isnan(lens_limits.max)) {
+    LOG_INFO("Camera",
+             "Camera " + std::to_string(camera_id) +
+                 " HW LensPosition range: min=" +
+                 std::to_string(lens_limits.min) + " dpt, max=" +
+                 std::to_string(lens_limits.max) + " dpt, default=" +
+                 std::to_string(lens_limits.def) + " dpt");
   }
   return true;
 }
@@ -542,6 +555,19 @@ std::pair<int64_t, int64_t> Camera::getFrameDurationLimitsHw() const {
   // Span<int64_t, 2>).
   const libcamera::ControlInfo& info = it->second;
   return {info.min().get<int64_t>(), info.max().get<int64_t>()};
+}
+
+LensPositionLimits Camera::getLensPositionLimitsHw() const {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  if (!lcam_acquired_) return {nan, nan, nan};
+  const auto& cmap = lcam->controls();
+  auto it = cmap.find(&libcamera::controls::LensPosition);
+  if (it == cmap.end()) return {nan, nan, nan};  // fixed-focus module
+  // LensPosition is a float control (dioptres). def() may be unset on some
+  // pipelines; fall back to NaN rather than reading an empty ControlValue.
+  const libcamera::ControlInfo& info = it->second;
+  float def = info.def().isNone() ? nan : info.def().get<float>();
+  return {info.min().get<float>(), info.max().get<float>(), def};
 }
 
 bool Camera::getFrameForStreaming(FrameData& frame) {

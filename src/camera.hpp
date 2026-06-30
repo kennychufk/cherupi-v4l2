@@ -44,6 +44,12 @@ class Camera {
   // libcamera's ControlInfoMap. Returns {0, 0} if the control is not
   // advertised. Requires the camera to be acquired (CONFIGURED or RUNNING).
   std::pair<int64_t, int64_t> getFrameDurationLimitsHw() const;
+  // Returns the hardware LensPosition range {min, max, def} in dioptres from
+  // libcamera's ControlInfoMap. Fields are NaN if the control is not
+  // advertised (fixed-focus module) or the camera is not acquired. Unlike
+  // FrameDurationLimits, NaN (not 0) is the sentinel because 0 dioptres
+  // (infinity) is a valid limit.
+  LensPositionLimits getLensPositionLimitsHw() const;
   bool start();
   bool stop();
   // Release all libcamera resources acquired by configure() and transition

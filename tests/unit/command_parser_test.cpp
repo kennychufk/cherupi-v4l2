@@ -241,4 +241,19 @@ TEST(CommandParserTest, StateGateFrameDurationCmdsRequireConfiguredOrRunning) {
   }
 }
 
+TEST(CommandParserTest, ValidGetLensPositionLimits) {
+  auto r = command_parser::parseCommand(
+      R"({"cmd":"get_lens_position_limits"})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind,
+            CommandKind::GetLensPositionLimits);
+}
+
+TEST(CommandParserTest, StateGateGetLensPositionLimitsRequiresConfiguredOrRunning) {
+  auto kind = CommandKind::GetLensPositionLimits;
+  EXPECT_FALSE(command_parser::isCommandAllowed(kind, CameraState::IDLE));
+  EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::CONFIGURED));
+  EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING));
+}
+
 }  // namespace
