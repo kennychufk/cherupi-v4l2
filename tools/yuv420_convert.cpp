@@ -10,8 +10,16 @@
 //   Total file size padded to 4096 bytes by O_DIRECT writing
 //
 // Usage:
-//   yuv420_convert [options] <input.yuv> <output.[png|jpg|ppm|tiff]>
+//   yuv420_convert [options] <input.yuv> <output.[png|jpg|ppm|tiff|pgm]>
 //   yuv420_convert [options] --batch <input_dir> <output_dir>
+//
+// A .pgm output (or --ext pgm in batch) writes a grayscale Portable Graymap
+// (binary P5) straight from the Y (luma) plane — no YUV→RGB conversion and no
+// chroma read, so it is both faster and lower-memory than the colour path.
+//
+// With --split2x2 each input frame yields four quadrant images named
+// cam<q>-<stem>.<ext> (q numbered before any --rotate180: upper-left 0,
+// upper-right 1, bottom-left 2, bottom-right 3).
 //
 // Options:
 //   --width   W   Pixel width            (default: 2328)
@@ -19,9 +27,11 @@
 //   --stride  S   Y-plane bytes per row  (default: 2432, libcamera alignment)
 //   --quality Q   JPEG quality           (default: 95)
 //   --rotate180   Rotate output 180 degrees
+//   --split2x2    Split each frame into 4 quadrant images (cam0..cam3-<stem>)
 //   --ext     E   Output extension for --batch (default: png)
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -44,6 +54,7 @@ struct Config {
   int stride = 2432;  // libcamera Y-plane stride (128-byte aligned)
   int jpeg_quality = 95;
   bool rotate180 = false;
+  bool split2x2 = false;  // split each frame into 4 quadrant images
 };
 
 // ─── Filename helpers ─────────────────────────────────────────────────────────
@@ -65,15 +76,24 @@ static std::optional<std::pair<uint32_t, uint32_t>> parseYuvStem(
 
 // ─── Core YUV420 conversion ───────────────────────────────────────────────────
 
-static bool convertYuvFile(const fs::path& input, const fs::path& output,
-                            const Config& cfg) {
+// A .pgm output (case-insensitive) means grayscale Portable Graymap.
+static bool wantsGrayscale(const fs::path& output) {
+  std::string ext = output.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return ext == ".pgm";
+}
+
+// Decode an I420 .yuv file into a Mat cropped to width×height — single-channel
+// grayscale when `grayscale` is set, otherwise BGR. NOT rotated, split, or
+// written; callers handle those.
+static bool decodeYuvFrame(const fs::path& input, const Config& cfg,
+                           bool grayscale, cv::Mat& out) {
   // Calculate expected sizes
   size_t y_size = static_cast<size_t>(cfg.stride) * cfg.height;
   size_t u_size = static_cast<size_t>(cfg.stride / 2) * (cfg.height / 2);
   size_t v_size = u_size;
   size_t expected_data = y_size + u_size + v_size;
-  // File is padded to 4096-byte alignment by O_DIRECT writing
-  size_t file_padded = ((expected_data + 4095) / 4096) * 4096;
 
   std::ifstream f(input, std::ios::binary);
   if (!f) {
@@ -81,11 +101,26 @@ static bool convertYuvFile(const fs::path& input, const fs::path& output,
     return false;
   }
 
-  // Read the YUV420 data (file may be padded, but we only use the actual data)
-  std::vector<uint8_t> yuv_data(expected_data);
-  if (!f.read(reinterpret_cast<char*>(yuv_data.data()), expected_data)) {
-    std::cerr << "Short read: " << input << " (expected " << expected_data << " bytes)\n";
+  // Grayscale only needs the Y plane; colour needs the full I420 frame.
+  // (The file may be padded to 4096 bytes by O_DIRECT writing, but we only ever
+  // read the bytes we actually use.)
+  const size_t read_size = grayscale ? y_size : expected_data;
+  std::vector<uint8_t> yuv_data(read_size);
+  if (!f.read(reinterpret_cast<char*>(yuv_data.data()), read_size)) {
+    std::cerr << "Short read: " << input << " (expected " << read_size
+              << " bytes)\n";
     return false;
+  }
+
+  if (grayscale) {
+    // The Y (luma) plane IS the grayscale image — no YUV→RGB conversion needed,
+    // which is the fastest possible path. View just the `width` valid columns
+    // of each stride-byte row, then clone into a packed buffer: this drops the
+    // stride padding and gives a contiguous Mat that outlives yuv_data.
+    cv::Mat y_view(cfg.height, cfg.width, CV_8UC1, yuv_data.data(),
+                   static_cast<size_t>(cfg.stride));
+    out = y_view.clone();
+    return true;
   }
 
   // Create a contiguous I420 buffer for OpenCV
@@ -133,14 +168,66 @@ static bool convertYuvFile(const fs::path& input, const fs::path& output,
     cv::Rect roi(0, 0, cfg.width, cfg.height);
     bgr = bgr(roi).clone();
   }
+  out = std::move(bgr);
+  return true;
+}
 
-  // Optional 180° rotation
-  if (cfg.rotate180) {
-    cv::rotate(bgr, bgr, cv::ROTATE_180);
+// Split `full` into four quadrants and write each as cam<q>-<stem>.<ext>
+// alongside `base_output`. Quadrant ids are fixed by the ORIGINAL (pre-rotation)
+// position: upper-left 0, upper-right 1, bottom-left 2, bottom-right 3. With
+// --rotate180 each quadrant is rotated 180° individually — identical pixels to
+// rotating the whole frame then re-tiling, but cheaper: cv::rotate already
+// yields a contiguous, directly-encodable buffer (no extra clone).
+static bool writeQuadrants(const cv::Mat& full, const fs::path& base_output,
+                           const Config& cfg) {
+  const fs::path dir = base_output.parent_path();
+  const std::string stem = base_output.stem().string();
+  const std::string ext = base_output.extension().string();  // includes the dot
+
+  const int wl = full.cols / 2, ht = full.rows / 2;    // left/top extents
+  const int wr = full.cols - wl, hb = full.rows - ht;  // right/bottom (odd-safe)
+  const cv::Rect quad_rects[4] = {
+      cv::Rect(0, 0, wl, ht),    // 0 upper-left
+      cv::Rect(wl, 0, wr, ht),   // 1 upper-right
+      cv::Rect(0, ht, wl, hb),   // 2 bottom-left
+      cv::Rect(wl, ht, wr, hb),  // 3 bottom-right
+  };
+
+  bool all_ok = true;
+  for (int q = 0; q < 4; ++q) {
+    cv::Mat quad;
+    if (cfg.rotate180) {
+      // rotate emits a fresh contiguous Mat — ready to encode, no extra clone.
+      cv::rotate(full(quad_rects[q]), quad, cv::ROTATE_180);
+    } else {
+      quad = full(quad_rects[q]).clone();  // detach ROI into contiguous pixels
+    }
+    fs::path out = dir / ("cam" + std::to_string(q) + "-" + stem + ext);
+    if (!cv::imwrite(out.string(), quad)) {
+      std::cerr << "Failed to write: " << out << "\n";
+      all_ok = false;
+    }
+  }
+  return all_ok;
+}
+
+static bool convertYuvFile(const fs::path& input, const fs::path& output,
+                           const Config& cfg) {
+  const bool grayscale = wantsGrayscale(output);
+
+  cv::Mat full;
+  if (!decodeYuvFrame(input, cfg, grayscale, full)) return false;
+
+  // --split2x2: four quadrant files; any --rotate180 is applied per quadrant.
+  if (cfg.split2x2) {
+    return writeQuadrants(full, output, cfg);
   }
 
-  // Write output
-  if (!cv::imwrite(output.string(), bgr)) {
+  // Single output: optional 180° rotation, then write.
+  if (cfg.rotate180) {
+    cv::rotate(full, full, cv::ROTATE_180);
+  }
+  if (!cv::imwrite(output.string(), full)) {
     std::cerr << "Failed to write: " << output << "\n";
     return false;
   }
@@ -152,14 +239,20 @@ static bool convertYuvFile(const fs::path& input, const fs::path& output,
 static void printUsage(const char* prog) {
   std::cerr
       << "Usage:\n"
-      << "  " << prog << " [options] <input.yuv> <output.[png|jpg|ppm|tiff]>\n"
+      << "  " << prog
+      << " [options] <input.yuv> <output.[png|jpg|ppm|tiff|pgm]>\n"
       << "  " << prog << " [options] --batch <input_dir> <output_dir>\n"
+      << "\nA .pgm output (or --ext pgm) writes a grayscale graymap from the Y "
+         "plane.\n"
+      << "--split2x2 writes 4 quadrant images cam<0..3>-<stem>.<ext> per "
+         "input.\n"
       << "\nOptions:\n"
       << "  --width   W   Pixel width             (default: 2328)\n"
       << "  --height  H   Pixel height            (default: 1748)\n"
       << "  --stride  S   Y-plane bytes per row   (default: 2432)\n"
       << "  --quality Q   JPEG quality            (default: 95)\n"
       << "  --rotate180   Rotate 180 degrees\n"
+      << "  --split2x2    Split each frame into 4 quadrant images\n"
       << "  --ext     E   Output extension for --batch (default: png)\n";
 }
 
@@ -194,6 +287,8 @@ int main(int argc, char* argv[]) {
       cfg.jpeg_quality = nextInt();
     else if (arg == "--rotate180")
       cfg.rotate180 = true;
+    else if (arg == "--split2x2")
+      cfg.split2x2 = true;
     else if (arg == "--batch")
       cfg.batch = true;
     else if (arg == "--ext")
@@ -247,7 +342,10 @@ int main(int argc, char* argv[]) {
 
     if (!convertYuvFile(input, output, cfg)) return 1;
 
-    std::cout << "Saved: " << output << "\n";
+    if (cfg.split2x2)
+      std::cout << "Saved 4 quadrants for: " << output << "\n";
+    else
+      std::cout << "Saved: " << output << "\n";
     return 0;
   }
 }
