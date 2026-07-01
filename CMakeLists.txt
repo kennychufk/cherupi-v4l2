@@ -178,7 +178,7 @@ target_compile_options(camera_ws_server PRIVATE
 add_executable(yuv420_convert tools/yuv420_convert.cpp)
 target_compile_options(yuv420_convert PRIVATE -O2)
 target_include_directories(yuv420_convert PRIVATE ${json_SOURCE_DIR}/include)
-target_link_libraries(yuv420_convert ${OpenCV_LIBS})
+target_link_libraries(yuv420_convert ${OpenCV_LIBS} Threads::Threads)
 
 # Installation
 install(TARGETS camera_ws_server

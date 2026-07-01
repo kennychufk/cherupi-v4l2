@@ -29,16 +29,21 @@
 //   --rotate180   Rotate output 180 degrees
 //   --split2x2    Split each frame into 4 quadrant images (cam0..cam3-<stem>)
 //   --ext     E   Output extension for --batch (default: png)
+//   --jobs    N   Parallel workers for --batch (default: hardware concurrency)
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <opencv2/opencv.hpp>
@@ -55,6 +60,7 @@ struct Config {
   int jpeg_quality = 95;
   bool rotate180 = false;
   bool split2x2 = false;  // split each frame into 4 quadrant images
+  int jobs = 0;           // --batch worker threads; 0 = hardware concurrency
 };
 
 // ─── Filename helpers ─────────────────────────────────────────────────────────
@@ -253,7 +259,8 @@ static void printUsage(const char* prog) {
       << "  --quality Q   JPEG quality            (default: 95)\n"
       << "  --rotate180   Rotate 180 degrees\n"
       << "  --split2x2    Split each frame into 4 quadrant images\n"
-      << "  --ext     E   Output extension for --batch (default: png)\n";
+      << "  --ext     E   Output extension for --batch (default: png)\n"
+      << "  --jobs    N   Parallel workers for --batch (default: all cores)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -293,6 +300,8 @@ int main(int argc, char* argv[]) {
       cfg.batch = true;
     else if (arg == "--ext")
       batch_ext = nextStr();
+    else if (arg == "--jobs")
+      cfg.jobs = nextInt();
     else if (arg.substr(0, 2) == "--") {
       std::cerr << "Unknown option: " << arg << "\n";
       return 1;
@@ -315,25 +324,68 @@ int main(int argc, char* argv[]) {
     }
     fs::create_directories(out_dir);
 
-    int ok = 0, fail = 0;
+    // Gather the conversion tasks up front (skipping non-.yuv / unparsable
+    // names), then process them in parallel — every file is fully independent.
+    struct Task {
+      fs::path input;
+      fs::path output;
+      std::string stem;
+    };
+    std::vector<Task> tasks;
     for (const auto& e : fs::directory_iterator(in_dir)) {
       if (e.path().extension() != ".yuv") continue;
       const std::string stem = e.path().stem().string();
-      auto parsed = parseYuvStem(stem);
-      if (!parsed) {
+      if (!parseYuvStem(stem)) {
         std::cerr << "Skipping: " << e.path().filename() << "\n";
         continue;
       }
-
-      fs::path out_file = out_dir / (stem + "." + batch_ext);
-      if (convertYuvFile(e.path(), out_file, cfg)) {
-        ++ok;
-        std::cout << "  OK  " << stem << "\n";
-      } else {
-        ++fail;
-      }
+      tasks.push_back({e.path(), out_dir / (stem + "." + batch_ext), stem});
     }
-    std::cout << "\nDone: " << ok << " OK, " << fail << " failed.\n";
+
+    // Worker count: --jobs if given, else hardware concurrency, capped at the
+    // number of tasks (and at least 1 so the loop stays well-formed).
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    unsigned jobs = cfg.jobs > 0 ? static_cast<unsigned>(cfg.jobs) : hw;
+    if (tasks.size() < jobs) jobs = static_cast<unsigned>(tasks.size());
+    if (jobs == 0) jobs = 1;
+
+    // Embarrassingly parallel: workers pull the next task index atomically and
+    // report each file the moment it finishes (live progress, completion order)
+    // rather than batching all prints after the join. A mutex keeps concurrent
+    // lines from interleaving; atomic counters make the final tally race-free.
+    std::atomic<size_t> next_idx{0};
+    std::atomic<int> ok_count{0}, fail_count{0};
+    std::mutex print_mtx;
+    auto worker = [&]() {
+      for (size_t i = next_idx.fetch_add(1); i < tasks.size();
+           i = next_idx.fetch_add(1)) {
+        bool ok = false;
+        try {
+          ok = convertYuvFile(tasks[i].input, tasks[i].output, cfg);
+        } catch (const std::exception& ex) {
+          // One bad frame must not abort the batch — an uncaught throw in a
+          // worker (e.g. cv::imwrite on a bad codec) would std::terminate.
+          std::lock_guard<std::mutex> lock(print_mtx);
+          std::cerr << "Error on " << tasks[i].stem << ": " << ex.what() << "\n";
+        }
+        if (ok) {
+          ++ok_count;
+          std::lock_guard<std::mutex> lock(print_mtx);
+          std::cout << "  OK  " << tasks[i].stem << "\n";
+        } else {
+          ++fail_count;
+        }
+      }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(jobs);
+    for (unsigned t = 0; t < jobs; ++t) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+
+    const int ok = ok_count, fail = fail_count;
+    std::cout << "\nDone: " << ok << " OK, " << fail << " failed (" << jobs
+              << " thread" << (jobs == 1 ? "" : "s") << ").\n";
     return fail > 0 ? 1 : 0;
 
   } else {
