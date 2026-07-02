@@ -89,10 +89,6 @@ Apply identical configuration to all cameras. Required state: **IDLE**.
 {"cmd": "configure", "params": {
   "width": 2328,
   "height": 1748,
-  "crop_width": 4656,
-  "crop_height": 3496,
-  "crop_left": 8,
-  "crop_top": 48,
   "awb": {
     "enabled": true,
     "interval": 10,

@@ -81,7 +81,7 @@ CMake 3.14+, C++17. Targets:
 ## Key Design Points
 
 - Single client simplifies state and resource ownership.
-- All cameras share one `CameraConfig` (identical resolution/crop).
+- All cameras share one `CameraConfig` (identical resolution).
 - Latest-frame-wins for streaming; older frames dropped.
 - Adaptive rate control + chunked transfer keeps WebSocket responsive under load.
 - Header-only mode lets a client track framing without pulling pixel data.

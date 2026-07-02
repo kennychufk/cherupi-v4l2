@@ -207,10 +207,6 @@ def discovered_cameras(client: CherupiClient) -> list[dict]:
 TEST_CONFIG = {
     "width": 1456,
     "height": 1088,
-    "crop_width": 4656,
-    "crop_height": 3496,
-    "crop_left": 8,
-    "crop_top": 48,
 }
 
 

@@ -99,11 +99,6 @@ CameraConfig buildCameraConfig(const json& params) {
   CameraConfig config;
   if (params.contains("width")) config.width = params["width"];
   if (params.contains("height")) config.height = params["height"];
-  if (params.contains("crop_width")) config.crop_width = params["crop_width"];
-  if (params.contains("crop_height"))
-    config.crop_height = params["crop_height"];
-  if (params.contains("crop_left")) config.crop_left = params["crop_left"];
-  if (params.contains("crop_top")) config.crop_top = params["crop_top"];
 
   // AWB fields are accepted but ignored (libcamera IPA owns AWB).
   if (params.contains("awb") && params["awb"].is_object()) {

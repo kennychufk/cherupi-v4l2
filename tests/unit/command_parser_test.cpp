@@ -113,15 +113,11 @@ TEST(CommandParserTest, StateGateStreamCommandsRequireRunning) {
 }
 
 TEST(CommandParserTest, BuildCameraConfigOverridesDefaults) {
-  auto params = nlohmann::json::parse(
-      R"({"width":1280,"height":720,"crop_left":100,"crop_top":50})");
+  auto params = nlohmann::json::parse(R"({"width":1280})");
   CameraConfig cfg = command_parser::buildCameraConfig(params);
   EXPECT_EQ(cfg.width, 1280u);
-  EXPECT_EQ(cfg.height, 720u);
-  EXPECT_EQ(cfg.crop_left, 100u);
-  EXPECT_EQ(cfg.crop_top, 50u);
   // Un-specified fields keep their defaults.
-  EXPECT_EQ(cfg.crop_width, CameraConfig{}.crop_width);
+  EXPECT_EQ(cfg.height, CameraConfig{}.height);
 }
 
 TEST(CommandParserTest, BuildCameraConfigAwbFieldsAcceptedButRetained) {

@@ -201,10 +201,6 @@ struct AwbConfig {
 struct CameraConfig {
   uint32_t width = 2328;
   uint32_t height = 1748;
-  uint32_t crop_width = 4656;
-  uint32_t crop_height = 3496;
-  uint32_t crop_left = 8;
-  uint32_t crop_top = 48;
   AwbConfig awb;
 };
 
