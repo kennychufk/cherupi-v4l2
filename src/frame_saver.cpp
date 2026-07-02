@@ -133,6 +133,11 @@ void FrameSaver::start() {
   } else if (config.mode == SaveMode::BATCH ||
              config.mode == SaveMode::CHECKERBOARD ||
              config.mode == SaveMode::CHECKERBOARD2X2) {
+    // Drop any partial batch left over from a previous session.
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex);
+      pending_batch.clear();
+    }
     // Start writer threads
     for (size_t i = 0; i < config.writer_threads; i++) {
       writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
@@ -146,9 +151,12 @@ void FrameSaver::stop() {
   if (config.mode == SaveMode::BATCH ||
       config.mode == SaveMode::CHECKERBOARD ||
       config.mode == SaveMode::CHECKERBOARD2X2) {
-    // Signal threads to stop
+    // Flush any frames still held in a partial batch (BATCH mode) so they are
+    // written before the workers exit, then signal threads to stop.
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
+      for (auto& t : pending_batch) write_queue.push(std::move(t));
+      pending_batch.clear();
       stop_threads = true;
     }
     queue_cv.notify_all();
@@ -186,11 +194,20 @@ void FrameSaver::saveFrame(const FrameData& frame) {
     task.camera_id = frame.camera_id;
     task.frame_id = frame.frame_id;
 
+    // Accumulate frames and hand them to the writer pool in groups of
+    // batch_size (at least 1). The partial final batch is flushed in stop().
+    const size_t batch_size = std::max<size_t>(config.batch_size, 1);
+    bool flushed = false;
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
-      write_queue.push(std::move(task));
+      pending_batch.push_back(std::move(task));
+      if (pending_batch.size() >= batch_size) {
+        for (auto& t : pending_batch) write_queue.push(std::move(t));
+        pending_batch.clear();
+        flushed = true;
+      }
     }
-    queue_cv.notify_one();
+    if (flushed) queue_cv.notify_all();
   } else if (config.mode == SaveMode::CHECKERBOARD ||
              config.mode == SaveMode::CHECKERBOARD2X2) {
     frames_checked++;

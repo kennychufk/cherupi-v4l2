@@ -50,6 +50,10 @@ class FrameSaver {
   };
 
   std::queue<WriteTask> write_queue;
+  // BATCH mode: frames accumulate here and are moved into write_queue in
+  // groups of config.batch_size (handed to the writer pool). Guarded by
+  // queue_mutex; any partial batch is flushed in stop().
+  std::vector<WriteTask> pending_batch;
   std::mutex queue_mutex;
   std::condition_variable queue_cv;
   std::vector<std::thread> writer_threads;
