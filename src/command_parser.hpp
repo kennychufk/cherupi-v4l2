@@ -55,8 +55,7 @@ bool isCommandAllowed(CommandKind kind, CameraState current);
 
 // Convert a successful CameraConfig build. Pure: no camera, no transport.
 // The function does not reject unknown fields — it silently ignores them
-// (matches the server's existing behaviour). AWB fields are accepted but
-// discarded since the libcamera IPA owns AWB now (see CLAUDE.md).
+// (matches the server's existing behaviour).
 CameraConfig buildCameraConfig(const nlohmann::json& params);
 
 // Convert a successful SaveConfig build for a set_save_mode message. Returns

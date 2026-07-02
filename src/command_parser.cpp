@@ -99,16 +99,6 @@ CameraConfig buildCameraConfig(const json& params) {
   CameraConfig config;
   if (params.contains("width")) config.width = params["width"];
   if (params.contains("height")) config.height = params["height"];
-
-  // AWB fields are accepted but ignored (libcamera IPA owns AWB).
-  if (params.contains("awb") && params["awb"].is_object()) {
-    const json& a = params["awb"];
-    if (a.contains("enabled")) config.awb.enabled = a["enabled"];
-    if (a.contains("interval")) config.awb.interval = a["interval"];
-    if (a.contains("speed")) config.awb.speed = a["speed"];
-    if (a.contains("warmup_frames"))
-      config.awb.warmup_frames = a["warmup_frames"];
-  }
   return config;
 }
 

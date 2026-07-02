@@ -120,19 +120,6 @@ TEST(CommandParserTest, BuildCameraConfigOverridesDefaults) {
   EXPECT_EQ(cfg.height, CameraConfig{}.height);
 }
 
-TEST(CommandParserTest, BuildCameraConfigAwbFieldsAcceptedButRetained) {
-  // AWB fields are documented as "accepted-but-ignored" by the runtime (the
-  // libcamera IPA owns AWB). The parser still parses them into the struct so
-  // the protocol contract is faithfully represented; the runtime drops them.
-  auto params = nlohmann::json::parse(
-      R"({"awb":{"enabled":false,"interval":33,"speed":0.1,"warmup_frames":20}})");
-  CameraConfig cfg = command_parser::buildCameraConfig(params);
-  EXPECT_FALSE(cfg.awb.enabled);
-  EXPECT_EQ(cfg.awb.interval, 33);
-  EXPECT_FLOAT_EQ(cfg.awb.speed, 0.1f);
-  EXPECT_EQ(cfg.awb.warmup_frames, 20);
-}
-
 TEST(CommandParserTest, BuildSaveConfigAppliesMode) {
   auto msg = nlohmann::json::parse(R"({"mode":"batch","params":{"batch_size":7}})");
   auto cfg = command_parser::buildSaveConfig(msg);

@@ -188,20 +188,10 @@ struct FrameData {
   }
 };
 
-// AWB configuration (libcamera IPA runs AWB internally; these fields are
-// accepted from the client for protocol compatibility but not used).
-struct AwbConfig {
-  bool enabled = true;
-  int interval = 10;
-  float speed = 0.05f;
-  int warmup_frames = 10;
-};
-
 // Camera configuration
 struct CameraConfig {
   uint32_t width = 2328;
   uint32_t height = 1748;
-  AwbConfig awb;
 };
 
 // Frame saving modes

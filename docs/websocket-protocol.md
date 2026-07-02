@@ -88,19 +88,11 @@ Apply identical configuration to all cameras. Required state: **IDLE**.
 ```json
 {"cmd": "configure", "params": {
   "width": 2328,
-  "height": 1748,
-  "awb": {
-    "enabled": true,
-    "interval": 10,
-    "speed": 0.05,
-    "warmup_frames": 10
-  }
+  "height": 1748
 }}
 ```
 
-All fields under `params` and `params.awb` are optional; omitted fields keep server defaults (see `CameraConfig` / `AwbConfig` in `types.hpp`).
-
-`awb.*` is accepted for protocol compatibility only — libcamera's IPA owns AWB at runtime and these fields are not applied. Clients may omit the `awb` object.
+All fields under `params` are optional; omitted fields keep server defaults (see `CameraConfig` in `types.hpp`).
 
 **Output pixel format:** YUV420 (`V4L2_PIX_FMT_YUV420`), reflected in every binary frame header's `pixel_format` FourCC.
 

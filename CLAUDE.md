@@ -85,4 +85,3 @@ CMake 3.14+, C++17. Targets:
 - Latest-frame-wins for streaming; older frames dropped.
 - Adaptive rate control + chunked transfer keeps WebSocket responsive under load.
 - Header-only mode lets a client track framing without pulling pixel data.
-- AWB config fields on `CameraConfig` are kept for protocol compatibility but ignored — libcamera IPA owns AWB now.
