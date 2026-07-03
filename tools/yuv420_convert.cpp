@@ -18,8 +18,10 @@
 // chroma read, so it is both faster and lower-memory than the colour path.
 //
 // With --split2x2 each input frame yields four quadrant images named
-// cam<q>-<stem>.<ext> (q numbered before any --rotate180: upper-left 0,
-// upper-right 1, bottom-left 2, bottom-right 3).
+// cam<quadrant_camera_id>-<frame_id>.<ext>, where quadrant_camera_id =
+// camera_id * 4 + q (q numbered before any --rotate180: upper-left 0,
+// upper-right 1, bottom-left 2, bottom-right 3) and camera_id/frame_id come
+// from the input's cam<camera_id>-<frame_id>.yuv name.
 //
 // Options:
 //   --width   W   Pixel width            (default: 2328)
@@ -178,16 +180,27 @@ static bool decodeYuvFrame(const fs::path& input, const Config& cfg,
   return true;
 }
 
-// Split `full` into four quadrants and write each as cam<q>-<stem>.<ext>
-// alongside `base_output`. Quadrant ids are fixed by the ORIGINAL (pre-rotation)
-// position: upper-left 0, upper-right 1, bottom-left 2, bottom-right 3. With
-// --rotate180 each quadrant is rotated 180° individually — identical pixels to
-// rotating the whole frame then re-tiling, but cheaper: cv::rotate already
-// yields a contiguous, directly-encodable buffer (no extra clone).
-static bool writeQuadrants(const cv::Mat& full, const fs::path& base_output,
-                           const Config& cfg) {
+// Split `full` into four quadrants and write each as
+// cam<quadrant_camera_id>-<frame_id>.<ext> alongside `base_output`, where
+// quadrant_camera_id = camera_id * 4 + q and camera_id/frame_id are parsed
+// from `input`'s cam<camera_id>-<frame_id>.yuv name. Quadrant ids are fixed
+// by the ORIGINAL (pre-rotation) position: upper-left 0, upper-right 1,
+// bottom-left 2, bottom-right 3. With --rotate180 each quadrant is rotated
+// 180° individually — identical pixels to rotating the whole frame then
+// re-tiling, but cheaper: cv::rotate already yields a contiguous,
+// directly-encodable buffer (no extra clone).
+static bool writeQuadrants(const cv::Mat& full, const fs::path& input,
+                           const fs::path& base_output, const Config& cfg) {
+  auto parsed = parseYuvStem(input.stem().string());
+  if (!parsed) {
+    std::cerr << "Cannot parse cam<ID>-<frame_id> from input: " << input
+              << "\n";
+    return false;
+  }
+  const uint32_t camera_id = parsed->first;
+  const uint32_t frame_id = parsed->second;
+
   const fs::path dir = base_output.parent_path();
-  const std::string stem = base_output.stem().string();
   const std::string ext = base_output.extension().string();  // includes the dot
 
   const int wl = full.cols / 2, ht = full.rows / 2;    // left/top extents
@@ -208,7 +221,10 @@ static bool writeQuadrants(const cv::Mat& full, const fs::path& base_output,
     } else {
       quad = full(quad_rects[q]).clone();  // detach ROI into contiguous pixels
     }
-    fs::path out = dir / ("cam" + std::to_string(q) + "-" + stem + ext);
+    const uint32_t quadrant_camera_id =
+        camera_id * 4 + static_cast<uint32_t>(q);
+    fs::path out = dir / ("cam" + std::to_string(quadrant_camera_id) + "-" +
+                          std::to_string(frame_id) + ext);
     if (!cv::imwrite(out.string(), quad)) {
       std::cerr << "Failed to write: " << out << "\n";
       all_ok = false;
@@ -226,7 +242,7 @@ static bool convertYuvFile(const fs::path& input, const fs::path& output,
 
   // --split2x2: four quadrant files; any --rotate180 is applied per quadrant.
   if (cfg.split2x2) {
-    return writeQuadrants(full, output, cfg);
+    return writeQuadrants(full, input, output, cfg);
   }
 
   // Single output: optional 180° rotation, then write.
@@ -250,8 +266,8 @@ static void printUsage(const char* prog) {
       << "  " << prog << " [options] --batch <input_dir> <output_dir>\n"
       << "\nA .pgm output (or --ext pgm) writes a grayscale graymap from the Y "
          "plane.\n"
-      << "--split2x2 writes 4 quadrant images cam<0..3>-<stem>.<ext> per "
-         "input.\n"
+      << "--split2x2 writes 4 quadrant images "
+         "cam<camera_id*4+q>-<frame_id>.<ext> per input.\n"
       << "\nOptions:\n"
       << "  --width   W   Pixel width             (default: 2328)\n"
       << "  --height  H   Pixel height            (default: 1748)\n"
