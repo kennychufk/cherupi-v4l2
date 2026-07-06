@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "frame_saver.hpp"
@@ -11,6 +13,18 @@
 #include "types.hpp"
 
 namespace {
+
+// Detection is async/best-effort, so poll the saver's detected-frame slot
+// until the worker publishes a processed frame for `camera_id`. Returns false
+// on timeout. On success `frame`/`sets` hold what the streamer would send.
+bool waitForDetectedFrame(FrameSaver& saver, uint32_t camera_id,
+                          FrameData& frame, std::vector<CornerSet>& sets) {
+  for (int i = 0; i < 400; ++i) {
+    if (saver.takeDetectedFrameForStreaming(camera_id, frame, sets)) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
 
 // Captures each send() call as a separate message so tests can inspect the
 // chunk stream independently of any transport.
@@ -147,9 +161,9 @@ TEST(StreamChunkingTest, HeaderOnlyModeSendsOnlyMarkerPlusHeader) {
 }
 
 TEST(StreamChunkingTest, ChunkHeaderEmitsZeroCornerBlockOnNoDetection) {
-  // CHECKERBOARD2X2 over a uniform-gray frame: the saver caches an empty set
-  // list for (camera_id, frame_id), and the streamer must encode that as
-  // num_corner_sets=0 with no bytes appended to the header message.
+  // CHECKERBOARD2X2 over a uniform-gray frame: the detector runs and finds no
+  // board, so it publishes the frame with an empty corner-set list, and the
+  // streamer must encode that as num_corner_sets=0 with no bytes appended.
   CameraManager dummy_mgr;
   FrameSaver saver;
   SaveConfig cfg;
@@ -171,13 +185,18 @@ TEST(StreamChunkingTest, ChunkHeaderEmitsZeroCornerBlockOnNoDetection) {
   detection_frame.data.assign(static_cast<size_t>(480) * 360 * 3 / 2, 128);
   saver.saveFrame(detection_frame);
 
+  // The detector processes the frame (finding no board) and publishes it for
+  // streaming with an empty corner set.
+  FrameData det_frame;
+  std::vector<CornerSet> det_sets;
+  ASSERT_TRUE(waitForDetectedFrame(saver, 2, det_frame, det_sets));
+  EXPECT_TRUE(det_sets.empty());
+
   StreamManager sm(&dummy_mgr, &saver);
   RecordingSink sink;
   sm.setSink(&sink);
 
-  // Stream the same (camera_id, frame_id) so the cache hit lands.
-  FrameData stream_frame = detection_frame;
-  ASSERT_TRUE(sm.sendFrameForTest(stream_frame, /*camera_id=*/2));
+  ASSERT_TRUE(sm.sendFrameForTest(det_frame, /*camera_id=*/2, det_sets));
 
   // No board → empty corner set list → header reflects 0 sets with no extra
   // bytes appended to the header message.
@@ -198,9 +217,9 @@ TEST(StreamChunkingTest, ChunkHeaderEmitsZeroCornerBlockOnNoDetection) {
 
 TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   // End-to-end: save mode is CHECKERBOARD2X2, a YUV frame with the fixture
-  // pasted into the top-left quadrant gets saveFrame'd (populating the
-  // detection cache), then the streamer sends the same frame and we read
-  // back the CornerSetHeader + corner coordinates.
+  // pasted into the top-left quadrant gets saveFrame'd; the async detector
+  // publishes the processed frame with its corners, then the streamer sends
+  // that frame and we read back the CornerSetHeader + corner coordinates.
   std::ifstream f(std::string(CHERUPI_TEST_FIXTURES_DIR) +
                       "/checkerboard_8x11.pgm",
                   std::ios::binary);
@@ -246,12 +265,17 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   saver.start();
   saver.saveFrame(frame);
 
+  // Wait for the async detector to publish the processed frame + corners.
+  FrameData det_frame;
+  std::vector<CornerSet> det_sets;
+  ASSERT_TRUE(waitForDetectedFrame(saver, frame.camera_id, det_frame, det_sets));
+
   CameraManager dummy_mgr;
   StreamManager sm(&dummy_mgr, &saver);
   RecordingSink sink;
   sm.setSink(&sink);
 
-  ASSERT_TRUE(sm.sendFrameForTest(frame, frame.camera_id));
+  ASSERT_TRUE(sm.sendFrameForTest(det_frame, frame.camera_id, det_sets));
   ASSERT_GE(sink.messages.size(), 1u);
 
   // Parse marker + header from message 0.

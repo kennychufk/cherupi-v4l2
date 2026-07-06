@@ -149,6 +149,8 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 `checkerboard_*` fields apply to `checkerboard` and `checkerboard2x2` modes. If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
 
+In both checkerboard modes detection runs **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result. See §5.4 and §5.7.
+
 **Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
 
 ### 4.6 `start_cameras`
@@ -426,7 +428,7 @@ num_corners × { float x, float y } // set 1 corners
 
 Corner coordinates follow the header as `num_corners × { float x; float y; }` (little-endian IEEE-754), each `8` bytes, in full-frame Y-plane pixel space regardless of the saver's `checkerboard_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
 
-The block is only emitted when the streamer finds a cached detection result for the exact `(camera_id, frame_id)` it is about to send. If the streamer races ahead of the detector for that frame, the block is omitted (`corner_block_size = 0`, `num_corner_sets = 0`). The detection cache is invalidated by `reset_frame_counts` and by `start_cameras`.
+In `checkerboard` / `checkerboard2x2` modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found no board, `num_corner_sets = 0` and `corner_block_size = 0` (no corner bytes follow); when it found one or more, the block carries them. In every other save mode no detector runs and the block is always absent (`num_corner_sets = 0`).
 
 ### 5.5 `ChunkData` (16 bytes header, followed by `chunk_size` payload bytes in the same WS message)
 
@@ -451,6 +453,8 @@ With multiple cameras streaming, the server uses round-robin scheduling. One fra
 The server monitors `ws.getBufferedAmount()` with hysteresis (enter at 512 KiB, exit at 128 KiB) and throttles the per-chunk send rate via an adaptive controller. Under sustained pressure the server drops older frames rather than queueing — only the latest frame per camera is retained for transmission. `frame_id` therefore may jump; gaps are expected and not an error.
 
 Header-only mode bypasses the payload path entirely and is unaffected by data backpressure.
+
+**Checkerboard modes.** In `checkerboard` / `checkerboard2x2` an additional gate sits in front of streaming: the frame stream is fed exclusively by the best-effort detector (§4.5). Frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector), and only a frame the detector has finished processing — regardless of whether a board was found — is ever eligible to send. A processed frame may still be dropped afterwards by ordinary backpressure. The net effect is that the streamed frame rate in these modes is bounded by **detector throughput**, not capture rate, so `frame_id` gaps are correspondingly larger and expected.
 
 ## 6. Typical Session
 

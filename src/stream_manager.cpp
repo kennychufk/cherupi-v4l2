@@ -255,20 +255,37 @@ void StreamManager::streamingLoop() {
         continue;
       }
 
+      // Frame source depends on the save mode. In checkerboard modes the only
+      // streamable frames are the ones the detector has already processed, so
+      // we pull from the saver's detected-frame slot (which carries the
+      // corners); otherwise we pull the latest captured frame from the camera.
+      const SaveMode mode = frame_saver ? frame_saver->getMode() : SaveMode::NONE;
+      const bool detector_gated = (mode == SaveMode::CHECKERBOARD ||
+                                   mode == SaveMode::CHECKERBOARD2X2);
+
       FrameData frame;
-      if (camera->getFrameForStreaming(frame)) {
+      std::vector<CornerSet> corner_sets;
+      bool got_frame = false;
+      if (detector_gated) {
+        got_frame = frame_saver->takeDetectedFrameForStreaming(camera_id, frame,
+                                                               corner_sets);
+      } else {
+        got_frame = camera->getFrameForStreaming(frame);
+      }
+
+      if (got_frame) {
         LOG_DEBUG("StreamManager",
                   "Got frame " + std::to_string(frame.frame_id) +
                       " from camera " + std::to_string(camera_id));
 
         bool success = false;
         if (header_only_mode) {
-          success = sendHeaderOnlyFrame(frame, camera_id);
+          success = sendHeaderOnlyFrame(frame, camera_id, std::move(corner_sets));
           if (success) {
             stats.header_only_frames++;
           }
         } else {
-          success = sendChunkedFrame(frame, camera_id);
+          success = sendChunkedFrame(frame, camera_id, std::move(corner_sets));
         }
 
         if (success) {
@@ -280,7 +297,9 @@ void StreamManager::streamingLoop() {
                                         std::to_string(camera_id));
         }
 
-        camera->releaseStreamingFrame();
+        // The detector-gated path hands out its own copy; only the camera path
+        // needs its in-use streaming buffer released for the next frame.
+        if (!detector_gated) camera->releaseStreamingFrame();
       }
     }
 
@@ -324,17 +343,20 @@ bool StreamManager::waitForBufferDrain() {
 }
 
 bool StreamManager::sendFrameForTest(const FrameData& frame,
-                                     uint32_t camera_id) {
+                                     uint32_t camera_id,
+                                     std::vector<CornerSet> corner_sets) {
   if (header_only_mode) {
-    return sendHeaderOnlyFrame(frame, camera_id);
+    return sendHeaderOnlyFrame(frame, camera_id, std::move(corner_sets));
   }
-  return sendChunkedFrame(frame, camera_id);
+  return sendChunkedFrame(frame, camera_id, std::move(corner_sets));
 }
 
 bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
-                                        uint32_t camera_id) {
+                                        uint32_t camera_id,
+                                        std::vector<CornerSet> corner_sets) {
   ChunkedTransfer transfer;
   transfer.frame = frame;
+  transfer.corner_sets = std::move(corner_sets);
   transfer.frame_uuid = generateFrameUUID();
   transfer.total_chunks = 0;
   transfer.current_chunk = 0;
@@ -349,11 +371,13 @@ bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
 }
 
 bool StreamManager::sendChunkedFrame(const FrameData& frame,
-                                     uint32_t camera_id) {
+                                     uint32_t camera_id,
+                                     std::vector<CornerSet> corner_sets) {
   {
     std::lock_guard<std::mutex> lock(transfer_mutex);
     current_transfer = std::make_unique<ChunkedTransfer>();
     current_transfer->frame = frame;
+    current_transfer->corner_sets = std::move(corner_sets);
     current_transfer->frame_uuid = generateFrameUUID();
     current_transfer->total_chunks =
         (frame.data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -472,20 +496,10 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   std::lock_guard<std::mutex> lock(sink_mutex);
   if (!sink) return false;
 
-  // Pull a cached detection result (if any) for this exact frame. The saver
-  // writes the cache synchronously in the capture-thread path before this
-  // streaming-thread sees the frame (camera.cpp orders onFrameCaptured ahead
-  // of latest_frame publish), so the cache is populated by the time we get
-  // here in checkerboard / checkerboard2x2 modes.
-  std::vector<CornerSet> corner_sets;
-  if (frame_saver) {
-    const SaveMode mode = frame_saver->getMode();
-    if (mode == SaveMode::CHECKERBOARD || mode == SaveMode::CHECKERBOARD2X2) {
-      auto cached = frame_saver->getDetectionForFrame(
-          transfer.frame.camera_id, transfer.frame.frame_id);
-      if (cached) corner_sets = std::move(cached->sets);
-    }
-  }
+  // Corners were resolved when the frame was pulled (checkerboard modes hand
+  // the streamer only detector-processed frames, each carrying its own corner
+  // set), so no lookup is needed here.
+  const std::vector<CornerSet>& corner_sets = transfer.corner_sets;
 
   // Compute the variable corner-block size up front so we can encode it in
   // ChunkHeader before the bytes go out.

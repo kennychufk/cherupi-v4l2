@@ -274,7 +274,7 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
   EXPECT_EQ(count, 0);
 }
 
-TEST_F(FrameSaverTempDir, Checkerboard2x2CachesPerCameraDetectionForStreamer) {
+TEST_F(FrameSaverTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) {
   Pgm board = loadCheckerboardFixture();
   ASSERT_GT(board.width, 0);
   FrameData frame =
@@ -295,12 +295,21 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2CachesPerCameraDetectionForStreamer) {
   saver.start();
   saver.saveFrame(frame);
 
-  auto cached = saver.getDetectionForFrame(2, 55);
-  ASSERT_TRUE(cached.has_value());
-  ASSERT_EQ(cached->sets.size(), 1u);
-  EXPECT_EQ(cached->sets[0].set_id, 0u);  // top-left quadrant
-  EXPECT_EQ(cached->sets[0].corners.size(), 11u * 8u);
-  for (const auto& p : cached->sets[0].corners) {
+  // Detection is async/best-effort: wait for the worker to publish the
+  // processed frame into the streamer-facing slot.
+  FrameData got;
+  std::vector<CornerSet> sets;
+  bool ready = false;
+  for (int i = 0; i < 400 && !ready; ++i) {
+    ready = saver.takeDetectedFrameForStreaming(2, got, sets);
+    if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(ready);
+  EXPECT_EQ(got.frame_id, 55u);
+  ASSERT_EQ(sets.size(), 1u);
+  EXPECT_EQ(sets[0].set_id, 0u);  // top-left quadrant
+  EXPECT_EQ(sets[0].corners.size(), 11u * 8u);
+  for (const auto& p : sets[0].corners) {
     // Translated to full-frame Y pixels; top-left quadrant occupies
     // [0, W/2) × [0, H/2).
     EXPECT_GT(p.x, 0.0f);
@@ -309,14 +318,13 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2CachesPerCameraDetectionForStreamer) {
     EXPECT_LT(p.y, static_cast<float>(frame.height) / 2.0f);
   }
 
-  // Different frame_id → cache miss.
-  EXPECT_FALSE(saver.getDetectionForFrame(2, 56).has_value());
-  // Different camera_id → cache miss.
-  EXPECT_FALSE(saver.getDetectionForFrame(3, 55).has_value());
-
-  // Reset wipes the cache (frame_id counters reset, so old entries are stale).
-  saver.resetFramesSavedCounts();
-  EXPECT_FALSE(saver.getDetectionForFrame(2, 55).has_value());
+  // Consume-once: taking again without a new detection yields nothing, so the
+  // same processed frame is never streamed twice.
+  FrameData again;
+  std::vector<CornerSet> again_sets;
+  EXPECT_FALSE(saver.takeDetectedFrameForStreaming(2, again, again_sets));
+  // A camera that never produced a detected frame yields nothing.
+  EXPECT_FALSE(saver.takeDetectedFrameForStreaming(3, again, again_sets));
 
   saver.stop();
 }

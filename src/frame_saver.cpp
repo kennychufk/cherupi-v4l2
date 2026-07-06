@@ -120,9 +120,17 @@ void FrameSaver::start() {
 
   // Reset per-camera counters
   frames_saved_per_camera.clear();
+
+  // Clear best-effort detection slots left over from a previous session.
   {
-    std::lock_guard<std::mutex> lock(detection_mutex);
-    latest_detection_per_camera.clear();
+    std::lock_guard<std::mutex> lock(pending_mutex);
+    pending_detection.clear();
+    stop_detection = false;
+    last_detected_camera_ = std::numeric_limits<uint32_t>::max();
+  }
+  {
+    std::lock_guard<std::mutex> lock(detected_mutex);
+    detected_for_stream.clear();
   }
 
   if (config.mode == SaveMode::BUFFER) {
@@ -142,11 +150,31 @@ void FrameSaver::start() {
     for (size_t i = 0; i < config.writer_threads; i++) {
       writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
     }
+    // Checkerboard modes run one async worker that does the CPU-heavy
+    // detection off the capture thread.
+    if (config.mode == SaveMode::CHECKERBOARD ||
+        config.mode == SaveMode::CHECKERBOARD2X2) {
+      detection_thread = std::thread(&FrameSaver::detectionWorkerFunc, this);
+    }
   }
 }
 
 void FrameSaver::stop() {
   enabled = false;
+
+  // Checkerboard modes: shut down the detection worker FIRST. Its drain pass
+  // detects every still-pending frame and enqueues any resulting write task,
+  // so all detections land in write_queue before the writer pool below is
+  // told to stop. Tearing the writers down first could lose a late detection.
+  if (config.mode == SaveMode::CHECKERBOARD ||
+      config.mode == SaveMode::CHECKERBOARD2X2) {
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex);
+      stop_detection = true;
+    }
+    pending_cv.notify_all();
+    if (detection_thread.joinable()) detection_thread.join();
+  }
 
   if (config.mode == SaveMode::BATCH ||
       config.mode == SaveMode::CHECKERBOARD ||
@@ -210,38 +238,84 @@ void FrameSaver::saveFrame(const FrameData& frame) {
     if (flushed) queue_cv.notify_all();
   } else if (config.mode == SaveMode::CHECKERBOARD ||
              config.mode == SaveMode::CHECKERBOARD2X2) {
-    frames_checked++;
-
-    std::vector<CornerSet> sets;
-    const bool detected = (config.mode == SaveMode::CHECKERBOARD)
-                              ? detectCheckerboard(frame, sets)
-                              : detectCheckerboard2x2(frame, sets);
-
-    // Cache the result (possibly empty) so the streamer can attach corners
-    // to the matching frame even when no board was found. Last-write-wins
-    // per camera; only the most recent frame_id is retained.
+    // Best-effort: hand the frame to the async detection worker instead of
+    // detecting inline. Detection takes tens–hundreds of ms — far longer than
+    // the inter-frame interval — so running it on the capture thread would
+    // stall the whole pipeline. Latest-wins per camera: if the worker is still
+    // busy, the previously-pending frame for this camera is overwritten
+    // (dropped) so the detector only ever works on the freshest frame.
+    // Copy the multi-MB frame outside the lock so the critical section is just
+    // a vector move, keeping the worker's pop path responsive.
+    FrameData pending = frame;
     {
-      std::lock_guard<std::mutex> lock(detection_mutex);
-      FrameDetection& fd = latest_detection_per_camera[frame.camera_id];
-      fd.frame_id = frame.frame_id;
-      fd.sets = std::move(sets);
+      std::lock_guard<std::mutex> lock(pending_mutex);
+      pending_detection[frame.camera_id] = std::move(pending);
     }
+    pending_cv.notify_one();
+  }
+}
 
-    if (detected) {
-      checkerboards_detected++;
-
-      WriteTask task;
-      task.filename = generateFilename(frame.camera_id, frame.frame_id);
-      task.data = frame.data;
-      task.camera_id = frame.camera_id;
-      task.frame_id = frame.frame_id;
-
-      {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        write_queue.push(std::move(task));
+void FrameSaver::detectionWorkerFunc() {
+  while (true) {
+    FrameData frame;
+    {
+      std::unique_lock<std::mutex> lock(pending_mutex);
+      pending_cv.wait(lock, [this] {
+        return !pending_detection.empty() || stop_detection;
+      });
+      if (pending_detection.empty()) {
+        // Nothing left to detect; only exit once a stop has been requested so
+        // that stop() drains every frame queued before it was called.
+        if (stop_detection) break;
+        continue;
       }
-      queue_cv.notify_one();
+      // Round-robin across cameras (ordered map) so a fast camera can't starve
+      // the others of detection slots.
+      auto it = pending_detection.upper_bound(last_detected_camera_);
+      if (it == pending_detection.end()) it = pending_detection.begin();
+      last_detected_camera_ = it->first;
+      frame = std::move(it->second);
+      pending_detection.erase(it);
     }
+    processDetection(std::move(frame));
+  }
+}
+
+void FrameSaver::processDetection(FrameData frame) {
+  frames_checked++;
+
+  std::vector<CornerSet> sets;
+  const bool detected = (config.mode == SaveMode::CHECKERBOARD)
+                            ? detectCheckerboard(frame, sets)
+                            : detectCheckerboard2x2(frame, sets);
+
+  if (detected) {
+    checkerboards_detected++;
+
+    WriteTask task;
+    task.filename = generateFilename(frame.camera_id, frame.frame_id);
+    task.data = frame.data;  // frame is moved into the stream slot below
+    task.camera_id = frame.camera_id;
+    task.frame_id = frame.frame_id;
+
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex);
+      write_queue.push(std::move(task));
+    }
+    queue_cv.notify_one();
+  }
+
+  // Publish the processed frame plus its corners (possibly empty) for the
+  // streamer. Only frames that reach this point — i.e. that the detector
+  // actually ran on — are ever eligible to stream. Latest-wins per camera:
+  // an earlier processed frame the streamer never picked up is overwritten.
+  const uint32_t camera_id = frame.camera_id;
+  {
+    std::lock_guard<std::mutex> lock(detected_mutex);
+    DetectedFrame& df = detected_for_stream[camera_id];
+    df.frame = std::move(frame);
+    df.sets = std::move(sets);
+    df.fresh = true;
   }
 }
 

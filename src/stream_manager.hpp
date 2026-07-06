@@ -17,6 +17,11 @@
 // Chunked transfer state for a single frame
 struct ChunkedTransfer {
   FrameData frame;
+  // Checkerboard corners for this frame (empty in non-checkerboard modes, or
+  // when detection ran but found no board). Travels with the frame instead of
+  // being looked up: in checkerboard modes the streamer only ever sends frames
+  // the detector already processed, so the corners are known up front.
+  std::vector<CornerSet> corner_sets;
   uint32_t frame_uuid;
   size_t total_chunks;
   size_t current_chunk;
@@ -74,8 +79,10 @@ class StreamManager {
 
   // Send a single frame synchronously on the calling thread.
   // Exposed for unit testing the chunking path without the streaming loop.
-  // Returns true if every chunk was successfully written to the sink.
-  bool sendFrameForTest(const FrameData& frame, uint32_t camera_id);
+  // `corner_sets` are encoded into the header's CornerBlock as if they came
+  // from the detector. Returns true if every chunk was written to the sink.
+  bool sendFrameForTest(const FrameData& frame, uint32_t camera_id,
+                        std::vector<CornerSet> corner_sets = {});
 
  private:
   static constexpr auto CHUNK_TIMEOUT = std::chrono::seconds(5);
@@ -121,8 +128,10 @@ class StreamManager {
   // SOFT_BUFFER_LIMIT, or `should_stop` fires, or we've waited too long.
   // Returns true if the caller should proceed, false if it should bail.
   bool waitForBufferDrain();
-  bool sendChunkedFrame(const FrameData& frame, uint32_t camera_id);
-  bool sendHeaderOnlyFrame(const FrameData& frame, uint32_t camera_id);
+  bool sendChunkedFrame(const FrameData& frame, uint32_t camera_id,
+                        std::vector<CornerSet> corner_sets);
+  bool sendHeaderOnlyFrame(const FrameData& frame, uint32_t camera_id,
+                           std::vector<CornerSet> corner_sets);
   bool sendChunkHeader(const ChunkedTransfer& transfer, bool header_only);
   bool sendChunkData(const ChunkedTransfer& transfer, size_t chunk_index);
   void cleanupTransfer();

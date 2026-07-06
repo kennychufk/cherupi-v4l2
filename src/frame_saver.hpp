@@ -2,9 +2,10 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <thread>
 #include <unordered_map>
@@ -23,12 +24,6 @@
 struct CornerSet {
   uint8_t set_id = 0;
   std::vector<cv::Point2f> corners;
-};
-
-// All corner sets detected on one frame, keyed back to that frame.
-struct FrameDetection {
-  uint32_t frame_id = 0;
-  std::vector<CornerSet> sets;
 };
 
 class FrameSaver {
@@ -72,12 +67,45 @@ class FrameSaver {
   // For checkerboard detection
   std::unique_ptr<CheckerboardDetector> checkerboard_detector;
 
-  // Per-camera cache of the most recent detection, written by the saver and
-  // read by the streamer. Only the latest frame_id per camera is retained.
-  std::unordered_map<uint32_t, FrameDetection> latest_detection_per_camera;
-  std::mutex detection_mutex;
+  // Best-effort async checkerboard detection. Detection is CPU-intensive
+  // (tens–hundreds of ms), so it cannot keep up with a high capture rate.
+  // saveFrame() (called on the capture thread) drops the frame into
+  // `pending_detection` — a per-camera latest-wins slot — and returns
+  // immediately; a single worker thread pulls the most recent pending frame
+  // per camera, runs detection, and drops the result into
+  // `detected_for_stream`. Frames that arrive while the worker is busy
+  // overwrite the pending slot and are silently skipped, exactly like the
+  // streamer drops older frames under backpressure.
+  std::map<uint32_t, FrameData> pending_detection;  // ordered → round-robin
+  std::mutex pending_mutex;
+  std::condition_variable pending_cv;
+  std::thread detection_thread;
+  bool stop_detection = false;  // guarded by pending_mutex
+  // Round-robin cursor so no camera starves the others (worker thread only).
+  uint32_t last_detected_camera_ = std::numeric_limits<uint32_t>::max();
+
+  // Latest detector-processed frame per camera, awaiting streaming. Written by
+  // the detection worker, drained by the streamer via
+  // takeDetectedFrameForStreaming(). `fresh` is set on publish and cleared on
+  // take so each processed frame streams at most once; latest-wins means an
+  // unconsumed earlier frame is overwritten (dropped).
+  struct DetectedFrame {
+    FrameData frame;
+    std::vector<CornerSet> sets;
+    bool fresh = false;
+  };
+  std::unordered_map<uint32_t, DetectedFrame> detected_for_stream;
+  std::mutex detected_mutex;
 
   void writerThreadFunc();
+  // Worker-thread loop: pull pending frames (round-robin per camera), run
+  // detection, and publish results. Drains all pending frames on stop.
+  void detectionWorkerFunc();
+  // Run detection on one frame, enqueue a write task if a board was found,
+  // and publish {frame, corner sets} into detected_for_stream. Runs on the
+  // detection worker thread; takes the frame by value so it can be moved into
+  // the streaming slot.
+  void processDetection(FrameData frame);
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
   // Detect on the whole Y plane (extracted per `checkerboard_full_res_detection`).
   // On success, populates `out_sets` with one CornerSet (set_id=0) whose
@@ -115,17 +143,26 @@ class FrameSaver {
   SaveMode getMode() const { return config.mode; }
   const std::string& getActualOutputDir() const { return actual_output_dir; }
 
-  // Streamer-facing: latest cached detection for a camera. Returns nullopt if
-  // no detection has run yet for that camera (e.g. save mode is NONE) or if
-  // the cached entry's frame_id doesn't match the frame the caller is about
-  // to send. Safe to call from any thread.
-  std::optional<FrameDetection> getDetectionForFrame(uint32_t camera_id,
-                                                     uint32_t frame_id) {
-    std::lock_guard<std::mutex> lock(detection_mutex);
-    auto it = latest_detection_per_camera.find(camera_id);
-    if (it == latest_detection_per_camera.end()) return std::nullopt;
-    if (it->second.frame_id != frame_id) return std::nullopt;
-    return it->second;
+  // Streamer-facing: hand off the most recent detector-processed frame for
+  // `camera_id`, if one is waiting. On success fills `frame` and `sets` (the
+  // corners found on it, possibly empty when detection ran but found no board)
+  // and returns true; the slot is then marked consumed so the same frame is
+  // not streamed twice. Returns false when no fresh processed frame is
+  // available (no detection has completed since the last take, or the save
+  // mode isn't a checkerboard mode). This is the ONLY source of streamable
+  // frames in checkerboard modes, so undetected frames never reach the client.
+  // Safe to call from the streaming thread.
+  bool takeDetectedFrameForStreaming(uint32_t camera_id, FrameData& frame,
+                                     std::vector<CornerSet>& sets) {
+    std::lock_guard<std::mutex> lock(detected_mutex);
+    auto it = detected_for_stream.find(camera_id);
+    if (it == detected_for_stream.end() || !it->second.fresh) return false;
+    // Consume: move the frame/corners out (the slot is marked stale, so the
+    // moved-from state is never read before the worker republishes).
+    frame = std::move(it->second.frame);
+    sets = std::move(it->second.sets);
+    it->second.fresh = false;
+    return true;
   }
 
   // Get saved frame count for specific camera
@@ -139,12 +176,16 @@ class FrameSaver {
     for (auto& pair : frames_saved_per_camera) {
       pair.second = 0;
     }
-    // Per-camera frame_id counters reset alongside this, so the cached
-    // detection's frame_id no longer matches any future stream frame —
-    // drop it to avoid stale-cache hits.
+    // Per-camera frame_id counters reset alongside this. Drop any pending or
+    // already-processed frame still carrying a pre-reset frame_id so the
+    // streamer doesn't emit one after the counters have been zeroed.
     {
-      std::lock_guard<std::mutex> lock(detection_mutex);
-      latest_detection_per_camera.clear();
+      std::lock_guard<std::mutex> lock(pending_mutex);
+      pending_detection.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(detected_mutex);
+      detected_for_stream.clear();
     }
     LOG_INFO("FrameSaver", "Reset per-camera saved frame counts");
   }
