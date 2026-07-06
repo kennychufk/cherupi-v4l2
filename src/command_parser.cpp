@@ -102,6 +102,13 @@ CameraConfig buildCameraConfig(const json& params) {
   return config;
 }
 
+std::string buildSensorFilter(const json& params) {
+  if (params.contains("sensor") && params["sensor"].is_string()) {
+    return params["sensor"].get<std::string>();
+  }
+  return "imx519";
+}
+
 std::optional<SaveConfig> buildSaveConfig(const json& message) {
   if (!message.contains("mode") || !message["mode"].is_string()) {
     return std::nullopt;

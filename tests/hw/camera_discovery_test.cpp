@@ -9,6 +9,7 @@ TEST(CameraDiscoveryTest, FindsAtLeastOneImx519) {
   size_t count = mgr.discoverCameras();
   ASSERT_GE(count, 1u) << "Expected at least one IMX519 attached";
   EXPECT_EQ(count, mgr.getCameraCount());
+  EXPECT_NE(mgr.getCamera(0)->getModel().find("imx519"), std::string::npos);
 }
 
 TEST(CameraDiscoveryTest, GetCameraBoundsCheck) {

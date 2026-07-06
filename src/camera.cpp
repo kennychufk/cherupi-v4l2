@@ -8,8 +8,8 @@
 #include <map>
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
-               const CameraConfig& cfg)
-    : camera_id(id), lcam(std::move(cam)), config(cfg) {}
+               const CameraConfig& cfg, std::string model)
+    : camera_id(id), model(std::move(model)), lcam(std::move(cam)), config(cfg) {}
 
 Camera::~Camera() {
   stop();

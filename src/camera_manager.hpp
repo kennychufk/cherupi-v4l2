@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <libcamera/libcamera.h>
@@ -14,7 +15,11 @@ class CameraManager {
   CameraManager();
   ~CameraManager();
 
-  size_t discoverCameras();
+  // Enumerate libcamera cameras whose `properties::Model` contains `sensor`
+  // as a case-insensitive substring (e.g. "imx519", "imx477"). Cached after
+  // the first successful call — subsequent calls, even with a different
+  // `sensor`, return the same cameras discovered on the first call.
+  size_t discoverCameras(const std::string& sensor = "imx519");
 
   bool configureAll(const CameraConfig& config = {}, size_t buffer_count = 4);
 

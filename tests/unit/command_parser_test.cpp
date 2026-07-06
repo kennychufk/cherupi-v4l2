@@ -120,6 +120,21 @@ TEST(CommandParserTest, BuildCameraConfigOverridesDefaults) {
   EXPECT_EQ(cfg.height, CameraConfig{}.height);
 }
 
+TEST(CommandParserTest, BuildSensorFilterDefaultsToImx519) {
+  auto params = nlohmann::json::object();
+  EXPECT_EQ(command_parser::buildSensorFilter(params), "imx519");
+}
+
+TEST(CommandParserTest, BuildSensorFilterUsesProvidedSensor) {
+  auto params = nlohmann::json::parse(R"({"sensor":"imx477"})");
+  EXPECT_EQ(command_parser::buildSensorFilter(params), "imx477");
+}
+
+TEST(CommandParserTest, BuildSensorFilterIgnoresNonStringSensor) {
+  auto params = nlohmann::json::parse(R"({"sensor":123})");
+  EXPECT_EQ(command_parser::buildSensorFilter(params), "imx519");
+}
+
 TEST(CommandParserTest, BuildSaveConfigAppliesMode) {
   auto msg = nlohmann::json::parse(R"({"mode":"batch","params":{"batch_size":7}})");
   auto cfg = command_parser::buildSaveConfig(msg);

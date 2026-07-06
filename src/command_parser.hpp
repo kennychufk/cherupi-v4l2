@@ -58,6 +58,11 @@ bool isCommandAllowed(CommandKind kind, CameraState current);
 // (matches the server's existing behaviour).
 CameraConfig buildCameraConfig(const nlohmann::json& params);
 
+// Extract the "sensor" substring filter from a discover message's "params".
+// Defaults to "imx519" when absent or not a string (matches the server's
+// pre-existing hardcoded behaviour).
+std::string buildSensorFilter(const nlohmann::json& params);
+
 // Convert a successful SaveConfig build for a set_save_mode message. Returns
 // std::nullopt if the "mode" field is missing or unknown.
 std::optional<SaveConfig> buildSaveConfig(const nlohmann::json& message);

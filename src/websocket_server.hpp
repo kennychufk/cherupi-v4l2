@@ -32,7 +32,8 @@ class WebSocketServer {
   uWS::Loop* loop = nullptr;
 
   // Message handlers
-  void handleDiscover(uWS::WebSocket<false, true, int>* ws);
+  void handleDiscover(uWS::WebSocket<false, true, int>* ws,
+                      const nlohmann::json& params);
   void handleGetState(uWS::WebSocket<false, true, int>* ws);
   void handleConfigure(uWS::WebSocket<false, true, int>* ws,
                        const nlohmann::json& params);

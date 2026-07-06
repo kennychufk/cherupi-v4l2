@@ -13,7 +13,7 @@ CameraManager::~CameraManager() {
   if (lcam_manager) lcam_manager->stop();
 }
 
-size_t CameraManager::discoverCameras() {
+size_t CameraManager::discoverCameras(const std::string& sensor) {
   if (!cameras.empty()) {
     LOG_INFO("CameraManager",
              "Cameras already discovered: " + std::to_string(cameras.size()));
@@ -25,21 +25,26 @@ size_t CameraManager::discoverCameras() {
     return 0;
   }
 
+  // Convert to lower-case for comparison.
+  std::string sensor_lower = sensor;
+  std::transform(sensor_lower.begin(), sensor_lower.end(),
+                 sensor_lower.begin(), ::tolower);
+
   uint32_t id = 0;
   for (auto& lcam : lcam_manager->cameras()) {
-    // Filter to IMX519 cameras by model property.
+    // Filter to cameras whose sensor model matches the requested substring.
     auto model = lcam->properties().get(libcamera::properties::Model);
     if (!model) continue;
     std::string model_str(model->begin(), model->end());
     // Convert to lower-case for comparison.
     std::string lower = model_str;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find("imx519") == std::string::npos) continue;
+    if (lower.find(sensor_lower) == std::string::npos) continue;
 
     LOG_INFO("CameraManager",
-             "Found IMX519 camera: id=" + lcam->id() + " model=" + model_str);
+             "Found camera: id=" + lcam->id() + " model=" + model_str);
 
-    auto cam = std::make_unique<Camera>(id, lcam, default_config);
+    auto cam = std::make_unique<Camera>(id, lcam, default_config, model_str);
     if (stream_manager_notify) {
       cam->setFrameAvailableCallback(stream_manager_notify);
     }
@@ -48,7 +53,8 @@ size_t CameraManager::discoverCameras() {
   }
 
   LOG_INFO("CameraManager",
-           "Discovered " + std::to_string(cameras.size()) + " IMX519 camera(s)");
+           "Discovered " + std::to_string(cameras.size()) +
+               " camera(s) matching sensor '" + sensor + "'");
   return cameras.size();
 }
 

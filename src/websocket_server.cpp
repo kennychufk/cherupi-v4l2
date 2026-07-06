@@ -94,7 +94,8 @@ void WebSocketServer::run() {
                 try {
                   switch (cmd.kind) {
                     case command_parser::CommandKind::Discover:
-                      handleDiscover(ws);
+                      handleDiscover(ws,
+                                     cmd.message.value("params", json::object()));
                       break;
                     case command_parser::CommandKind::GetState:
                       handleGetState(ws);
@@ -277,8 +278,10 @@ void WebSocketServer::stop() {
   }
 }
 
-void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
-  size_t count = camera_manager->discoverCameras();
+void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws,
+                                     const json& params) {
+  std::string sensor = command_parser::buildSensorFilter(params);
+  size_t count = camera_manager->discoverCameras(sensor);
 
   json response;
   response["type"] = Protocol::TYPE_DISCOVERY;
@@ -287,7 +290,7 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws) {
   for (size_t i = 0; i < count; i++) {
     json cam_info;
     cam_info["id"] = i;
-    cam_info["type"] = "IMX519";
+    cam_info["type"] = camera_manager->getCamera(i)->getModel();
     response["cameras"].push_back(cam_info);
   }
 

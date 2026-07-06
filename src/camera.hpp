@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <sys/mman.h>
 #include <vector>
 
@@ -15,7 +16,7 @@
 class Camera {
  public:
   Camera(uint32_t id, std::shared_ptr<libcamera::Camera> lcam,
-         const CameraConfig& cfg);
+         const CameraConfig& cfg, std::string model);
   ~Camera();
 
   bool configure(size_t buffer_count = 4);
@@ -67,6 +68,9 @@ class Camera {
   void setFrameAvailableCallback(std::function<void()> callback);
 
   uint32_t getId() const { return camera_id; }
+  // libcamera `properties::Model` string of the underlying sensor, e.g.
+  // "imx519". Used to report the actual sensor type in the discover response.
+  const std::string& getModel() const { return model; }
   CameraState getState() const { return state; }
   uint32_t getFramesCaptured() const { return frame_counter; }
   uint32_t getFramesDropped() const { return frames_dropped; }
@@ -80,6 +84,7 @@ class Camera {
 
  private:
   uint32_t camera_id;
+  std::string model;
   std::shared_ptr<libcamera::Camera> lcam;
   std::unique_ptr<libcamera::CameraConfiguration> cam_config;
   std::unique_ptr<libcamera::FrameBufferAllocator> allocator;

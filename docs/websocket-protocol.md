@@ -49,22 +49,38 @@ Commands rejected outside the required state return an `error` response but do n
 All requests have shape `{"cmd": "<name>", ...}`. All responses have shape `{"type": "<kind>", ...}`.
 
 ### 4.1 `discover`
-Enumerate cameras. Allowed in any state.
+Enumerate cameras whose libcamera `properties::Model` contains `sensor` as a
+case-insensitive substring. Allowed in any state.
+
+Camera discovery is cached for the life of the server process, but only once
+it succeeds: the **first** `discover` call that matches at least one camera
+performs the actual libcamera enumeration/filtering and locks in that
+`sensor`, and every later call (even with a different `sensor`) just returns
+that same cached camera list. A `discover` call that matches zero cameras
+does **not** lock anything in — it re-runs the enumeration on the next call,
+so a client can retry with a corrected `sensor` (e.g. after a typo, or before
+the camera is attached) without restarting the server.
 
 **Request**
 ```json
-{"cmd": "discover"}
+{"cmd": "discover", "params": {
+  "sensor": "imx519"
+}}
 ```
+
+`params` is optional. `sensor` defaults to `"imx519"` when omitted (preserves
+pre-sensor-param behaviour). Any substring that appears in the attached
+sensor's reported model name works, e.g. `"imx477"`, `"ov5647"`.
 
 **Response**
 ```json
 {"type": "discovery", "cameras": [
-  {"id": 0, "type": "IMX519"},
-  {"id": 1, "type": "IMX519"}
+  {"id": 0, "type": "imx519"},
+  {"id": 1, "type": "imx519"}
 ]}
 ```
 
-`id` is the stable index used by `start_stream`, `stop_stream`, and in binary frame headers.
+`id` is the stable index used by `start_stream`, `stop_stream`, and in binary frame headers. `type` is the matched camera's actual libcamera `properties::Model` string (not necessarily equal to the requested `sensor` substring). If no attached camera matches, `cameras` is an empty array — this is not an error.
 
 ### 4.2 `get_state`
 Query the current state-machine state. Allowed in any state. Clients should send this immediately after connecting to synchronise their local state with the server rather than assuming IDLE.
@@ -216,7 +232,7 @@ Set the focus mode. Required state: **CONFIGURED** or **RUNNING** (rejected in I
 Single field `lens_position` (number, dioptres):
 
 - **`lens_position < 0`** (e.g. `-1`) — engage continuous autofocus (`AfMode = AfModeContinuous`). This is also the server's default at first start, so a fresh session is already in autofocus without sending this command.
-- **`lens_position >= 0`** — manual focus at that lens position (`AfMode = AfModeManual`, `LensPosition = lens_position`). Typical IMX519 useful range is roughly `0.0` (infinity) to `~10.0` (closest macro); the libcamera tuning JSON's `rpi.af` `map` clamps the actual usable range. The server caps positive values at `32.0` to reject obvious garbage — this cap is a sanity bound, **not** the hardware range; use `get_lens_position_limits` (§4.16) to discover the real `min`/`max`.
+- **`lens_position >= 0`** — manual focus at that lens position (`AfMode = AfModeManual`, `LensPosition = lens_position`). The useful range depends on the attached sensor and its libcamera tuning JSON's `rpi.af` `map` (which clamps the actual usable range); the IMX519 module's is roughly `0.0` (infinity) to `~10.0` (closest macro). The server caps positive values at `32.0` to reject obvious garbage — this cap is a sanity bound, **not** the hardware range; use `get_lens_position_limits` (§4.16) to discover the real `min`/`max`.
 
 The setting is **global** — every discovered camera receives the same value.
 
@@ -235,7 +251,7 @@ In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (
 
 This command only *requests* a focus state. To read back the focus the IPA actually applied to each delivered frame — including the per-frame position chosen by continuous/auto AF — use the `lens_position` and `af_state` fields in the binary frame header (§5.3).
 
-**libcamera prerequisite:** the deployed libcamera tuning JSON for IMX519 must include the `rpi.af` algorithm block (the apt-installed Pi tuning ships with it). Without it, libcamera silently ignores `AfMode` / `LensPosition`. The IMX519 PDAF parsing patch is optional — without it, continuous AF still works via CDAF, just with slower hunt.
+**libcamera prerequisite:** the deployed libcamera tuning JSON for the attached sensor must include the `rpi.af` algorithm block (the apt-installed Pi tuning ships with it for IMX519). Without it, libcamera silently ignores `AfMode` / `LensPosition`. On IMX519, the PDAF parsing patch is optional — without it, continuous AF still works via CDAF, just with slower hunt.
 
 ### 4.13 `set_exposure_time`
 Set the exposure (shutter) mode. Required state: **CONFIGURED** or **RUNNING** (rejected in IDLE; no camera pipeline exists there).
@@ -312,9 +328,9 @@ Query the sensor's hardware `FrameDurationLimits` range and the currently-applie
 | `num_cameras` | integer | Number of logical libcamera cameras currently configured (always `1` with the Arducam quad-board which presents all physical sensors as a single camera) |
 | `current` | object \| `null` | `{min, max}` when a lock is in effect (currently `min == max`); `null` when unset |
 
-All discovered cameras run the same sensor (IMX519), so the response carries a single shared range rather than per-camera entries.
+All discovered cameras on a given server run the same sensor type (selected via the `sensor` param of `discover`, §4.1), so the response carries a single shared range rather than per-camera entries.
 
-**Important — advertised limits vs. achievable rate:** `min` is what libcamera's driver reports as the underlying IMX519 sensor's hardware capability. With a multi-sensor consolidation board (e.g. the Arducam quad-camera kit), the driver presents all 4 physical sensors as one logical camera and internally manages cycling or synchronising them. This internal overhead means the actual achievable frame duration is **higher than `min`** — empirically, with the Arducam 16MP IMX519 quad-camera kit on Pi 5, `min=33333 µs` (30 fps advertised) yields approximately **15 fps** in practice. Always use `frame_duration_us` from the binary frame header (§5.3) to measure the frame rate actually being delivered at runtime, rather than relying on `min`.
+**Important — advertised limits vs. achievable rate:** `min` is what libcamera's driver reports as the underlying sensor's hardware capability. With a multi-sensor consolidation board (e.g. the Arducam quad-camera kit), the driver presents all 4 physical sensors as one logical camera and internally manages cycling or synchronising them. This internal overhead means the actual achievable frame duration is **higher than `min`** — empirically, with the Arducam 16MP IMX519 quad-camera kit on Pi 5, `min=33333 µs` (30 fps advertised) yields approximately **15 fps** in practice. Always use `frame_duration_us` from the binary frame header (§5.3) to measure the frame rate actually being delivered at runtime, rather than relying on `min`.
 
 ### 4.16 `get_lens_position_limits`
 Query the camera's hardware `LensPosition` range — the focus range the IPA advertises. Required state: **CONFIGURED** or **RUNNING** (the limits come from libcamera's `ControlInfoMap`, which is only populated after `configure`).
@@ -342,7 +358,7 @@ Query the camera's hardware `LensPosition` range — the focus range the IPA adv
 | `default` | number \| `null` | The IPA's default lens position in dioptres. `null` if the pipeline advertises no default, or as above. |
 | `num_cameras` | integer | Number of logical libcamera cameras currently configured (always `1` with the Arducam quad-board, which presents all physical sensors as a single camera). |
 
-All discovered cameras run the same sensor (IMX519), so the response carries a single shared range rather than per-camera entries.
+All discovered cameras on a given server run the same sensor type (selected via the `sensor` param of `discover`, §4.1), so the response carries a single shared range rather than per-camera entries.
 
 Unlike `get_frame_duration_limits` (which uses `{0, 0}` to mean "unavailable"), the lens-range fields use JSON `null` for "unavailable", because `0` dioptres (infinity focus) is itself a valid limit. Clients should fall back to a sensible default range when a field is `null`.
 
@@ -460,7 +476,7 @@ Header-only mode bypasses the payload path entirely and is unaffected by data ba
 
 ```text
 client → {"cmd":"discover"}
-server → {"type":"discovery","cameras":[{"id":0,"type":"IMX519"},{"id":1,"type":"IMX519"}]}
+server → {"type":"discovery","cameras":[{"id":0,"type":"imx519"},{"id":1,"type":"imx519"}]}
 
 client → {"cmd":"configure","params":{"width":2328,"height":1748}}
 server → {"type":"status","message":"Configured: 2328x1748 YUV420"}
