@@ -73,6 +73,8 @@ CMake 3.14+, C++17. Targets:
 - `unit_tests` / `hw_tests` — GoogleTest binaries (ctest labels `unit` / `hardware`); gated by `-DCHERUPI_BUILD_TESTS=ON` (default ON)
 - End-to-end pytest suite under `tests/e2e/` — opt in with `-DCHERUPI_BUILD_E2E_TESTS=ON` (ctest label `e2e`, needs `pip install -r tests/e2e/requirements.txt` and live IMX519). See `tests/e2e/README.md`.
 
+`yuv420_convert` has no libcamera/RPi dependency, so it can be built alone on any machine with `-DCHERUPI_TOOLS_ONLY=ON`, which skips the server, uWebSockets/libcamera fetch, and tests (needs only `OpenCV` + pthreads).
+
 ### Dependencies
 - System: `libcamera` (pkg-config), `OpenCV`, `OpenSSL`, `zlib`, pthreads
 - Fetched: `nlohmann/json` v3.11.3, `uSockets` v0.8.8, `uWebSockets` v20.62.0
