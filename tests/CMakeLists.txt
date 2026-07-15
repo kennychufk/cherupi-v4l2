@@ -5,8 +5,8 @@ set(UNIT_SOURCES
     unit/rate_controller_test.cpp
     unit/chunk_protocol_test.cpp
     unit/command_parser_test.cpp
-    unit/frame_saver_helpers_test.cpp
-    unit/frame_saver_modes_test.cpp
+    unit/frame_processor_helpers_test.cpp
+    unit/frame_processor_modes_test.cpp
     unit/stream_chunking_test.cpp
     unit/checkerboard_detector_test.cpp
     unit/aruco_detector_test.cpp
@@ -23,8 +23,8 @@ add_executable(unit_tests
     ${UNIT_SOURCES}
     ../src/stream_manager.cpp
     ../src/rate_controller.cpp
-    ../src/frame_saver.cpp
-    ../src/frame_saver_helpers.cpp
+    ../src/frame_processor.cpp
+    ../src/frame_processor_helpers.cpp
     ../src/command_parser.cpp
     ../src/checkerboard_detector.cpp
     ../src/aruco_detector.cpp

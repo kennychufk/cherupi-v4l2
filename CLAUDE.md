@@ -33,10 +33,10 @@ All paths below are under `src/`.
 - `stream_manager.*` — round-robin streaming, backpressure/skipping, chunked transfer (writes to an abstract `FrameSink`)
 - `rate_controller.*` — `AdaptiveRateController`, used by `stream_manager`
 - `frame_sink.hpp` / `uws_frame_sink.hpp` — abstract byte sink + uWebSockets adapter
-- `frame_saver.*` / `frame_saver_helpers.*` — save modes NONE / BUFFER / BATCH / CHECKERBOARD / ARUCO plus pure helpers (filename, timestamped dir, Y-plane extraction)
+- `frame_processor.*` / `frame_processor_helpers.*` — `FrameProcessor` runs the per-frame process modes NONE / BUFFER / BATCH / CHECKERBOARD / ARUCO plus pure helpers (filename, timestamped dir, Y-plane extraction)
 - `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection
 - `aruco_detector.*` — OpenCV `cv::aruco::detectMarkers` detection (dictionary hard-coded to `DICT_APRILTAG_16h5`)
-- `types.hpp` — logger, protocol constants, `CameraConfig`, `SaveConfig`, chunk headers
+- `types.hpp` — logger, protocol constants, `CameraConfig`, `ProcessConfig`, chunk headers
 
 ## WebSocket Protocol
 
@@ -57,16 +57,19 @@ Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
 A per-camera `ERROR` state exists but is not currently a state-machine target.
 
-## Save Modes
+## Process Modes
 
-- `NONE` — no save
-- `BUFFER` — in-memory ring
+Set via `set_process_mode`; each mode names what happens to a captured frame. Whether processed frames are also written to disk is an orthogonal axis — `save_frames` (default `true`).
+
+- `NONE` — no processing
+- `BUFFER` — in-memory ring, flushed to disk on stop
 - `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
-- `CHECKERBOARD` — save only frames where a checkerboard is detected (`rows`, `cols`, `full_res_detection`, `num_threads`)
-- `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants and save if any quadrant detects a checkerboard. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
-- `ARUCO` — save only frames where at least one ArUco/AprilTag marker is detected (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`). Params: `aruco_full_res_detection`, `aruco_corner_refine` (false ⇒ `CORNER_REFINE_NONE`, true ⇒ `CORNER_REFINE_SUBPIX`). Each detected marker's id + 4 corners are reported to the streaming client.
-- `ARUCO2X2` — same params (`aruco_num_threads` for the quadrant parallelism, clamped `[1, 4]`); split each frame into 4 equal quadrants and save if any quadrant detects a marker.
-- Output directory optionally prepended with timestamp.
+- `CHECKERBOARD` — detect a checkerboard and report its corners to the client (`rows`, `cols`, `full_res_detection`, `num_threads`); when `save_frames`, also save frames where one is detected
+- `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants, detect in each, report every detecting quadrant's corners; when `save_frames`, save if any quadrant detects. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
+- `ARUCO` — detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) and report each marker's id + 4 corners to the client. Params: `aruco_full_res_detection`, `aruco_corner_refine` (false ⇒ `CORNER_REFINE_NONE`, true ⇒ `CORNER_REFINE_SUBPIX`). When `save_frames`, also save frames where a marker is detected.
+- `ARUCO2X2` — same params (`aruco_num_threads` for the quadrant parallelism, clamped `[1, 4]`); split each frame into 4 equal quadrants, detect in each; when `save_frames`, save if any quadrant detects.
+- **`save_frames: false`** decouples detection from persistence: the detector still runs and streams its side-products (corners/markers), but no frames are written — the writer pool is never started and the per-detection full-frame copy is skipped (optimized detection-only pipeline). For `buffer`/`batch` it just means no output.
+- Output directory optionally prepended with timestamp (ignored when `save_frames: false`).
 
 ## Build
 

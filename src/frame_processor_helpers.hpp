@@ -7,7 +7,7 @@
 
 #include "types.hpp"
 
-namespace frame_saver_helpers {
+namespace frame_processor_helpers {
 
 // Trim leading/trailing whitespace. If the trimmed string is empty, returns
 // ".".
@@ -19,7 +19,7 @@ std::string normalizeBaseDir(const std::string& base);
 std::string makeTimestampedDir(const std::string& base,
                                std::chrono::system_clock::time_point now);
 
-// Produce the on-disk filename a FrameSaver uses, given its actual output
+// Produce the on-disk filename a FrameProcessor uses, given its actual output
 // directory. Pure string concatenation; no filesystem calls.
 std::string makeFilename(const std::string& dir, uint32_t camera_id,
                          uint32_t frame_id);
@@ -30,4 +30,4 @@ std::string makeFilename(const std::string& dir, uint32_t camera_id,
 // followed by the UV planes (which are ignored).
 std::vector<uint8_t> extractYFromYUV420(const FrameData& frame, bool full_res);
 
-}  // namespace frame_saver_helpers
+}  // namespace frame_processor_helpers

@@ -4,7 +4,7 @@
 #include <memory>
 
 #include "camera_manager.hpp"
-#include "frame_saver.hpp"
+#include "frame_processor.hpp"
 #include "stream_manager.hpp"
 #include "types.hpp"
 #include "uws_frame_sink.hpp"
@@ -20,7 +20,7 @@ class WebSocketServer {
   static constexpr int PORT = 9001;
 
   std::unique_ptr<CameraManager> camera_manager;
-  std::unique_ptr<FrameSaver> frame_saver;
+  std::unique_ptr<FrameProcessor> frame_processor;
   std::unique_ptr<StreamManager> stream_manager;
   std::shared_ptr<UwsFrameSink> active_sink;
 
@@ -38,7 +38,7 @@ class WebSocketServer {
   void handleConfigure(uWS::WebSocket<false, true, int>* ws,
                        const nlohmann::json& params);
   void handleUnconfigure(uWS::WebSocket<false, true, int>* ws);
-  void handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
+  void handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
                          const nlohmann::json& params);
   void handleStartCameras(uWS::WebSocket<false, true, int>* ws);
   void handleStartStream(uWS::WebSocket<false, true, int>* ws,

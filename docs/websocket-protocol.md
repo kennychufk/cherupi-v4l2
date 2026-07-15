@@ -14,7 +14,7 @@ This document specifies the wire protocol between a client and the `camera_ws_se
 | Max backpressure | 10 MiB |
 | Concurrent clients | **1** — additional connections get HTTP `503 Service Unavailable` during upgrade |
 
-On client disconnect the server keeps cameras running (so frame saving can continue) and only releases the client slot.
+On client disconnect the server keeps cameras running (so frame processing can continue) and only releases the client slot.
 
 ### Close codes observed/logged
 `1000` normal, `1001` going away, `1006` abnormal (no close frame), `1009` message too big, any other treated as unexpected.
@@ -136,12 +136,15 @@ Release the camera pipeline resources (libcamera, buffers, mappings) and return 
 
 Use `unconfigure` when you want to apply a new `CameraConfig` to the existing server process without disconnecting. The intended flow is `stop_cameras` (if RUNNING) → `unconfigure` → `configure`.
 
-### 4.5 `set_save_mode`
-Configure the optional on-device frame saver. Can be called in any state; takes effect when cameras start.
+### 4.5 `set_process_mode`
+Configure the optional on-device frame-processing pipeline (detection and/or saving). Can be called in any state; takes effect when cameras start.
+
+> Renamed from `set_save_mode` (see changelog). The `mode` values are unchanged; a new `save_frames` param decouples detection from disk writing.
 
 **Request**
 ```json
-{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
+{"cmd": "set_process_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
+  "save_frames": true,
   "output_dir": ".",
   "prepend_timestamp_to_dir": false,
   "batch_size": 10,
@@ -158,24 +161,28 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 `mode` required; `params` and all its members optional.
 
+The mode names **what is done to each captured frame**. Whether processed frames are also written to disk is a separate axis: `save_frames` (default `true`).
+
 | Mode | Behavior |
 |---|---|
-| `none` | Saving disabled |
+| `none` | No processing |
 | `buffer` | Ring-buffer in RAM; flushed to disk on `stop_cameras` |
 | `batch` | Multi-threaded writer; `writer_threads` workers, flushes every `batch_size` frames |
-| `checkerboard` | Only save frames in which an OpenCV checkerboard is detected |
-| `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and save the whole frame if **any** quadrant contains an OpenCV checkerboard. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
-| `aruco` | Only save frames in which at least one ArUco/AprilTag marker is detected (`cv::aruco::detectMarkers`). The dictionary is hard-coded to `DICT_APRILTAG_16h5`. Detection runs on the Y plane, full-res or 2x2-subsampled per `aruco_full_res_detection`. Each detected marker's **id** and **4 corners** are reported to the streaming client (§5.4.2). |
-| `aruco2x2` | Split each frame's Y plane into 4 equal quadrants (same construction as `aruco`) and save the whole frame if **any** quadrant contains a marker. The 4 detections run in parallel, batched by `aruco_num_threads` (clamped to `[1, 4]`). A marker straddling a quadrant boundary may be reported by more than one quadrant, or missed if it lands in no single quadrant intact. |
+| `checkerboard` | Detect an OpenCV checkerboard; report its corners to the streaming client (§5.4.1). When `save_frames`, also save frames in which a checkerboard is detected |
+| `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and detect a checkerboard in each; report the corners of every detecting quadrant. When `save_frames`, save the whole frame if **any** quadrant detects. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
+| `aruco` | Detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) on the Y plane (full-res or 2x2-subsampled per `aruco_full_res_detection`); report each marker's **id** and **4 corners** to the streaming client (§5.4.2). When `save_frames`, also save frames in which at least one marker is detected. |
+| `aruco2x2` | Split each frame's Y plane into 4 equal quadrants (same construction as `aruco`) and detect markers in each; report every detected marker. When `save_frames`, save the whole frame if **any** quadrant detects. The 4 detections run in parallel, batched by `aruco_num_threads` (clamped to `[1, 4]`). A marker straddling a quadrant boundary may be reported by more than one quadrant, or missed if it lands in no single quadrant intact. |
 
-`checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
+`save_frames` (default `true`): when `false`, disk writing is disabled while detection still runs and still streams its side-products (corners/markers). In a detector mode this is the **optimized detection-only pipeline** — the writer pool is never started and the per-detection full-frame copy into the write queue is skipped, so `frames_saved` stays `0`. For `buffer`/`batch` (which have no side-product) `false` simply produces no output.
 
-All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`) run detection **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result. See §5.4 and §5.7.
+`checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`. `output_dir`, `prepend_timestamp_to_dir`, `batch_size`, and `writer_threads` are ignored when `save_frames` is `false`.
 
-**Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
+All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`) run detection **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result (this is independent of `save_frames`). See §5.4 and §5.7.
+
+**Response** → `status` (`"Process mode configured: <mode>"`) or `error` on invalid mode.
 
 ### 4.6 `start_cameras`
-Required state: **CONFIGURED**. Starts frame saver (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
+Required state: **CONFIGURED**. Starts frame processing (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
 
 ```json
 {"cmd": "start_cameras"}
@@ -430,14 +437,14 @@ Clients should key reassembly on `frame_uuid` (unique per frame) rather than `fr
 
 ### 5.4 Detection block (variable, present only when `num_corner_sets > 0`)
 
-Immediately follows `ChunkHeader` in the same WebSocket message. Carries the results produced by the on-device detector in a detector save mode. The `detection_kind` field of `ChunkHeader` (offset 65) selects the per-record format:
+Immediately follows `ChunkHeader` in the same WebSocket message. Carries the results produced by the on-device detector in a detector process mode. The `detection_kind` field of `ChunkHeader` (offset 65) selects the per-record format:
 
 - `detection_kind = 1` (checkerboard, §5.4.1) — records are `CornerSetHeader`.
 - `detection_kind = 2` (aruco, §5.4.2) — records are `MarkerSetHeader`.
 
 In every case the block is `num_corner_sets` records packed back-to-back, each record being a fixed header followed by `num_corners × { float x, float y }` corner coordinates. Corner coordinates are little-endian IEEE-754, `8` bytes each, in **full-frame Y-plane pixel space** regardless of the saver's `*_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
 
-In all four detector modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found nothing, `num_corner_sets = 0`, `corner_block_size = 0`, and no records follow (`detection_kind` still reports which detector ran). When it found one or more, the block carries them. In the non-detector save modes no detector runs and the block is always absent (`detection_kind = 0`, `num_corner_sets = 0`).
+In all four detector modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found nothing, `num_corner_sets = 0`, `corner_block_size = 0`, and no records follow (`detection_kind` still reports which detector ran). When it found one or more, the block carries them. In the non-detector process modes no detector runs and the block is always absent (`detection_kind = 0`, `num_corner_sets = 0`).
 
 #### 5.4.1 `CornerSetHeader` (checkerboard; `detection_kind = 1`)
 
@@ -517,8 +524,8 @@ server → {"type":"discovery","cameras":[{"id":0,"type":"imx519"},{"id":1,"type
 client → {"cmd":"configure","params":{"width":2328,"height":1748}}
 server → {"type":"status","message":"Configured: 2328x1748 YUV420"}
 
-client → {"cmd":"set_save_mode","mode":"batch","params":{"output_dir":"/data/run1","batch_size":20}}
-server → {"type":"status","message":"Save mode configured: batch"}
+client → {"cmd":"set_process_mode","mode":"batch","params":{"output_dir":"/data/run1","batch_size":20}}
+server → {"type":"status","message":"Process mode configured: batch"}
 
 client → {"cmd":"start_cameras"}
 server → {"type":"status","message":"All cameras started successfully"}
@@ -545,7 +552,7 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 | Unknown `cmd` | `error` with `"Unknown command: …"` |
 | Wrong state for command | `error`, state unchanged |
 | Unknown `camera_id` | `error` |
-| Invalid `save_mode` value | `error` |
+| Invalid `process_mode` value | `error` |
 | Binary frame sent by client | `error` (`"Only text messages are accepted for commands"`) |
 | Second client connection attempt | HTTP `503` at upgrade (never becomes a WebSocket) |
 
@@ -562,3 +569,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |
 | `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. Companion text command `get_lens_position_limits` / `lens_position_limits` response added (§4.16) to expose the hardware `LensPosition` range; text-only, no binary change. |
 | `6` | `ChunkHeader` stays 68 bytes: the first `reserved2` byte (offset 65) became `detection_kind` (uint8: 0=none, 1=checkerboard, 2=aruco), with `reserved2` shrinking to uint8[2] at offset 66. New `aruco` / `aruco2x2` save modes added (§4.5); when active, the detection block that follows the header uses the new `MarkerSetHeader` record layout (§5.4.2), carrying each marker's `id` (`int32`) and 4 corners. The checkerboard block format (§5.4.1) is unchanged. Old (`detection_kind = 0`) still means "no detection block". |
+| `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |

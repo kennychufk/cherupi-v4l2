@@ -33,9 +33,9 @@ struct CornerSet {
   std::vector<cv::Point2f> corners;
 };
 
-class FrameSaver {
+class FrameProcessor {
  private:
-  SaveConfig config;
+  ProcessConfig config;
   std::atomic<bool> enabled{false};
   std::string actual_output_dir;  // The directory that will actually be used
 
@@ -64,7 +64,7 @@ class FrameSaver {
   std::atomic<size_t> frames_saved{0};
   std::atomic<size_t> bytes_written{0};
   std::atomic<size_t> frames_checked{0};
-  std::atomic<size_t> checkerboards_detected{0};
+  std::atomic<size_t> frames_detected{0};
 
   // Per-camera frame saving counters
   std::unordered_map<uint32_t, std::atomic<uint32_t>> frames_saved_per_camera;
@@ -110,10 +110,11 @@ class FrameSaver {
   // Worker-thread loop: pull pending frames (round-robin per camera), run
   // detection, and publish results. Drains all pending frames on stop.
   void detectionWorkerFunc();
-  // Run detection on one frame, enqueue a write task if a board was found,
-  // and publish {frame, corner sets} into detected_for_stream. Runs on the
-  // detection worker thread; takes the frame by value so it can be moved into
-  // the streaming slot.
+  // Run detection on one frame, enqueue a write task if a detection was found
+  // and config.save_frames is set, and publish {frame, corner sets} into
+  // detected_for_stream (always, regardless of save_frames — this is what feeds
+  // the streamer). Runs on the detection worker thread; takes the frame by
+  // value so it can be moved into the streaming slot.
   void processDetection(FrameData frame);
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
   // Detect on the whole Y plane (extracted per `checkerboard_full_res_detection`).
@@ -142,10 +143,10 @@ class FrameSaver {
   bool createOutputDirectory();  // New method for directory creation
 
  public:
-  FrameSaver() = default;
-  ~FrameSaver();
+  FrameProcessor() = default;
+  ~FrameProcessor();
 
-  void configure(const SaveConfig& cfg);
+  void configure(const ProcessConfig& cfg);
   void start();
   void stop();
 
@@ -158,9 +159,9 @@ class FrameSaver {
   size_t getFramesSaved() const { return frames_saved; }
   size_t getBytesWritten() const { return bytes_written; }
   size_t getFramesChecked() const { return frames_checked; }
-  size_t getCheckerboardsDetected() const { return checkerboards_detected; }
+  size_t getDetections() const { return frames_detected; }
   bool isEnabled() const { return enabled; }
-  SaveMode getMode() const { return config.mode; }
+  ProcessMode getMode() const { return config.mode; }
   const std::string& getActualOutputDir() const { return actual_output_dir; }
 
   // Streamer-facing: hand off the most recent detector-processed frame for
@@ -207,6 +208,6 @@ class FrameSaver {
       std::lock_guard<std::mutex> lock(detected_mutex);
       detected_for_stream.clear();
     }
-    LOG_INFO("FrameSaver", "Reset per-camera saved frame counts");
+    LOG_INFO("FrameProcessor", "Reset per-camera saved frame counts");
   }
 };

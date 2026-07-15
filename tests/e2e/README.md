@@ -69,7 +69,7 @@ The ctest entry passes `--server-binary=build/camera_ws_server` automatically.
   `--basetemp` to tmpfs, BATCH tests may fail.
 - `/tmp` is tmpfs on the Pi — avoid it for save-mode output dirs.
 - Tests share a single server instance across the session (fast) and reset
-  state (stop_cameras, set_save_mode=none, set_header_only=false) between tests.
+  state (stop_cameras, set_process_mode=none, set_header_only=false) between tests.
 
 ## Web client e2e suite (telefacet-web)
 
@@ -120,7 +120,7 @@ npm run test:e2e -- protocol-rejection.test.js
 ### Notes
 
 - Like the Python suite, tests share one server process. Teardown walks the
-  state machine back to IDLE (`stop_cameras → unconfigure → set_save_mode=none`);
+  state machine back to IDLE (`stop_cameras → unconfigure → set_process_mode=none`);
   skipping `unconfigure` leaks the `CONFIGURED` state into the next test and
   every subsequent `configure` will return `"Cameras must be idle to configure"`.
 - libcamera snaps requested resolutions to the nearest supported sensor mode
@@ -180,10 +180,11 @@ ctest --test-dir build -L e2e --output-on-failure
 
 - Tests are not parallel-safe — the server only accepts one client at a time.
   Run them serially (ctest's default without `-j`).
-- Save-mode tests (`SaveMode.*`) write files to
-  `./telefacet_e2e_out/<label>/` under the test binary's CWD; the **server**
-  is the writer, so the path must resolve on the server's host. Co-locate the
-  client and server, or skip with `--gtest_filter=-*SaveMode*`.
+- The saving process modes (`test_save_modes.py`) write files to
+  `./telefacet_e2e_out/<label>/` under the test's CWD; the **server** is the
+  writer, so the path must resolve on the server's host. Co-locate the client
+  and server, or deselect with `-k "not save_mode"`. (Detector modes with
+  `save_frames=false` write nothing, so they are unaffected by this.)
 - The resolution-snap invariant from the web-suite notes applies here too:
   assert against the *actual* `frame->width`/`height` reported by the server
   and use `frame->bytes_per_line * height * 3 / 2` as the expected payload

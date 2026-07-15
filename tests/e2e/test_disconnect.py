@@ -72,7 +72,7 @@ def _drive_to_idle(server_url: str) -> None:
         except Exception:
             pass
         try:
-            c.set_save_mode("none")
+            c.set_process_mode("none")
         except Exception:
             pass
     finally:
@@ -213,7 +213,7 @@ def test_save_continues_during_disconnect(
         pytest.skip("No cameras")
     cam_id = cams[0]["id"]
     a.configure(width=1456, height=1088)
-    a.set_save_mode("batch", output_dir=str(out), batch_size=5, writer_threads=2)
+    a.set_process_mode("batch", output_dir=str(out), batch_size=5, writer_threads=2)
     a.start_cameras()
     a.start_stream(cam_id)
     # Confirm streaming is up before we drop.

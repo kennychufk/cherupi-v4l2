@@ -346,8 +346,8 @@ class CherupiClient:
     def unconfigure(self) -> Dict[str, Any]:
         return self.command({"cmd": "unconfigure"})
 
-    def set_save_mode(self, mode: str, **params: Any) -> Dict[str, Any]:
-        body: Dict[str, Any] = {"cmd": "set_save_mode", "mode": mode}
+    def set_process_mode(self, mode: str, **params: Any) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"cmd": "set_process_mode", "mode": mode}
         if params:
             body["params"] = params
         return self.command(body)

@@ -3,8 +3,8 @@
 #include <random>
 #include <sstream>
 
-StreamManager::StreamManager(CameraManager* mgr, FrameSaver* saver)
-    : camera_manager(mgr), frame_saver(saver) {
+StreamManager::StreamManager(CameraManager* mgr, FrameProcessor* saver)
+    : camera_manager(mgr), frame_processor(saver) {
   LOG_INFO("StreamManager",
            "Initialized with adaptive rate control, chunk size: " +
                std::to_string(CHUNK_SIZE) + " bytes");
@@ -259,7 +259,7 @@ void StreamManager::streamingLoop() {
       // streamable frames are the ones the detector has already processed, so
       // we pull from the saver's detected-frame slot (which carries the
       // corners); otherwise we pull the latest captured frame from the camera.
-      const SaveMode mode = frame_saver ? frame_saver->getMode() : SaveMode::NONE;
+      const ProcessMode mode = frame_processor ? frame_processor->getMode() : ProcessMode::NONE;
       const bool detector_gated = isDetectorMode(mode);
       const uint8_t detection_kind =
           static_cast<uint8_t>(detectionKindForMode(mode));
@@ -268,7 +268,7 @@ void StreamManager::streamingLoop() {
       std::vector<CornerSet> corner_sets;
       bool got_frame = false;
       if (detector_gated) {
-        got_frame = frame_saver->takeDetectedFrameForStreaming(camera_id, frame,
+        got_frame = frame_processor->takeDetectedFrameForStreaming(camera_id, frame,
                                                                corner_sets);
       } else {
         got_frame = camera->getFrameForStreaming(frame);
@@ -564,8 +564,8 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.height = transfer.frame.height;
   header.pixel_format = transfer.frame.pixel_format;
   header.frames_saved =
-      frame_saver
-          ? frame_saver->getFramesSavedForCamera(transfer.frame.camera_id)
+      frame_processor
+          ? frame_processor->getFramesSavedForCamera(transfer.frame.camera_id)
           : 0;
   header.timestamp_us = transfer.frame.timestamp_us;
   header.frame_duration_us = transfer.frame.frame_duration_us;

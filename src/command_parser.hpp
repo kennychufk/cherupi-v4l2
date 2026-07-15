@@ -18,7 +18,7 @@ enum class CommandKind {
   GetState,
   Configure,
   Unconfigure,
-  SetSaveMode,
+  SetProcessMode,
   StartCameras,
   StartStream,
   StopStream,
@@ -44,12 +44,12 @@ struct ParsedCommand {
 // error string suitable for sending back to the client.
 std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw);
 
-// Map the text "mode" in a set_save_mode message. Returns std::nullopt for an
+// Map the text "mode" in a set_process_mode message. Returns std::nullopt for an
 // unknown mode (caller can surface an error).
-std::optional<SaveMode> parseSaveMode(const std::string& mode);
+std::optional<ProcessMode> parseProcessMode(const std::string& mode);
 
 // State-machine gate: is `kind` allowed while the system is in `current`?
-// `discover`, `set_save_mode`, `reset_frame_counts`, `set_header_only` are
+// `discover`, `set_process_mode`, `reset_frame_counts`, `set_header_only` are
 // always allowed. Lifecycle commands gate on `current`.
 bool isCommandAllowed(CommandKind kind, CameraState current);
 
@@ -63,8 +63,8 @@ CameraConfig buildCameraConfig(const nlohmann::json& params);
 // pre-existing hardcoded behaviour).
 std::string buildSensorFilter(const nlohmann::json& params);
 
-// Convert a successful SaveConfig build for a set_save_mode message. Returns
+// Convert a successful ProcessConfig build for a set_process_mode message. Returns
 // std::nullopt if the "mode" field is missing or unknown.
-std::optional<SaveConfig> buildSaveConfig(const nlohmann::json& message);
+std::optional<ProcessConfig> buildProcessConfig(const nlohmann::json& message);
 
 }  // namespace command_parser

@@ -229,8 +229,10 @@ struct CameraConfig {
   uint32_t height = 1748;
 };
 
-// Frame saving modes
-enum class SaveMode {
+// Per-frame processing modes. Each mode names the pipeline applied to a
+// captured frame; whether processed frames are also written to disk is a
+// separate axis controlled by ProcessConfig::save_frames.
+enum class ProcessMode {
   NONE,
   BUFFER,
   BATCH,
@@ -240,16 +242,16 @@ enum class SaveMode {
   ARUCO2X2
 };
 
-// Map a save mode to the DetectionKind its detector emits (NONE for the
+// Map a process mode to the DetectionKind its detector emits (NONE for the
 // non-detector modes). Used to stamp ChunkHeader.detection_kind and to select
 // the block serialization format.
-inline DetectionKind detectionKindForMode(SaveMode mode) {
+inline DetectionKind detectionKindForMode(ProcessMode mode) {
   switch (mode) {
-    case SaveMode::CHECKERBOARD:
-    case SaveMode::CHECKERBOARD2X2:
+    case ProcessMode::CHECKERBOARD:
+    case ProcessMode::CHECKERBOARD2X2:
       return DetectionKind::CHECKERBOARD;
-    case SaveMode::ARUCO:
-    case SaveMode::ARUCO2X2:
+    case ProcessMode::ARUCO:
+    case ProcessMode::ARUCO2X2:
       return DetectionKind::ARUCO;
     default:
       return DetectionKind::NONE;
@@ -257,19 +259,32 @@ inline DetectionKind detectionKindForMode(SaveMode mode) {
 }
 
 // True for the four modes whose frames flow through the async best-effort
-// detection worker (checkerboard/aruco, whole-frame or 2x2). These modes save
-// only frames with a detection and stream only detector-processed frames.
-inline bool isDetectorMode(SaveMode mode) {
-  return mode == SaveMode::CHECKERBOARD || mode == SaveMode::CHECKERBOARD2X2 ||
-         mode == SaveMode::ARUCO || mode == SaveMode::ARUCO2X2;
+// detection worker (checkerboard/aruco, whole-frame or 2x2). These modes stream
+// only detector-processed frames (carrying the detected corners/markers as a
+// side-product) and, when `save_frames` is set, also write to disk only the
+// frames that produced a detection.
+inline bool isDetectorMode(ProcessMode mode) {
+  return mode == ProcessMode::CHECKERBOARD || mode == ProcessMode::CHECKERBOARD2X2 ||
+         mode == ProcessMode::ARUCO || mode == ProcessMode::ARUCO2X2;
 }
 
 // Camera state
 enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };
 
-// Save configuration
-struct SaveConfig {
-  SaveMode mode = SaveMode::NONE;
+// Per-frame processing configuration.
+struct ProcessConfig {
+  ProcessMode mode = ProcessMode::NONE;
+
+  // Whether processed frames are written to disk. Default true for backward
+  // compatibility. Setting it false decouples detection from persistence: in a
+  // detector mode (checkerboard/aruco, whole-frame or 2x2) the detector still
+  // runs and still streams its side-products (corners/markers) to the client,
+  // but no frames are written — the writer pool is not even started, and the
+  // per-detection full-frame copy into the write queue is skipped. For the
+  // pure-save modes (buffer/batch) false simply produces no output (there is no
+  // side-product), so it is not a useful combination.
+  bool save_frames = true;
+
   std::string output_dir = ".";
   bool prepend_timestamp_to_dir = false;
   size_t batch_size = 10;
@@ -299,7 +314,7 @@ constexpr const char* CMD_DISCOVER = "discover";
 constexpr const char* CMD_GET_STATE = "get_state";
 constexpr const char* CMD_CONFIGURE = "configure";
 constexpr const char* CMD_UNCONFIGURE = "unconfigure";
-constexpr const char* CMD_SET_SAVE_MODE = "set_save_mode";
+constexpr const char* CMD_SET_PROCESS_MODE = "set_process_mode";
 constexpr const char* CMD_START_CAMERAS = "start_cameras";
 constexpr const char* CMD_START_STREAM = "start_stream";
 constexpr const char* CMD_STOP_STREAM = "stop_stream";

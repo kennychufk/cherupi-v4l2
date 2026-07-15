@@ -26,8 +26,8 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
     kind = CommandKind::Configure;
   } else if (cmd == Protocol::CMD_UNCONFIGURE) {
     kind = CommandKind::Unconfigure;
-  } else if (cmd == Protocol::CMD_SET_SAVE_MODE) {
-    kind = CommandKind::SetSaveMode;
+  } else if (cmd == Protocol::CMD_SET_PROCESS_MODE) {
+    kind = CommandKind::SetProcessMode;
   } else if (cmd == Protocol::CMD_START_CAMERAS) {
     kind = CommandKind::StartCameras;
   } else if (cmd == Protocol::CMD_START_STREAM) {
@@ -57,14 +57,14 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
   return ParsedCommand{kind, std::move(msg)};
 }
 
-std::optional<SaveMode> parseSaveMode(const std::string& mode) {
-  if (mode == "none") return SaveMode::NONE;
-  if (mode == "buffer") return SaveMode::BUFFER;
-  if (mode == "batch") return SaveMode::BATCH;
-  if (mode == "checkerboard") return SaveMode::CHECKERBOARD;
-  if (mode == "checkerboard2x2") return SaveMode::CHECKERBOARD2X2;
-  if (mode == "aruco") return SaveMode::ARUCO;
-  if (mode == "aruco2x2") return SaveMode::ARUCO2X2;
+std::optional<ProcessMode> parseProcessMode(const std::string& mode) {
+  if (mode == "none") return ProcessMode::NONE;
+  if (mode == "buffer") return ProcessMode::BUFFER;
+  if (mode == "batch") return ProcessMode::BATCH;
+  if (mode == "checkerboard") return ProcessMode::CHECKERBOARD;
+  if (mode == "checkerboard2x2") return ProcessMode::CHECKERBOARD2X2;
+  if (mode == "aruco") return ProcessMode::ARUCO;
+  if (mode == "aruco2x2") return ProcessMode::ARUCO2X2;
   return std::nullopt;
 }
 
@@ -72,7 +72,7 @@ bool isCommandAllowed(CommandKind kind, CameraState current) {
   switch (kind) {
     case CommandKind::Discover:
     case CommandKind::GetState:
-    case CommandKind::SetSaveMode:
+    case CommandKind::SetProcessMode:
     case CommandKind::ResetFrameCounts:
     case CommandKind::SetHeaderOnly:
       return true;
@@ -111,18 +111,20 @@ std::string buildSensorFilter(const json& params) {
   return "imx519";
 }
 
-std::optional<SaveConfig> buildSaveConfig(const json& message) {
+std::optional<ProcessConfig> buildProcessConfig(const json& message) {
   if (!message.contains("mode") || !message["mode"].is_string()) {
     return std::nullopt;
   }
-  auto mode = parseSaveMode(message["mode"].get<std::string>());
+  auto mode = parseProcessMode(message["mode"].get<std::string>());
   if (!mode) return std::nullopt;
 
-  SaveConfig config;
+  ProcessConfig config;
   config.mode = *mode;
 
   if (message.contains("params")) {
     const json& params = message["params"];
+    if (params.contains("save_frames") && params["save_frames"].is_boolean())
+      config.save_frames = params["save_frames"];
     if (params.contains("output_dir")) config.output_dir = params["output_dir"];
     if (params.contains("prepend_timestamp_to_dir"))
       config.prepend_timestamp_to_dir = params["prepend_timestamp_to_dir"];

@@ -3,27 +3,27 @@
 #include <chrono>
 #include <ctime>
 
-#include "frame_saver_helpers.hpp"
+#include "frame_processor_helpers.hpp"
 
 namespace {
 
-TEST(FrameSaverHelpersTest, MakeFilenameFormat) {
-  EXPECT_EQ(frame_saver_helpers::makeFilename("/tmp/out", 0, 42),
+TEST(FrameProcessorHelpersTest, MakeFilenameFormat) {
+  EXPECT_EQ(frame_processor_helpers::makeFilename("/tmp/out", 0, 42),
             "/tmp/out/cam0-42.yuv");
-  EXPECT_EQ(frame_saver_helpers::makeFilename(".", 3, 0), "./cam3-0.yuv");
+  EXPECT_EQ(frame_processor_helpers::makeFilename(".", 3, 0), "./cam3-0.yuv");
 }
 
-TEST(FrameSaverHelpersTest, NormalizeTrimsWhitespace) {
-  EXPECT_EQ(frame_saver_helpers::normalizeBaseDir("  /tmp/foo \n"),
+TEST(FrameProcessorHelpersTest, NormalizeTrimsWhitespace) {
+  EXPECT_EQ(frame_processor_helpers::normalizeBaseDir("  /tmp/foo \n"),
             "/tmp/foo");
 }
 
-TEST(FrameSaverHelpersTest, NormalizeEmptyFallsBackToCurrentDir) {
-  EXPECT_EQ(frame_saver_helpers::normalizeBaseDir(""), ".");
-  EXPECT_EQ(frame_saver_helpers::normalizeBaseDir("   \t"), ".");
+TEST(FrameProcessorHelpersTest, NormalizeEmptyFallsBackToCurrentDir) {
+  EXPECT_EQ(frame_processor_helpers::normalizeBaseDir(""), ".");
+  EXPECT_EQ(frame_processor_helpers::normalizeBaseDir("   \t"), ".");
 }
 
-TEST(FrameSaverHelpersTest, TimestampedDirLeafOnly) {
+TEST(FrameProcessorHelpersTest, TimestampedDirLeafOnly) {
   // Construct a fixed time: 2026-04-24 13:37:00 local. Use std::mktime so the
   // test is stable across DST boundaries (the function formats in local
   // time).
@@ -37,11 +37,11 @@ TEST(FrameSaverHelpersTest, TimestampedDirLeafOnly) {
   fixed.tm_isdst = -1;
   auto tp = std::chrono::system_clock::from_time_t(std::mktime(&fixed));
 
-  std::string result = frame_saver_helpers::makeTimestampedDir("runs", tp);
+  std::string result = frame_processor_helpers::makeTimestampedDir("runs", tp);
   EXPECT_EQ(result, "20260424-1337-runs");
 }
 
-TEST(FrameSaverHelpersTest, TimestampedDirWithParent) {
+TEST(FrameProcessorHelpersTest, TimestampedDirWithParent) {
   std::tm fixed{};
   fixed.tm_year = 2026 - 1900;
   fixed.tm_mon = 3;
@@ -51,13 +51,13 @@ TEST(FrameSaverHelpersTest, TimestampedDirWithParent) {
   fixed.tm_isdst = -1;
   auto tp = std::chrono::system_clock::from_time_t(std::mktime(&fixed));
 
-  EXPECT_EQ(frame_saver_helpers::makeTimestampedDir("/tmp/foo", tp),
+  EXPECT_EQ(frame_processor_helpers::makeTimestampedDir("/tmp/foo", tp),
             "/tmp/20260424-1337-foo");
 }
 
-TEST(FrameSaverHelpersTest, TimestampedDirDotSlashLeaf) {
+TEST(FrameProcessorHelpersTest, TimestampedDirDotSlashLeaf) {
   // "./runs" has parent_path "." — expected to collapse to just the leaf
-  // with the prefix (matches the old FrameSaver behaviour).
+  // with the prefix (matches the old FrameProcessor behaviour).
   std::tm fixed{};
   fixed.tm_year = 2026 - 1900;
   fixed.tm_mon = 3;
@@ -67,11 +67,11 @@ TEST(FrameSaverHelpersTest, TimestampedDirDotSlashLeaf) {
   fixed.tm_isdst = -1;
   auto tp = std::chrono::system_clock::from_time_t(std::mktime(&fixed));
 
-  std::string result = frame_saver_helpers::makeTimestampedDir("./runs", tp);
+  std::string result = frame_processor_helpers::makeTimestampedDir("./runs", tp);
   EXPECT_EQ(result, "20260424-1337-runs");
 }
 
-TEST(FrameSaverHelpersTest, ExtractYFullResCopiesLumaPlane) {
+TEST(FrameProcessorHelpersTest, ExtractYFullResCopiesLumaPlane) {
   // Synthesize a 4x2 YUV420 frame. Y plane is 4 bytes/row x 2 rows; stride 4.
   // (Real YUV420 has UV following the Y plane; we fill a few bytes after so
   // the extractor's bounds are exercised.)
@@ -85,7 +85,7 @@ TEST(FrameSaverHelpersTest, ExtractYFullResCopiesLumaPlane) {
       0x80, 0x80, 0x80, 0x80,  // UV (ignored)
   };
 
-  auto y = frame_saver_helpers::extractYFromYUV420(frame, /*full_res=*/true);
+  auto y = frame_processor_helpers::extractYFromYUV420(frame, /*full_res=*/true);
   ASSERT_EQ(y.size(), 8u);
   EXPECT_EQ(y[0], 0x10);
   EXPECT_EQ(y[3], 0x13);
@@ -93,7 +93,7 @@ TEST(FrameSaverHelpersTest, ExtractYFullResCopiesLumaPlane) {
   EXPECT_EQ(y[7], 0x23);
 }
 
-TEST(FrameSaverHelpersTest, ExtractYHalfResSubsamples) {
+TEST(FrameProcessorHelpersTest, ExtractYHalfResSubsamples) {
   // 4x4 Y plane, subsample every other row/col -> 2x2.
   FrameData frame;
   frame.width = 4;
@@ -106,7 +106,7 @@ TEST(FrameSaverHelpersTest, ExtractYHalfResSubsamples) {
       0x31, 0x32, 0x33, 0x34,  //
   };
 
-  auto y = frame_saver_helpers::extractYFromYUV420(frame, /*full_res=*/false);
+  auto y = frame_processor_helpers::extractYFromYUV420(frame, /*full_res=*/false);
   ASSERT_EQ(y.size(), 4u);
   // Rows 0 and 2, cols 0 and 2.
   EXPECT_EQ(y[0], 0x01);
@@ -115,7 +115,7 @@ TEST(FrameSaverHelpersTest, ExtractYHalfResSubsamples) {
   EXPECT_EQ(y[3], 0x23);
 }
 
-TEST(FrameSaverHelpersTest, ExtractYRespectsNonContiguousStride) {
+TEST(FrameProcessorHelpersTest, ExtractYRespectsNonContiguousStride) {
   // bytes_per_line > width: simulate real libcamera strides.
   FrameData frame;
   frame.width = 2;
@@ -126,7 +126,7 @@ TEST(FrameSaverHelpersTest, ExtractYRespectsNonContiguousStride) {
       0xCC, 0xDD, 0x00, 0x00,  // Y row 1
   };
 
-  auto y = frame_saver_helpers::extractYFromYUV420(frame, /*full_res=*/true);
+  auto y = frame_processor_helpers::extractYFromYUV420(frame, /*full_res=*/true);
   ASSERT_EQ(y.size(), 4u);
   EXPECT_EQ(y[0], 0xAA);
   EXPECT_EQ(y[1], 0xBB);

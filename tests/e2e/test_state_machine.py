@@ -84,7 +84,7 @@ def test_malformed_json_returns_error(client: CherupiClient) -> None:
 
 def test_invalid_save_mode_returns_error(client: CherupiClient) -> None:
     with pytest.raises(CommandError):
-        client.set_save_mode("not-a-mode")
+        client.set_process_mode("not-a-mode")
 
 
 def test_unknown_camera_id_returns_error(

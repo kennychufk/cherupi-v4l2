@@ -1,6 +1,6 @@
-"""Frame-saver modes produce artifacts on disk.
+"""Frame process modes (save side) produce artifacts on disk.
 
-These tests require live hardware and drive the actual FrameSaver. They're
+These tests require live hardware and drive the actual FrameProcessor. They're
 deliberately lightweight — we just check that files appear with the expected
 shape; content validation is the job of yuv420_convert / the converter.
 """
@@ -28,7 +28,7 @@ def test_save_mode_buffer(
     out = tmp_output_dir / "buffer"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode("buffer", output_dir=str(out))
+    client.set_process_mode("buffer", output_dir=str(out))
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])
     time.sleep(1.5)
@@ -49,7 +49,7 @@ def test_save_mode_batch(
     out = tmp_output_dir / "batch"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(
+    client.set_process_mode(
         "batch", output_dir=str(out), batch_size=5, writer_threads=2
     )
     client.start_cameras()
@@ -84,7 +84,7 @@ def test_save_mode_checkerboard_finds_nothing(
     out = tmp_output_dir / "checkerboard"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(
+    client.set_process_mode(
         "checkerboard",
         output_dir=str(out),
         checkerboard_rows=8,
@@ -111,7 +111,7 @@ def test_save_mode_checkerboard2x2_finds_nothing(
     out = tmp_output_dir / "checkerboard2x2"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(
+    client.set_process_mode(
         "checkerboard2x2",
         output_dir=str(out),
         checkerboard_rows=8,
@@ -140,7 +140,7 @@ def test_save_mode_aruco_finds_nothing(
     out = tmp_output_dir / "aruco"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(
+    client.set_process_mode(
         "aruco",
         output_dir=str(out),
         aruco_full_res_detection=False,
@@ -166,7 +166,7 @@ def test_save_mode_aruco2x2_finds_nothing(
     out = tmp_output_dir / "aruco2x2"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(
+    client.set_process_mode(
         "aruco2x2",
         output_dir=str(out),
         aruco_full_res_detection=False,
@@ -194,7 +194,7 @@ def test_save_mode_none(
     out = tmp_output_dir / "none"
     out.mkdir()
     client.configure(width=1456, height=1088)
-    client.set_save_mode("none", output_dir=str(out))
+    client.set_process_mode("none", output_dir=str(out))
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])
     time.sleep(1.0)
@@ -216,18 +216,43 @@ def test_save_mode_none(
         "aruco2x2",
     ],
 )
-def test_set_save_mode_accepted_in_any_state(
+def test_set_process_mode_accepted_in_any_state(
     client: CherupiClient, mode: str, tmp_output_dir: Path
 ) -> None:
-    """set_save_mode is allowed in any state (IDLE, CONFIGURED, RUNNING)."""
+    """set_process_mode is allowed in any state (IDLE, CONFIGURED, RUNNING)."""
     out = tmp_output_dir / f"anystate_{mode}"
     out.mkdir()
-    client.set_save_mode(mode, output_dir=str(out))  # IDLE
+    client.set_process_mode(mode, output_dir=str(out))  # IDLE
     client.discover()
     client.configure(width=1456, height=1088)
-    client.set_save_mode(mode, output_dir=str(out))  # CONFIGURED
+    client.set_process_mode(mode, output_dir=str(out))  # CONFIGURED
     client.start_cameras()
     try:
-        client.set_save_mode(mode, output_dir=str(out))  # RUNNING
+        client.set_process_mode(mode, output_dir=str(out))  # RUNNING
     finally:
         client.stop_cameras()
+
+
+def test_process_mode_save_frames_false_writes_nothing(
+    client: CherupiClient,
+    discovered_cameras: list[dict],
+    tmp_output_dir: Path,
+) -> None:
+    """save_frames=false runs the detector but persists nothing.
+
+    A detector mode with save_frames disabled must never write a file and must
+    report frames_saved == 0, independent of whether any marker is actually in
+    view (streaming of detector side-products is unaffected — see the unit
+    tests for the streamed-corners guarantee)."""
+    out = tmp_output_dir / "aruco_nosave"
+    out.mkdir()
+    client.configure(width=1456, height=1088)
+    client.set_process_mode("aruco", output_dir=str(out), save_frames=False)
+    client.start_cameras()
+    client.start_stream(discovered_cameras[0]["id"])
+    time.sleep(1.5)
+    client.stop_stream(discovered_cameras[0]["id"])
+    stop = client.stop_cameras()
+
+    assert not _yuv_files(out), f"save_frames=false still wrote files in {out}"
+    assert stop.get("frames_saved", 0) == 0

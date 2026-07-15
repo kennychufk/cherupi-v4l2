@@ -13,7 +13,7 @@
 #include <opencv2/core.hpp>
 
 #include "aruco_test_utils.hpp"
-#include "frame_saver.hpp"
+#include "frame_processor.hpp"
 #include "types.hpp"
 
 namespace {
@@ -36,7 +36,7 @@ FrameData makeFrame(uint32_t camera_id, uint32_t frame_id, size_t size = 16,
   return f;
 }
 
-class FrameSaverTempDir : public ::testing::Test {
+class FrameProcessorTempDir : public ::testing::Test {
  protected:
   fs::path dir;
 
@@ -65,12 +65,12 @@ class FrameSaverTempDir : public ::testing::Test {
   }
 };
 
-TEST_F(FrameSaverTempDir, NoneModeDoesNothing) {
-  SaveConfig cfg;
-  cfg.mode = SaveMode::NONE;
+TEST_F(FrameProcessorTempDir, NoneModeDoesNothing) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::NONE;
   cfg.output_dir = dir.string();
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
 
@@ -86,12 +86,12 @@ TEST_F(FrameSaverTempDir, NoneModeDoesNothing) {
   EXPECT_EQ(count, 0);
 }
 
-TEST_F(FrameSaverTempDir, BufferModeFlushesOnRequest) {
-  SaveConfig cfg;
-  cfg.mode = SaveMode::BUFFER;
+TEST_F(FrameProcessorTempDir, BufferModeFlushesOnRequest) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
   cfg.output_dir = dir.string();
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   ASSERT_TRUE(saver.isEnabled());
@@ -120,15 +120,15 @@ TEST_F(FrameSaverTempDir, BufferModeFlushesOnRequest) {
   saver.stop();
 }
 
-TEST_F(FrameSaverTempDir, BatchModeWritesThroughWriterThreads) {
+TEST_F(FrameProcessorTempDir, BatchModeWritesThroughWriterThreads) {
   // BATCH mode uses O_DIRECT; on some filesystems the alignment pads bytes,
   // which is acceptable. Here we only check that a file per frame appears.
-  SaveConfig cfg;
-  cfg.mode = SaveMode::BATCH;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BATCH;
   cfg.output_dir = dir.string();
   cfg.writer_threads = 2;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
 
@@ -147,12 +147,12 @@ TEST_F(FrameSaverTempDir, BatchModeWritesThroughWriterThreads) {
   }
 }
 
-TEST_F(FrameSaverTempDir, CountersIncrementPerCamera) {
-  SaveConfig cfg;
-  cfg.mode = SaveMode::BUFFER;
+TEST_F(FrameProcessorTempDir, CountersIncrementPerCamera) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
   cfg.output_dir = dir.string();
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
 
@@ -217,7 +217,7 @@ static FrameData makeYuvFrameWithOptionalBoard(uint32_t camera_id,
   return frame;
 }
 
-TEST_F(FrameSaverTempDir, Checkerboard2x2SavesWhenAnyQuadrantHasBoard) {
+TEST_F(FrameProcessorTempDir, Checkerboard2x2SavesWhenAnyQuadrantHasBoard) {
   // Fixture occupies the top-left quadrant of the Y plane; with
   // full_res_detection=true the saver splits the full Y into 4 W/2 x H/2
   // quadrants and detection should hit on the top-left only.
@@ -227,8 +227,8 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2SavesWhenAnyQuadrantHasBoard) {
       makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/42, board,
                                     /*paste=*/true);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.output_dir = dir.string();
   cfg.checkerboard_cols = 11;
   cfg.checkerboard_rows = 8;
@@ -236,19 +236,69 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2SavesWhenAnyQuadrantHasBoard) {
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
   saver.stop();
 
   EXPECT_EQ(saver.getFramesChecked(), 1u);
-  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);
+  EXPECT_EQ(saver.getDetections(), 1u);
   EXPECT_EQ(saver.getFramesSaved(), 1u);
   EXPECT_TRUE(fs::exists(dir / "cam0-42.yuv"));
 }
 
-TEST_F(FrameSaverTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
+TEST_F(FrameProcessorTempDir, DetectorModeWithSaveFramesOffStreamsButWritesNothing) {
+  // save_frames=false decouples detection from persistence: the detector still
+  // runs and publishes the processed frame + corners for the streamer, but no
+  // frame is written to disk and getFramesSaved() stays 0.
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/77, board,
+                                    /*paste=*/true);
+
+  // Point output_dir at a path that does not exist yet: with save_frames off,
+  // configure() must not create it (nothing is ever written there).
+  const fs::path out_dir = dir / "should_not_be_created";
+
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
+  cfg.save_frames = false;  // detect + stream corners, but do not persist
+  cfg.output_dir = out_dir.string();
+  cfg.checkerboard_cols = 11;
+  cfg.checkerboard_rows = 8;
+  cfg.checkerboard_full_res_detection = true;
+  cfg.checkerboard_num_threads = 4;
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+
+  // The detector still publishes the processed frame + corners for streaming.
+  FrameData got;
+  std::vector<CornerSet> sets;
+  bool ready = false;
+  for (int i = 0; i < 400 && !ready; ++i) {
+    ready = saver.takeDetectedFrameForStreaming(0, got, sets);
+    if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(ready);
+  EXPECT_EQ(got.frame_id, 77u);
+  ASSERT_EQ(sets.size(), 1u);
+  EXPECT_EQ(sets[0].corners.size(), 11u * 8u);
+
+  saver.stop();
+
+  // Detection happened, but nothing was persisted — and the output directory
+  // was never even created.
+  EXPECT_EQ(saver.getDetections(), 1u);
+  EXPECT_EQ(saver.getFramesSaved(), 0u);
+  EXPECT_FALSE(fs::exists(out_dir)) << out_dir;
+}
+
+TEST_F(FrameProcessorTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
   Pgm board = loadCheckerboardFixture();
   ASSERT_GT(board.width, 0);
   // Same frame geometry as above, but no board pasted — uniform mid-gray Y.
@@ -256,36 +306,36 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {
       makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/1, board,
                                     /*paste=*/false);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.output_dir = dir.string();
   cfg.checkerboard_full_res_detection = true;
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
   saver.stop();
 
   EXPECT_EQ(saver.getFramesChecked(), 1u);
-  EXPECT_EQ(saver.getCheckerboardsDetected(), 0u);
+  EXPECT_EQ(saver.getDetections(), 0u);
   EXPECT_EQ(saver.getFramesSaved(), 0u);
   int count = 0;
   for ([[maybe_unused]] auto& _ : fs::directory_iterator(dir)) ++count;
   EXPECT_EQ(count, 0);
 }
 
-TEST_F(FrameSaverTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) {
+TEST_F(FrameProcessorTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) {
   Pgm board = loadCheckerboardFixture();
   ASSERT_GT(board.width, 0);
   FrameData frame =
       makeYuvFrameWithOptionalBoard(/*camera_id=*/2, /*frame_id=*/55, board,
                                     /*paste=*/true);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.output_dir = dir.string();
   cfg.checkerboard_cols = 11;
   cfg.checkerboard_rows = 8;
@@ -293,7 +343,7 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) {
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
@@ -332,7 +382,7 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) {
   saver.stop();
 }
 
-TEST_F(FrameSaverTempDir, Checkerboard2x2HonoursThreadPoolSize) {
+TEST_F(FrameProcessorTempDir, Checkerboard2x2HonoursThreadPoolSize) {
   // num_threads=1 forces sequential evaluation. Result must still be
   // correct (any-quadrant OR).
   Pgm board = loadCheckerboardFixture();
@@ -341,20 +391,20 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2HonoursThreadPoolSize) {
       makeYuvFrameWithOptionalBoard(/*camera_id=*/3, /*frame_id=*/7, board,
                                     /*paste=*/true);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.output_dir = dir.string();
   cfg.checkerboard_full_res_detection = true;
   cfg.checkerboard_num_threads = 1;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
   saver.stop();
 
-  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);
+  EXPECT_EQ(saver.getDetections(), 1u);
   EXPECT_TRUE(fs::exists(dir / "cam3-7.yuv"));
 }
 
@@ -381,19 +431,19 @@ static FrameData makeYuvFrameWithMarker(uint32_t camera_id, uint32_t frame_id,
   return frame;
 }
 
-TEST_F(FrameSaverTempDir, Aruco2x2SavesAndPublishesMarker) {
+TEST_F(FrameProcessorTempDir, Aruco2x2SavesAndPublishesMarker) {
   const int kId = 19;
   FrameData frame =
       makeYuvFrameWithMarker(/*camera_id=*/1, /*frame_id=*/88, kId);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::ARUCO2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::ARUCO2X2;
   cfg.output_dir = dir.string();
   cfg.aruco_full_res_detection = true;
   cfg.aruco_num_threads = 4;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
@@ -424,25 +474,25 @@ TEST_F(FrameSaverTempDir, Aruco2x2SavesAndPublishesMarker) {
 
   saver.stop();
   EXPECT_EQ(saver.getFramesChecked(), 1u);
-  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);  // generic detection counter
+  EXPECT_EQ(saver.getDetections(), 1u);  // generic detection counter
   EXPECT_EQ(saver.getFramesSaved(), 1u);
   EXPECT_TRUE(fs::exists(dir / "cam1-88.yuv"));
 }
 
-TEST(FrameSaverTimestampDir, PrependTimestampProducesPrefixedDirectoryName) {
+TEST(FrameProcessorTimestampDir, PrependTimestampProducesPrefixedDirectoryName) {
   fs::path base = fs::path(CHERUPI_TEST_SCRATCH_DIR) /
                   ("cherupi_ts_" + std::to_string(::getpid()));
   fs::create_directories(CHERUPI_TEST_SCRATCH_DIR);
   fs::remove_all(base);
   fs::create_directory(base);
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::BATCH;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BATCH;
   cfg.output_dir = (base / "runs").string();
   cfg.prepend_timestamp_to_dir = true;
   cfg.writer_threads = 1;
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
 
   const std::string& actual = saver.getActualOutputDir();

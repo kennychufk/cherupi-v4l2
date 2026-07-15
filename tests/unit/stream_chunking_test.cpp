@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-#include "frame_saver.hpp"
+#include "frame_processor.hpp"
 #include "frame_sink.hpp"
 #include "stream_manager.hpp"
 #include "types.hpp"
@@ -17,7 +17,7 @@ namespace {
 // Detection is async/best-effort, so poll the saver's detected-frame slot
 // until the worker publishes a processed frame for `camera_id`. Returns false
 // on timeout. On success `frame`/`sets` hold what the streamer would send.
-bool waitForDetectedFrame(FrameSaver& saver, uint32_t camera_id,
+bool waitForDetectedFrame(FrameProcessor& saver, uint32_t camera_id,
                           FrameData& frame, std::vector<CornerSet>& sets) {
   for (int i = 0; i < 400; ++i) {
     if (saver.takeDetectedFrameForStreaming(camera_id, frame, sets)) return true;
@@ -57,7 +57,7 @@ FrameData makeSyntheticFrame(size_t total_bytes, uint32_t cam_id = 0) {
 
 TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   CameraManager dummy_mgr;
-  FrameSaver dummy_saver;
+  FrameProcessor dummy_saver;
   StreamManager sm(&dummy_mgr, &dummy_saver);
 
   RecordingSink sink;
@@ -112,7 +112,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
 
 TEST(StreamChunkingTest, LastChunkCarriesRemainderBytes) {
   CameraManager dummy_mgr;
-  FrameSaver dummy_saver;
+  FrameProcessor dummy_saver;
   StreamManager sm(&dummy_mgr, &dummy_saver);
 
   RecordingSink sink;
@@ -133,7 +133,7 @@ TEST(StreamChunkingTest, LastChunkCarriesRemainderBytes) {
 
 TEST(StreamChunkingTest, HeaderOnlyModeSendsOnlyMarkerPlusHeader) {
   CameraManager dummy_mgr;
-  FrameSaver dummy_saver;
+  FrameProcessor dummy_saver;
   StreamManager sm(&dummy_mgr, &dummy_saver);
 
   RecordingSink sink;
@@ -165,9 +165,9 @@ TEST(StreamChunkingTest, ChunkHeaderEmitsZeroCornerBlockOnNoDetection) {
   // board, so it publishes the frame with an empty corner-set list, and the
   // streamer must encode that as num_corner_sets=0 with no bytes appended.
   CameraManager dummy_mgr;
-  FrameSaver saver;
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  FrameProcessor saver;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.checkerboard_full_res_detection = true;
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
@@ -251,8 +251,8 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
                 static_cast<size_t>(board_w));
   }
 
-  SaveConfig cfg;
-  cfg.mode = SaveMode::CHECKERBOARD2X2;
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
   cfg.checkerboard_cols = 11;
   cfg.checkerboard_rows = 8;
   cfg.checkerboard_full_res_detection = true;
@@ -260,7 +260,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   cfg.writer_threads = 1;
   cfg.output_dir = ".";
 
-  FrameSaver saver;
+  FrameProcessor saver;
   saver.configure(cfg);
   saver.start();
   saver.saveFrame(frame);
@@ -330,7 +330,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsMarkerBlockForAruco) {
   // detection_kind=ARUCO and a MarkerSetHeader per marker (with the id) rather
   // than a CornerSetHeader.
   CameraManager dummy_mgr;
-  FrameSaver dummy_saver;
+  FrameProcessor dummy_saver;
   StreamManager sm(&dummy_mgr, &dummy_saver);
   RecordingSink sink;
   sm.setSink(&sink);
@@ -393,7 +393,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsMarkerBlockForAruco) {
 
 TEST(StreamChunkingTest, ClearingSinkResetsRateControl) {
   CameraManager dummy_mgr;
-  FrameSaver dummy_saver;
+  FrameProcessor dummy_saver;
   StreamManager sm(&dummy_mgr, &dummy_saver);
 
   RecordingSink sink;

@@ -45,17 +45,17 @@ TEST(CommandParserTest, UnknownCommandReturnsError) {
             std::string::npos);
 }
 
-TEST(CommandParserTest, SaveModeLookup) {
-  EXPECT_EQ(command_parser::parseSaveMode("none"), SaveMode::NONE);
-  EXPECT_EQ(command_parser::parseSaveMode("buffer"), SaveMode::BUFFER);
-  EXPECT_EQ(command_parser::parseSaveMode("batch"), SaveMode::BATCH);
-  EXPECT_EQ(command_parser::parseSaveMode("checkerboard"),
-            SaveMode::CHECKERBOARD);
-  EXPECT_EQ(command_parser::parseSaveMode("checkerboard2x2"),
-            SaveMode::CHECKERBOARD2X2);
-  EXPECT_EQ(command_parser::parseSaveMode("aruco"), SaveMode::ARUCO);
-  EXPECT_EQ(command_parser::parseSaveMode("aruco2x2"), SaveMode::ARUCO2X2);
-  EXPECT_EQ(command_parser::parseSaveMode("bogus"), std::nullopt);
+TEST(CommandParserTest, ProcessModeLookup) {
+  EXPECT_EQ(command_parser::parseProcessMode("none"), ProcessMode::NONE);
+  EXPECT_EQ(command_parser::parseProcessMode("buffer"), ProcessMode::BUFFER);
+  EXPECT_EQ(command_parser::parseProcessMode("batch"), ProcessMode::BATCH);
+  EXPECT_EQ(command_parser::parseProcessMode("checkerboard"),
+            ProcessMode::CHECKERBOARD);
+  EXPECT_EQ(command_parser::parseProcessMode("checkerboard2x2"),
+            ProcessMode::CHECKERBOARD2X2);
+  EXPECT_EQ(command_parser::parseProcessMode("aruco"), ProcessMode::ARUCO);
+  EXPECT_EQ(command_parser::parseProcessMode("aruco2x2"), ProcessMode::ARUCO2X2);
+  EXPECT_EQ(command_parser::parseProcessMode("bogus"), std::nullopt);
 }
 
 TEST(CommandParserTest, StateGateAllowsAlwaysAllowedCommands) {
@@ -63,7 +63,7 @@ TEST(CommandParserTest, StateGateAllowsAlwaysAllowedCommands) {
                      CameraState::RUNNING, CameraState::ERROR}) {
     EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::Discover, state));
     EXPECT_TRUE(
-        command_parser::isCommandAllowed(CommandKind::SetSaveMode, state));
+        command_parser::isCommandAllowed(CommandKind::SetProcessMode, state));
     EXPECT_TRUE(
         command_parser::isCommandAllowed(CommandKind::ResetFrameCounts, state));
     EXPECT_TRUE(
@@ -137,15 +137,15 @@ TEST(CommandParserTest, BuildSensorFilterIgnoresNonStringSensor) {
   EXPECT_EQ(command_parser::buildSensorFilter(params), "imx519");
 }
 
-TEST(CommandParserTest, BuildSaveConfigAppliesMode) {
+TEST(CommandParserTest, BuildProcessConfigAppliesMode) {
   auto msg = nlohmann::json::parse(R"({"mode":"batch","params":{"batch_size":7}})");
-  auto cfg = command_parser::buildSaveConfig(msg);
+  auto cfg = command_parser::buildProcessConfig(msg);
   ASSERT_TRUE(cfg.has_value());
-  EXPECT_EQ(cfg->mode, SaveMode::BATCH);
+  EXPECT_EQ(cfg->mode, ProcessMode::BATCH);
   EXPECT_EQ(cfg->batch_size, 7u);
 }
 
-TEST(CommandParserTest, BuildSaveConfigAppliesArucoParams) {
+TEST(CommandParserTest, BuildProcessConfigAppliesArucoParams) {
   auto msg = nlohmann::json::parse(R"({
     "mode":"aruco2x2",
     "params":{
@@ -154,35 +154,60 @@ TEST(CommandParserTest, BuildSaveConfigAppliesArucoParams) {
       "aruco_corner_refine":true
     }
   })");
-  auto cfg = command_parser::buildSaveConfig(msg);
+  auto cfg = command_parser::buildProcessConfig(msg);
   ASSERT_TRUE(cfg.has_value());
-  EXPECT_EQ(cfg->mode, SaveMode::ARUCO2X2);
+  EXPECT_EQ(cfg->mode, ProcessMode::ARUCO2X2);
   EXPECT_TRUE(cfg->aruco_full_res_detection);
   EXPECT_EQ(cfg->aruco_num_threads, 2);
   EXPECT_TRUE(cfg->aruco_corner_refine);
 }
 
-TEST(CommandParserTest, BuildSaveConfigArucoDefaults) {
+TEST(CommandParserTest, BuildProcessConfigArucoDefaults) {
   auto msg = nlohmann::json::parse(R"({"mode":"aruco"})");
-  auto cfg = command_parser::buildSaveConfig(msg);
+  auto cfg = command_parser::buildProcessConfig(msg);
   ASSERT_TRUE(cfg.has_value());
-  EXPECT_EQ(cfg->mode, SaveMode::ARUCO);
+  EXPECT_EQ(cfg->mode, ProcessMode::ARUCO);
   // Unspecified params keep their defaults.
   EXPECT_FALSE(cfg->aruco_full_res_detection);
   EXPECT_EQ(cfg->aruco_num_threads, 4);
   EXPECT_FALSE(cfg->aruco_corner_refine);
 }
 
-TEST(CommandParserTest, BuildSaveConfigRejectsUnknownMode) {
+TEST(CommandParserTest, BuildProcessConfigRejectsUnknownMode) {
   auto msg = nlohmann::json::parse(R"({"mode":"telepathy"})");
-  auto cfg = command_parser::buildSaveConfig(msg);
+  auto cfg = command_parser::buildProcessConfig(msg);
   EXPECT_FALSE(cfg.has_value());
 }
 
-TEST(CommandParserTest, BuildSaveConfigRejectsMissingMode) {
+TEST(CommandParserTest, BuildProcessConfigRejectsMissingMode) {
   auto msg = nlohmann::json::parse(R"({"params":{}})");
-  auto cfg = command_parser::buildSaveConfig(msg);
+  auto cfg = command_parser::buildProcessConfig(msg);
   EXPECT_FALSE(cfg.has_value());
+}
+
+TEST(CommandParserTest, BuildProcessConfigSaveFramesDefaultsTrue) {
+  // Absent save_frames keeps the default (persist), preserving old behaviour.
+  auto msg = nlohmann::json::parse(R"({"mode":"aruco"})");
+  auto cfg = command_parser::buildProcessConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_TRUE(cfg->save_frames);
+}
+
+TEST(CommandParserTest, BuildProcessConfigParsesSaveFramesFalse) {
+  auto msg = nlohmann::json::parse(
+      R"({"mode":"aruco","params":{"save_frames":false}})");
+  auto cfg = command_parser::buildProcessConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_FALSE(cfg->save_frames);
+}
+
+TEST(CommandParserTest, BuildProcessConfigIgnoresNonBoolSaveFrames) {
+  // A non-boolean save_frames is ignored, leaving the default in place.
+  auto msg = nlohmann::json::parse(
+      R"({"mode":"aruco","params":{"save_frames":"nope"}})");
+  auto cfg = command_parser::buildProcessConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_TRUE(cfg->save_frames);
 }
 
 TEST(CommandParserTest, ValidSetLensPositionManual) {

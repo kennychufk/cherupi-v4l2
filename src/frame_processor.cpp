@@ -1,4 +1,4 @@
-#include "frame_saver.hpp"
+#include "frame_processor.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -18,17 +18,19 @@
 #include <utility>
 #include <vector>
 
-#include "frame_saver_helpers.hpp"
+#include "frame_processor_helpers.hpp"
 
-FrameSaver::~FrameSaver() { stop(); }
+FrameProcessor::~FrameProcessor() { stop(); }
 
-void FrameSaver::configure(const SaveConfig& cfg) {
+void FrameProcessor::configure(const ProcessConfig& cfg) {
   config = cfg;
 
-  // Create output directory when configuring (if mode is not NONE)
-  if (config.mode != SaveMode::NONE) {
+  // Create the output directory only when frames will actually be written.
+  // Skipped for NONE and for any mode with save_frames off (detection-only) —
+  // no directory should appear on disk when nothing is saved.
+  if (config.mode != ProcessMode::NONE && config.save_frames) {
     if (!createOutputDirectory()) {
-      LOG_WARN("FrameSaver",
+      LOG_WARN("FrameProcessor",
                "Failed to create output directory, falling back to current "
                "directory");
       actual_output_dir = ".";
@@ -36,26 +38,26 @@ void FrameSaver::configure(const SaveConfig& cfg) {
   }
 
   // Initialize checkerboard detector if needed
-  if (config.mode == SaveMode::CHECKERBOARD ||
-      config.mode == SaveMode::CHECKERBOARD2X2) {
+  if (config.mode == ProcessMode::CHECKERBOARD ||
+      config.mode == ProcessMode::CHECKERBOARD2X2) {
     checkerboard_detector = std::make_unique<CheckerboardDetector>(
         config.checkerboard_cols, config.checkerboard_rows);
   }
 
   // Initialize aruco detector if needed
-  if (config.mode == SaveMode::ARUCO || config.mode == SaveMode::ARUCO2X2) {
+  if (config.mode == ProcessMode::ARUCO || config.mode == ProcessMode::ARUCO2X2) {
     aruco_detector =
         std::make_unique<ArucoDetector>(config.aruco_corner_refine);
   }
 }
 
-bool FrameSaver::createOutputDirectory() {
+bool FrameProcessor::createOutputDirectory() {
   try {
     std::string trimmed_dir =
-        frame_saver_helpers::normalizeBaseDir(config.output_dir);
+        frame_processor_helpers::normalizeBaseDir(config.output_dir);
     if (trimmed_dir == "." && config.output_dir.find_first_not_of(" \t\n\r") ==
                                   std::string::npos) {
-      LOG_WARN("FrameSaver",
+      LOG_WARN("FrameProcessor",
                "Empty output directory specified, using current directory");
       actual_output_dir = ".";
       return true;
@@ -63,9 +65,9 @@ bool FrameSaver::createOutputDirectory() {
 
     std::string final_dir = trimmed_dir;
     if (config.prepend_timestamp_to_dir) {
-      final_dir = frame_saver_helpers::makeTimestampedDir(
+      final_dir = frame_processor_helpers::makeTimestampedDir(
           trimmed_dir, std::chrono::system_clock::now());
-      LOG_INFO("FrameSaver", "Timestamp prepended to directory: " +
+      LOG_INFO("FrameProcessor", "Timestamp prepended to directory: " +
                                  trimmed_dir + " -> " + final_dir);
     }
 
@@ -75,11 +77,11 @@ bool FrameSaver::createOutputDirectory() {
     // Check if directory already exists
     if (std::filesystem::exists(dir_path)) {
       if (std::filesystem::is_directory(dir_path)) {
-        LOG_INFO("FrameSaver", "Output directory already exists: " + final_dir);
+        LOG_INFO("FrameProcessor", "Output directory already exists: " + final_dir);
         actual_output_dir = final_dir;
         return true;
       } else {
-        LOG_ERROR("FrameSaver",
+        LOG_ERROR("FrameProcessor",
                   "Output path exists but is not a directory: " + final_dir);
         return false;
       }
@@ -87,34 +89,34 @@ bool FrameSaver::createOutputDirectory() {
 
     // Create the directory
     if (std::filesystem::create_directory(dir_path)) {
-      LOG_INFO("FrameSaver", "Created output directory: " + final_dir);
+      LOG_INFO("FrameProcessor", "Created output directory: " + final_dir);
 
       // Set permissions to 0755 using chmod
       if (chmod(final_dir.c_str(),
                 S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0) {
-        LOG_WARN("FrameSaver", "Failed to set directory permissions to 0755");
+        LOG_WARN("FrameProcessor", "Failed to set directory permissions to 0755");
       }
 
       actual_output_dir = final_dir;
       return true;
     } else {
-      LOG_ERROR("FrameSaver",
+      LOG_ERROR("FrameProcessor",
                 "Failed to create output directory: " + final_dir);
       return false;
     }
   } catch (const std::filesystem::filesystem_error& e) {
-    LOG_ERROR("FrameSaver",
+    LOG_ERROR("FrameProcessor",
               "Filesystem error creating directory: " + std::string(e.what()));
     return false;
   } catch (const std::exception& e) {
-    LOG_ERROR("FrameSaver",
+    LOG_ERROR("FrameProcessor",
               "Error creating output directory: " + std::string(e.what()));
     return false;
   }
 }
 
-void FrameSaver::start() {
-  if (config.mode == SaveMode::NONE) {
+void FrameProcessor::start() {
+  if (config.mode == ProcessMode::NONE) {
     enabled = false;
     return;
   }
@@ -122,7 +124,7 @@ void FrameSaver::start() {
   enabled = true;
   stop_threads = false;
   frames_checked = 0;
-  checkerboards_detected = 0;
+  frames_detected = 0;
 
   // Reset per-camera counters
   frames_saved_per_camera.clear();
@@ -139,30 +141,37 @@ void FrameSaver::start() {
     detected_for_stream.clear();
   }
 
-  if (config.mode == SaveMode::BUFFER) {
+  if (config.mode == ProcessMode::BUFFER) {
     // Reserve space for buffered frames
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
     buffered_frames.reserve(10000);
-  } else if (config.mode == SaveMode::BATCH || isDetectorMode(config.mode)) {
-    // Drop any partial batch left over from a previous session.
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex);
-      pending_batch.clear();
-    }
-    // Start writer threads
-    for (size_t i = 0; i < config.writer_threads; i++) {
-      writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
+  } else if (config.mode == ProcessMode::BATCH || isDetectorMode(config.mode)) {
+    // The writer pool exists only to persist frames. When save_frames is off we
+    // skip it entirely: a detector mode then runs detection solely to stream
+    // side-products, with no disk I/O and no per-detection frame copy.
+    if (config.save_frames) {
+      // Drop any partial batch left over from a previous session.
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        pending_batch.clear();
+      }
+      // Start writer threads
+      for (size_t i = 0; i < config.writer_threads; i++) {
+        writer_threads.emplace_back(&FrameProcessor::writerThreadFunc, this);
+      }
     }
     // Detector modes (checkerboard/aruco) run one async worker that does the
-    // CPU-heavy detection off the capture thread.
+    // CPU-heavy detection off the capture thread. It runs whether or not the
+    // detected frames are also written to disk, because it is the sole source
+    // of streamable frames (and their corners/markers) in a detector mode.
     if (isDetectorMode(config.mode)) {
-      detection_thread = std::thread(&FrameSaver::detectionWorkerFunc, this);
+      detection_thread = std::thread(&FrameProcessor::detectionWorkerFunc, this);
     }
   }
 }
 
-void FrameSaver::stop() {
+void FrameProcessor::stop() {
   enabled = false;
 
   // Detector modes: shut down the detection worker FIRST. Its drain pass
@@ -178,9 +187,11 @@ void FrameSaver::stop() {
     if (detection_thread.joinable()) detection_thread.join();
   }
 
-  if (config.mode == SaveMode::BATCH || isDetectorMode(config.mode)) {
+  if ((config.mode == ProcessMode::BATCH || isDetectorMode(config.mode)) &&
+      config.save_frames) {
     // Flush any frames still held in a partial batch (BATCH mode) so they are
-    // written before the workers exit, then signal threads to stop.
+    // written before the workers exit, then signal threads to stop. Only
+    // reached when save_frames is on, i.e. when the writer pool was started.
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
       for (auto& t : pending_batch) write_queue.push(std::move(t));
@@ -200,20 +211,22 @@ void FrameSaver::stop() {
 
   // Log detection statistics (checkerboard/aruco modes)
   if (isDetectorMode(config.mode) && frames_checked > 0) {
-    std::cout << "Detection stats: " << checkerboards_detected
+    std::cout << "Detection stats: " << frames_detected
               << " detected out of " << frames_checked << " checked ("
-              << (100.0 * checkerboards_detected / frames_checked) << "%)"
+              << (100.0 * frames_detected / frames_checked) << "%)"
               << std::endl;
   }
 }
 
-void FrameSaver::saveFrame(const FrameData& frame) {
+void FrameProcessor::saveFrame(const FrameData& frame) {
   if (!enabled) return;
 
-  if (config.mode == SaveMode::BUFFER) {
+  if (config.mode == ProcessMode::BUFFER) {
+    if (!config.save_frames) return;  // nothing to persist → nothing to buffer
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.push_back(frame);
-  } else if (config.mode == SaveMode::BATCH) {
+  } else if (config.mode == ProcessMode::BATCH) {
+    if (!config.save_frames) return;  // no writer pool started
     WriteTask task;
     task.filename = generateFilename(frame.camera_id, frame.frame_id);
     task.data = frame.data;
@@ -252,7 +265,7 @@ void FrameSaver::saveFrame(const FrameData& frame) {
   }
 }
 
-void FrameSaver::detectionWorkerFunc() {
+void FrameProcessor::detectionWorkerFunc() {
   while (true) {
     FrameData frame;
     {
@@ -278,22 +291,22 @@ void FrameSaver::detectionWorkerFunc() {
   }
 }
 
-void FrameSaver::processDetection(FrameData frame) {
+void FrameProcessor::processDetection(FrameData frame) {
   frames_checked++;
 
   std::vector<CornerSet> sets;
   bool detected = false;
   switch (config.mode) {
-    case SaveMode::CHECKERBOARD:
+    case ProcessMode::CHECKERBOARD:
       detected = detectCheckerboard(frame, sets);
       break;
-    case SaveMode::CHECKERBOARD2X2:
+    case ProcessMode::CHECKERBOARD2X2:
       detected = detectCheckerboard2x2(frame, sets);
       break;
-    case SaveMode::ARUCO:
+    case ProcessMode::ARUCO:
       detected = detectAruco(frame, sets);
       break;
-    case SaveMode::ARUCO2X2:
+    case ProcessMode::ARUCO2X2:
       detected = detectAruco2x2(frame, sets);
       break;
     default:
@@ -301,19 +314,26 @@ void FrameSaver::processDetection(FrameData frame) {
   }
 
   if (detected) {
-    checkerboards_detected++;
+    frames_detected++;
 
-    WriteTask task;
-    task.filename = generateFilename(frame.camera_id, frame.frame_id);
-    task.data = frame.data;  // frame is moved into the stream slot below
-    task.camera_id = frame.camera_id;
-    task.frame_id = frame.frame_id;
+    // Persist the detected frame only when saving is enabled. When it is off we
+    // skip building the WriteTask entirely — that avoids copying the multi-MB
+    // frame payload into the write queue on every detection, which is the main
+    // win of the no-save detection pipeline (the frame is still moved once into
+    // the streaming slot below).
+    if (config.save_frames) {
+      WriteTask task;
+      task.filename = generateFilename(frame.camera_id, frame.frame_id);
+      task.data = frame.data;  // frame is moved into the stream slot below
+      task.camera_id = frame.camera_id;
+      task.frame_id = frame.frame_id;
 
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex);
-      write_queue.push(std::move(task));
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        write_queue.push(std::move(task));
+      }
+      queue_cv.notify_one();
     }
-    queue_cv.notify_one();
   }
 
   // Publish the processed frame plus its corners (possibly empty) for the
@@ -330,12 +350,12 @@ void FrameSaver::processDetection(FrameData frame) {
   }
 }
 
-bool FrameSaver::detectCheckerboard(const FrameData& frame,
+bool FrameProcessor::detectCheckerboard(const FrameData& frame,
                                     std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
   out_sets.clear();
 
-  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+  std::vector<uint8_t> grayscale_data = frame_processor_helpers::extractYFromYUV420(
       frame, config.checkerboard_full_res_detection);
   int out_width =
       config.checkerboard_full_res_detection ? frame.width : frame.width / 2;
@@ -367,17 +387,17 @@ bool FrameSaver::detectCheckerboard(const FrameData& frame,
   auto total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
           .count();
-  LOG_INFO("FrameSaver", "Checkerboard detected: " + std::to_string(detected) +
+  LOG_INFO("FrameProcessor", "Checkerboard detected: " + std::to_string(detected) +
                              " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 
-bool FrameSaver::detectCheckerboard2x2(const FrameData& frame,
+bool FrameProcessor::detectCheckerboard2x2(const FrameData& frame,
                                        std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
   out_sets.clear();
 
-  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+  std::vector<uint8_t> grayscale_data = frame_processor_helpers::extractYFromYUV420(
       frame, config.checkerboard_full_res_detection);
   const int full_width = config.checkerboard_full_res_detection
                              ? static_cast<int>(frame.width)
@@ -453,18 +473,18 @@ bool FrameSaver::detectCheckerboard2x2(const FrameData& frame,
   auto total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
           .count();
-  LOG_INFO("FrameSaver",
+  LOG_INFO("FrameProcessor",
            "Checkerboard2x2 detected: " + std::to_string(detected) +
                " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 
-bool FrameSaver::detectAruco(const FrameData& frame,
+bool FrameProcessor::detectAruco(const FrameData& frame,
                              std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
   out_sets.clear();
 
-  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+  std::vector<uint8_t> grayscale_data = frame_processor_helpers::extractYFromYUV420(
       frame, config.aruco_full_res_detection);
   int out_width =
       config.aruco_full_res_detection ? frame.width : frame.width / 2;
@@ -493,17 +513,17 @@ bool FrameSaver::detectAruco(const FrameData& frame,
   auto total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
           .count();
-  LOG_INFO("FrameSaver", "Aruco markers: " + std::to_string(markers.size()) +
+  LOG_INFO("FrameProcessor", "Aruco markers: " + std::to_string(markers.size()) +
                              " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 
-bool FrameSaver::detectAruco2x2(const FrameData& frame,
+bool FrameProcessor::detectAruco2x2(const FrameData& frame,
                                 std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
   out_sets.clear();
 
-  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+  std::vector<uint8_t> grayscale_data = frame_processor_helpers::extractYFromYUV420(
       frame, config.aruco_full_res_detection);
   const int full_width = config.aruco_full_res_detection
                              ? static_cast<int>(frame.width)
@@ -581,14 +601,14 @@ bool FrameSaver::detectAruco2x2(const FrameData& frame,
   auto total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
           .count();
-  LOG_INFO("FrameSaver",
+  LOG_INFO("FrameProcessor",
            "Aruco2x2 markers: " + std::to_string(out_sets.size()) +
                " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }
 
-void FrameSaver::flushBufferedFrames() {
-  if (config.mode != SaveMode::BUFFER) return;
+void FrameProcessor::flushBufferedFrames() {
+  if (config.mode != ProcessMode::BUFFER || !config.save_frames) return;
 
   std::lock_guard<std::mutex> lock(buffer_mutex);
 
@@ -613,7 +633,7 @@ void FrameSaver::flushBufferedFrames() {
   std::cout << "Finished writing buffered frames" << std::endl;
 }
 
-void FrameSaver::writerThreadFunc() {
+void FrameProcessor::writerThreadFunc() {
   while (true) {
     std::unique_lock<std::mutex> lock(queue_mutex);
     queue_cv.wait(lock,
@@ -654,8 +674,8 @@ void FrameSaver::writerThreadFunc() {
   }
 }
 
-std::string FrameSaver::generateFilename(uint32_t camera_id,
+std::string FrameProcessor::generateFilename(uint32_t camera_id,
                                          uint32_t frame_id) {
-  return frame_saver_helpers::makeFilename(actual_output_dir, camera_id,
+  return frame_processor_helpers::makeFilename(actual_output_dir, camera_id,
                                            frame_id);
 }

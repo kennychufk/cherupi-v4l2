@@ -124,8 +124,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/websocket_server.cpp
         src/camera.cpp
         src/camera_manager.cpp
-        src/frame_saver.cpp
-        src/frame_saver_helpers.cpp
+        src/frame_processor.cpp
+        src/frame_processor_helpers.cpp
         src/stream_manager.cpp
         src/rate_controller.cpp
         src/command_parser.cpp
@@ -139,8 +139,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/websocket_server.hpp
         src/camera.hpp
         src/camera_manager.hpp
-        src/frame_saver.hpp
-        src/frame_saver_helpers.hpp
+        src/frame_processor.hpp
+        src/frame_processor_helpers.hpp
         src/stream_manager.hpp
         src/rate_controller.hpp
         src/command_parser.hpp
@@ -184,7 +184,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
     )
 endif()
 
-# Standalone YUV420 converter for frames saved by FrameSaver — no libcamera or
+# Standalone YUV420 converter for frames saved by FrameProcessor — no libcamera or
 # uWebSockets dependency, so it also builds under -DCHERUPI_TOOLS_ONLY=ON.
 add_executable(yuv420_convert tools/yuv420_convert.cpp)
 target_compile_options(yuv420_convert PRIVATE -O2)

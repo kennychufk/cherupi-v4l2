@@ -9,7 +9,7 @@
 #include <thread>
 
 #include "camera_manager.hpp"
-#include "frame_saver.hpp"
+#include "frame_processor.hpp"
 #include "frame_sink.hpp"
 #include "rate_controller.hpp"
 #include "types.hpp"
@@ -47,7 +47,7 @@ class StreamManager {
   // responsive without choking binary throughput.
   static constexpr size_t SOFT_BUFFER_LIMIT = 512 * 1024;
 
-  StreamManager(CameraManager* mgr, FrameSaver* saver);
+  StreamManager(CameraManager* mgr, FrameProcessor* saver);
   ~StreamManager();
 
   // Connect/disconnect a FrameSink (owned by the caller).
@@ -94,7 +94,7 @@ class StreamManager {
   static constexpr auto CHUNK_TIMEOUT = std::chrono::seconds(5);
 
   CameraManager* camera_manager;
-  FrameSaver* frame_saver;
+  FrameProcessor* frame_processor;
 
   // Streaming state
   std::set<uint32_t> streaming_cameras;

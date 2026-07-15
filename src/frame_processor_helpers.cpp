@@ -1,4 +1,4 @@
-#include "frame_saver_helpers.hpp"
+#include "frame_processor_helpers.hpp"
 
 #include <cstring>
 #include <ctime>
@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <sstream>
 
-namespace frame_saver_helpers {
+namespace frame_processor_helpers {
 
 std::string normalizeBaseDir(const std::string& base) {
   std::string trimmed = base;
@@ -87,4 +87,4 @@ std::vector<uint8_t> extractYFromYUV420(const FrameData& frame, bool full_res) {
   return grayscale_data;
 }
 
-}  // namespace frame_saver_helpers
+}  // namespace frame_processor_helpers

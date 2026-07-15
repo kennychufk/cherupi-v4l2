@@ -147,7 +147,7 @@ def _reset_server_state(c: CherupiClient) -> None:
     """Drive the server back to IDLE so the next test starts fresh.
 
     Walk the state machine backwards: set_header_only(false) → stop_cameras
-    (if RUNNING) → unconfigure (if CONFIGURED) → set_save_mode(none). Each
+    (if RUNNING) → unconfigure (if CONFIGURED) → set_process_mode(none). Each
     step may fail legitimately (e.g. stop_cameras is only valid in RUNNING),
     so we swallow CommandError at each step — the intent is best-effort
     cleanup, not state assertion.
@@ -172,7 +172,7 @@ def _reset_server_state(c: CherupiClient) -> None:
     except Exception:
         pass
     try:
-        c.set_save_mode("none")
+        c.set_process_mode("none")
     except Exception:
         pass
     # Let the sensor pipeline fully release before the next acquire.

@@ -11,9 +11,9 @@ using json = nlohmann::json;
 
 WebSocketServer::WebSocketServer() {
   camera_manager = std::make_unique<CameraManager>();
-  frame_saver = std::make_unique<FrameSaver>();
+  frame_processor = std::make_unique<FrameProcessor>();
   stream_manager =
-      std::make_unique<StreamManager>(camera_manager.get(), frame_saver.get());
+      std::make_unique<StreamManager>(camera_manager.get(), frame_processor.get());
 
   // Set up the callback for frame notifications
   camera_manager->setStreamManagerNotify([this]() {
@@ -107,8 +107,8 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::Unconfigure:
                       handleUnconfigure(ws);
                       break;
-                    case command_parser::CommandKind::SetSaveMode:
-                      handleSetSaveMode(ws, cmd.message);
+                    case command_parser::CommandKind::SetProcessMode:
+                      handleSetProcessMode(ws, cmd.message);
                       break;
                     case command_parser::CommandKind::StartCameras:
                       handleStartCameras(ws);
@@ -352,19 +352,19 @@ void WebSocketServer::handleUnconfigure(
   sendStatus(ws, "Unconfigured: returned to IDLE");
 }
 
-void WebSocketServer::handleSetSaveMode(uWS::WebSocket<false, true, int>* ws,
-                                        const json& msg) {
-  auto config = command_parser::buildSaveConfig(msg);
+void WebSocketServer::handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
+                                           const json& msg) {
+  auto config = command_parser::buildProcessConfig(msg);
   if (!config) {
     std::string mode = msg.value("mode", std::string("(missing)"));
-    sendError(ws, "Invalid save mode: " + mode);
+    sendError(ws, "Invalid process mode: " + mode);
     return;
   }
 
-  frame_saver->configure(*config);
+  frame_processor->configure(*config);
   std::string mode = msg.value("mode", std::string());
-  LOG_INFO("WebSocketServer", "Save mode configured: " + mode);
-  sendStatus(ws, "Save mode configured: " + mode);
+  LOG_INFO("WebSocketServer", "Process mode configured: " + mode);
+  sendStatus(ws, "Process mode configured: " + mode);
 }
 
 void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
@@ -374,16 +374,17 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     return;
   }
 
-  // Start frame saver first (if not NONE mode)
-  frame_saver->start();
+  // Start frame processor first (if not NONE mode)
+  frame_processor->start();
 
-  // Set up frame callback only if saving is enabled
-  if (frame_saver->getMode() != SaveMode::NONE) {
-    LOG_INFO("WebSocketServer", "Frame saving enabled, setting up callback");
+  // Set up the frame callback whenever any processing is active (detection
+  // and/or saving); the processor itself decides what to do per frame.
+  if (frame_processor->getMode() != ProcessMode::NONE) {
+    LOG_INFO("WebSocketServer", "Frame processing enabled, setting up callback");
     camera_manager->setFrameCallback(
-        [this](const FrameData& frame) { frame_saver->saveFrame(frame); });
+        [this](const FrameData& frame) { frame_processor->saveFrame(frame); });
   } else {
-    LOG_INFO("WebSocketServer", "Frame saving disabled, no callback set");
+    LOG_INFO("WebSocketServer", "Frame processing disabled, no callback set");
     camera_manager->setFrameCallback(nullptr);
   }
 
@@ -392,7 +393,7 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     system_state = CameraState::RUNNING;
     sendStatus(ws, "All cameras started successfully");
   } else {
-    frame_saver->stop();
+    frame_processor->stop();
     sendError(ws, "Failed to start cameras");
   }
 }
@@ -446,21 +447,21 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
   camera_manager->stopAll();
 
   // Flush buffered frames if in buffer mode
-  if (frame_saver->getMode() == SaveMode::BUFFER) {
+  if (frame_processor->getMode() == ProcessMode::BUFFER) {
     LOG_INFO("WebSocketServer", "Flushing buffered frames");
-    frame_saver->flushBufferedFrames();
+    frame_processor->flushBufferedFrames();
   }
 
-  // Stop frame saver
-  frame_saver->stop();
+  // Stop frame processor
+  frame_processor->stop();
 
   system_state = CameraState::CONFIGURED;
 
   json status;
   status["type"] = Protocol::TYPE_STATUS;
   status["message"] = "All cameras stopped";
-  status["frames_saved"] = frame_saver->getFramesSaved();
-  status["bytes_written"] = frame_saver->getBytesWritten();
+  status["frames_saved"] = frame_processor->getFramesSaved();
+  status["bytes_written"] = frame_processor->getBytesWritten();
 
   ws->send(status.dump(), uWS::OpCode::TEXT);
 }
@@ -471,9 +472,9 @@ void WebSocketServer::handleResetFrameCounts(
 
   camera_manager->resetFrameCounts();
 
-  // Also reset frame saver counts
-  if (frame_saver) {
-    frame_saver->resetFramesSavedCounts();
+  // Also reset frame processor counts
+  if (frame_processor) {
+    frame_processor->resetFramesSavedCounts();
   }
 
   sendStatus(ws, "Frame counts reset for all cameras");
@@ -648,13 +649,13 @@ void WebSocketServer::cleanupConnection() {
   }
   active_sink.reset();
 
-  // Note: We do NOT stop cameras here to allow frame saving to continue
+  // Note: We do NOT stop cameras here to allow frame processing to continue
   // Cameras will only be stopped by explicit stop_cameras command
 
   // Log current state
   if (system_state == CameraState::RUNNING) {
     LOG_INFO("WebSocketServer",
-             "Cameras still running for potential frame saving");
+             "Cameras still running for potential frame processing");
   }
 
   // Reset client flag
