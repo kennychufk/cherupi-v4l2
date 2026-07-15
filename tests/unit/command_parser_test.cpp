@@ -53,6 +53,8 @@ TEST(CommandParserTest, SaveModeLookup) {
             SaveMode::CHECKERBOARD);
   EXPECT_EQ(command_parser::parseSaveMode("checkerboard2x2"),
             SaveMode::CHECKERBOARD2X2);
+  EXPECT_EQ(command_parser::parseSaveMode("aruco"), SaveMode::ARUCO);
+  EXPECT_EQ(command_parser::parseSaveMode("aruco2x2"), SaveMode::ARUCO2X2);
   EXPECT_EQ(command_parser::parseSaveMode("bogus"), std::nullopt);
 }
 
@@ -141,6 +143,34 @@ TEST(CommandParserTest, BuildSaveConfigAppliesMode) {
   ASSERT_TRUE(cfg.has_value());
   EXPECT_EQ(cfg->mode, SaveMode::BATCH);
   EXPECT_EQ(cfg->batch_size, 7u);
+}
+
+TEST(CommandParserTest, BuildSaveConfigAppliesArucoParams) {
+  auto msg = nlohmann::json::parse(R"({
+    "mode":"aruco2x2",
+    "params":{
+      "aruco_full_res_detection":true,
+      "aruco_num_threads":2,
+      "aruco_corner_refine":true
+    }
+  })");
+  auto cfg = command_parser::buildSaveConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_EQ(cfg->mode, SaveMode::ARUCO2X2);
+  EXPECT_TRUE(cfg->aruco_full_res_detection);
+  EXPECT_EQ(cfg->aruco_num_threads, 2);
+  EXPECT_TRUE(cfg->aruco_corner_refine);
+}
+
+TEST(CommandParserTest, BuildSaveConfigArucoDefaults) {
+  auto msg = nlohmann::json::parse(R"({"mode":"aruco"})");
+  auto cfg = command_parser::buildSaveConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_EQ(cfg->mode, SaveMode::ARUCO);
+  // Unspecified params keep their defaults.
+  EXPECT_FALSE(cfg->aruco_full_res_detection);
+  EXPECT_EQ(cfg->aruco_num_threads, 4);
+  EXPECT_FALSE(cfg->aruco_corner_refine);
 }
 
 TEST(CommandParserTest, BuildSaveConfigRejectsUnknownMode) {

@@ -10,6 +10,9 @@
 #include <thread>
 #include <vector>
 
+#include <opencv2/core.hpp>
+
+#include "aruco_test_utils.hpp"
 #include "frame_saver.hpp"
 #include "types.hpp"
 
@@ -353,6 +356,77 @@ TEST_F(FrameSaverTempDir, Checkerboard2x2HonoursThreadPoolSize) {
 
   EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);
   EXPECT_TRUE(fs::exists(dir / "cam3-7.yuv"));
+}
+
+// Synthesize a YUV420 frame with a DICT_APRILTAG_16h5 marker (`id`) rendered
+// into the top-left quadrant of the Y plane (with a white quiet zone). Frame is
+// `canvas*2` square so full-res 2x2 splitting puts the marker in one quadrant.
+static FrameData makeYuvFrameWithMarker(uint32_t camera_id, uint32_t frame_id,
+                                        int id, int side = 80, int canvas = 160) {
+  cv::Mat quad = aruco_test_utils::makeMarkerCanvas(id, side, canvas);
+
+  FrameData frame;
+  frame.camera_id = camera_id;
+  frame.frame_id = frame_id;
+  frame.width = static_cast<uint32_t>(canvas) * 2;
+  frame.height = static_cast<uint32_t>(canvas) * 2;
+  frame.bytes_per_line = frame.width;
+  frame.pixel_format = 0x32315559;  // 'YU12'
+  const size_t y_bytes = static_cast<size_t>(frame.width) * frame.height;
+  frame.data.assign(y_bytes + y_bytes / 2, 128);  // Y + UV, UV mid-gray
+  for (int y = 0; y < canvas; ++y) {
+    std::memcpy(frame.data.data() + static_cast<size_t>(y) * frame.width,
+                quad.ptr<uint8_t>(y), static_cast<size_t>(canvas));
+  }
+  return frame;
+}
+
+TEST_F(FrameSaverTempDir, Aruco2x2SavesAndPublishesMarker) {
+  const int kId = 19;
+  FrameData frame =
+      makeYuvFrameWithMarker(/*camera_id=*/1, /*frame_id=*/88, kId);
+
+  SaveConfig cfg;
+  cfg.mode = SaveMode::ARUCO2X2;
+  cfg.output_dir = dir.string();
+  cfg.aruco_full_res_detection = true;
+  cfg.aruco_num_threads = 4;
+  cfg.writer_threads = 1;
+
+  FrameSaver saver;
+  saver.configure(cfg);
+  saver.start();
+  saver.saveFrame(frame);
+
+  // Detection is async/best-effort: wait for the worker to publish the
+  // processed frame + its markers into the streamer-facing slot.
+  FrameData got;
+  std::vector<CornerSet> sets;
+  bool ready = false;
+  for (int i = 0; i < 400 && !ready; ++i) {
+    ready = saver.takeDetectedFrameForStreaming(1, got, sets);
+    if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(ready);
+  EXPECT_EQ(got.frame_id, 88u);
+  ASSERT_EQ(sets.size(), 1u);
+  EXPECT_EQ(sets[0].set_id, 0u);       // top-left quadrant
+  EXPECT_EQ(sets[0].marker_id, kId);   // reported dictionary id
+  ASSERT_EQ(sets[0].corners.size(), 4u);
+  for (const auto& p : sets[0].corners) {
+    // Coordinates translated to full-frame Y pixels; marker sits in the
+    // top-left quadrant [0, W/2) × [0, H/2).
+    EXPECT_GT(p.x, 0.0f);
+    EXPECT_LT(p.x, static_cast<float>(frame.width) / 2.0f);
+    EXPECT_GT(p.y, 0.0f);
+    EXPECT_LT(p.y, static_cast<float>(frame.height) / 2.0f);
+  }
+
+  saver.stop();
+  EXPECT_EQ(saver.getFramesChecked(), 1u);
+  EXPECT_EQ(saver.getCheckerboardsDetected(), 1u);  // generic detection counter
+  EXPECT_EQ(saver.getFramesSaved(), 1u);
+  EXPECT_TRUE(fs::exists(dir / "cam1-88.yuv"));
 }
 
 TEST(FrameSaverTimestampDir, PrependTimestampProducesPrefixedDirectoryName) {

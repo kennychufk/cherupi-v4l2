@@ -141,7 +141,7 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 
 **Request**
 ```json
-{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2", "params": {
+{"cmd": "set_save_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
   "output_dir": ".",
   "prepend_timestamp_to_dir": false,
   "batch_size": 10,
@@ -149,7 +149,10 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
   "checkerboard_rows": 8,
   "checkerboard_cols": 11,
   "checkerboard_full_res_detection": false,
-  "checkerboard_num_threads": 4
+  "checkerboard_num_threads": 4,
+  "aruco_full_res_detection": false,
+  "aruco_num_threads": 4,
+  "aruco_corner_refine": false
 }}
 ```
 
@@ -162,10 +165,12 @@ Configure the optional on-device frame saver. Can be called in any state; takes 
 | `batch` | Multi-threaded writer; `writer_threads` workers, flushes every `batch_size` frames |
 | `checkerboard` | Only save frames in which an OpenCV checkerboard is detected |
 | `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and save the whole frame if **any** quadrant contains an OpenCV checkerboard. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
+| `aruco` | Only save frames in which at least one ArUco/AprilTag marker is detected (`cv::aruco::detectMarkers`). The dictionary is hard-coded to `DICT_APRILTAG_16h5`. Detection runs on the Y plane, full-res or 2x2-subsampled per `aruco_full_res_detection`. Each detected marker's **id** and **4 corners** are reported to the streaming client (§5.4.2). |
+| `aruco2x2` | Split each frame's Y plane into 4 equal quadrants (same construction as `aruco`) and save the whole frame if **any** quadrant contains a marker. The 4 detections run in parallel, batched by `aruco_num_threads` (clamped to `[1, 4]`). A marker straddling a quadrant boundary may be reported by more than one quadrant, or missed if it lands in no single quadrant intact. |
 
-`checkerboard_*` fields apply to `checkerboard` and `checkerboard2x2` modes. If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
+`checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`.
 
-In both checkerboard modes detection runs **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result. See §5.4 and §5.7.
+All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`) run detection **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result. See §5.4 and §5.7.
 
 **Response** → `status` (`"Save mode configured: <mode>"`) or `error` on invalid mode.
 
@@ -395,7 +400,7 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | Offset | Field | Type | Value |
 |---|---|---|---|
 | 0 | `magic` | `uint32` | `0x4348554E` (`'CHUN'`) |
-| 4 | `version` | `uint32` | `4` |
+| 4 | `version` | `uint32` | `6` |
 
 ### 5.3 `ChunkHeader` (68 bytes, follows the start marker in the same message)
 
@@ -413,23 +418,35 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 36 | `frames_saved` | `uint32` | Saver's count for this camera at send time |
 | 40 | `timestamp_us` | `uint64` | Monotonic hardware capture timestamp in µs (from libcamera `FrameMetadata::timestamp / 1000`). Diff consecutive values for the same `camera_id` to compute actual inter-frame interval (real fps). `0` if unavailable. |
 | 48 | `frame_duration_us` | `uint32` | Actual frame duration in µs as reported by the IPA/ISP in libcamera `FrameDuration` metadata. Reflects real per-frame cadence including any multi-camera ISP scheduling overhead. `0` if the metadata was not present. |
-| 52 | `corner_block_size` | `uint32` | Size in bytes of the `CornerBlock` that follows this header in the same WS message. `0` when no corner block is present. |
-| 56 | `num_corner_sets` | `uint16` | Number of `CornerSetHeader` entries packed in the `CornerBlock`. `0` when the block is absent. For `checkerboard` mode this is `0` or `1`; for `checkerboard2x2` it is `0..4`. |
+| 52 | `corner_block_size` | `uint32` | Size in bytes of the detection block (§5.4) that follows this header in the same WS message. `0` when no block is present. |
+| 56 | `num_corner_sets` | `uint16` | Number of records packed in the detection block — `CornerSetHeader` when `detection_kind = 1`, `MarkerSetHeader` when `detection_kind = 2`. `0` when the block is absent. For `checkerboard` this is `0` or `1`; for `checkerboard2x2`, `0..4`; for `aruco` / `aruco2x2`, `0..N` markers. |
 | 58 | `reserved` | `uint16` | Reserved for future use; always `0`. |
 | 60 | `lens_position` | `float` | Focus distance the libcamera IPA actually applied to this frame, in dioptres (reciprocal metres; `0.0` = infinity). Reported per-frame in manual, auto and continuous AF — the EXIF-style focus record. **`NaN`** when libcamera reported no `LensPosition` for the frame (e.g. a sensor module with no focuser). Check with `isnan` before using; do not treat `0.0` as "unavailable". |
 | 64 | `af_state` | `uint8` | libcamera `AfState` for this frame: `0`=Idle, `1`=Scanning, `2`=Focused, `3`=Failed. **`0xFF`** when no `AfState` was reported. Use to tell whether continuous/auto AF had settled (`2`) when `lens_position` was sampled. |
-| 65 | `reserved2` | `uint8[3]` | Padding; always `0`. |
+| 65 | `detection_kind` | `uint8` | Classifies the detection block that follows this header (and how to parse each of its `num_corner_sets` records): `0`=none (no detector ran; no block), `1`=checkerboard (records are `CornerSetHeader`, §5.4.1), `2`=aruco (records are `MarkerSetHeader`, §5.4.2). Was part of `reserved2` (always `0`) before v6, so `0` still means "no detection block". |
+| 66 | `reserved2` | `uint8[2]` | Padding; always `0`. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
 
-### 5.4 `CornerBlock` (variable, present only when `num_corner_sets > 0`)
+### 5.4 Detection block (variable, present only when `num_corner_sets > 0`)
 
-Immediately follows `ChunkHeader` in the same WebSocket message. Carries the checkerboard corner coordinates produced by the on-device detector when the save mode is `checkerboard` or `checkerboard2x2`. The block is `num_corner_sets` copies of `CornerSetHeader` plus their corner coordinates, packed back-to-back:
+Immediately follows `ChunkHeader` in the same WebSocket message. Carries the results produced by the on-device detector in a detector save mode. The `detection_kind` field of `ChunkHeader` (offset 65) selects the per-record format:
+
+- `detection_kind = 1` (checkerboard, §5.4.1) — records are `CornerSetHeader`.
+- `detection_kind = 2` (aruco, §5.4.2) — records are `MarkerSetHeader`.
+
+In every case the block is `num_corner_sets` records packed back-to-back, each record being a fixed header followed by `num_corners × { float x, float y }` corner coordinates. Corner coordinates are little-endian IEEE-754, `8` bytes each, in **full-frame Y-plane pixel space** regardless of the saver's `*_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
+
+In all four detector modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found nothing, `num_corner_sets = 0`, `corner_block_size = 0`, and no records follow (`detection_kind` still reports which detector ran). When it found one or more, the block carries them. In the non-detector save modes no detector runs and the block is always absent (`detection_kind = 0`, `num_corner_sets = 0`).
+
+#### 5.4.1 `CornerSetHeader` (checkerboard; `detection_kind = 1`)
+
+One record per detected board:
 
 ```
-CornerSetHeader (4 bytes)        // set 0
+CornerSetHeader (4 bytes)          // set 0
 num_corners × { float x, float y } // set 0 corners
-CornerSetHeader (4 bytes)        // set 1
+CornerSetHeader (4 bytes)          // set 1
 num_corners × { float x, float y } // set 1 corners
 …
 ```
@@ -439,12 +456,31 @@ num_corners × { float x, float y } // set 1 corners
 | Offset | Field | Type | Notes |
 |---|---|---|---|
 | 0 | `set_id` | `uint8` | `0` for `checkerboard` mode (whole frame). For `checkerboard2x2`, `row * 2 + col` (0..3), where `row` and `col` are `0` for top/left and `1` for bottom/right. |
-| 1 | `flags` | `uint8` | Bit 0 set ⇒ coordinates are in full-frame Y-plane pixel space (always `1` in v4). Other bits reserved. |
+| 1 | `flags` | `uint8` | Bit 0 set ⇒ coordinates are in full-frame Y-plane pixel space (always `1`). Other bits reserved. |
 | 2 | `num_corners` | `uint16` | `= checkerboard_rows × checkerboard_cols` (e.g. `88` for the default 11×8). |
 
-Corner coordinates follow the header as `num_corners × { float x; float y; }` (little-endian IEEE-754), each `8` bytes, in full-frame Y-plane pixel space regardless of the saver's `checkerboard_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
+#### 5.4.2 `MarkerSetHeader` (aruco; `detection_kind = 2`)
 
-In `checkerboard` / `checkerboard2x2` modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found no board, `num_corner_sets = 0` and `corner_block_size = 0` (no corner bytes follow); when it found one or more, the block carries them. In every other save mode no detector runs and the block is always absent (`num_corner_sets = 0`).
+One record per detected ArUco/AprilTag marker (`aruco` / `aruco2x2` modes; dictionary `DICT_APRILTAG_16h5`):
+
+```
+MarkerSetHeader (8 bytes)          // marker 0
+4 × { float x, float y }           // marker 0 corners (32 bytes)
+MarkerSetHeader (8 bytes)          // marker 1
+4 × { float x, float y }           // marker 1 corners
+…
+```
+
+`MarkerSetHeader` layout (8 bytes):
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `marker_id` | `int32` | The detected marker's id in `DICT_APRILTAG_16h5` (0..29). |
+| 4 | `quadrant` | `uint8` | `0` for `aruco` mode (whole frame). For `aruco2x2`, `row * 2 + col` (0..3) — the sub-frame the marker was detected in. The same physical marker may appear in more than one quadrant record. |
+| 5 | `flags` | `uint8` | Bit 0 set ⇒ coordinates are in full-frame Y-plane pixel space (always `1`). Other bits reserved. |
+| 6 | `num_corners` | `uint16` | Always `4`. |
+
+The 4 corners follow the header in the dictionary's canonical order (clockwise from the marker's top-left). `num_corner_sets` is the number of marker records (one per detected marker), so a single physical marker contributes exactly one record in `aruco`, and up to four across quadrants in `aruco2x2`.
 
 ### 5.5 `ChunkData` (16 bytes header, followed by `chunk_size` payload bytes in the same WS message)
 
@@ -470,7 +506,7 @@ The server monitors `ws.getBufferedAmount()` with hysteresis (enter at 512 KiB, 
 
 Header-only mode bypasses the payload path entirely and is unaffected by data backpressure.
 
-**Checkerboard modes.** In `checkerboard` / `checkerboard2x2` an additional gate sits in front of streaming: the frame stream is fed exclusively by the best-effort detector (§4.5). Frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector), and only a frame the detector has finished processing — regardless of whether a board was found — is ever eligible to send. A processed frame may still be dropped afterwards by ordinary backpressure. The net effect is that the streamed frame rate in these modes is bounded by **detector throughput**, not capture rate, so `frame_id` gaps are correspondingly larger and expected.
+**Detector modes.** In `checkerboard` / `checkerboard2x2` / `aruco` / `aruco2x2` an additional gate sits in front of streaming: the frame stream is fed exclusively by the best-effort detector (§4.5). Frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector), and only a frame the detector has finished processing — regardless of whether anything was found — is ever eligible to send. A processed frame may still be dropped afterwards by ordinary backpressure. The net effect is that the streamed frame rate in these modes is bounded by **detector throughput**, not capture rate, so `frame_id` gaps are correspondingly larger and expected.
 
 ## 6. Typical Session
 
@@ -515,7 +551,7 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 
 ## 8. Versioning
 
-The binary protocol version is carried in `ChunkStartMarker.version` (currently `5`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
+The binary protocol version is carried in `ChunkStartMarker.version` (currently `6`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
 
 ### Version history
 
@@ -525,3 +561,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `3` | `ChunkHeader` extended to 52 bytes: added `timestamp_us` (uint64, offset 40) and `frame_duration_us` (uint32, offset 48). `get_frame_duration_limits` response gains `num_cameras` field. |
 | `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |
 | `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. Companion text command `get_lens_position_limits` / `lens_position_limits` response added (§4.16) to expose the hardware `LensPosition` range; text-only, no binary change. |
+| `6` | `ChunkHeader` stays 68 bytes: the first `reserved2` byte (offset 65) became `detection_kind` (uint8: 0=none, 1=checkerboard, 2=aruco), with `reserved2` shrinking to uint8[2] at offset 66. New `aruco` / `aruco2x2` save modes added (§4.5); when active, the detection block that follows the header uses the new `MarkerSetHeader` record layout (§5.4.2), carrying each marker's `id` (`int32`) and 4 corners. The checkerboard block format (§5.4.1) is unchanged. Old (`detection_kind = 0`) still means "no detection block". |

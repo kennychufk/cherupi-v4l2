@@ -125,6 +125,60 @@ def test_save_mode_checkerboard2x2_finds_nothing(
     client.stop_cameras()  # should not raise
 
 
+def test_save_mode_aruco_finds_nothing(
+    client: CherupiClient,
+    discovered_cameras: list[dict],
+    tmp_output_dir: Path,
+) -> None:
+    """ARUCO with no marker visible — just asserts the mode runs cleanly.
+
+    Mirrors the CHECKERBOARD test. Dictionary is hard-coded to
+    DICT_APRILTAG_16h5. We cannot assume a physical marker is in front of the
+    camera, so we only verify the command is accepted (including the aruco-
+    specific params) and the run completes without errors.
+    """
+    out = tmp_output_dir / "aruco"
+    out.mkdir()
+    client.configure(width=1456, height=1088)
+    client.set_save_mode(
+        "aruco",
+        output_dir=str(out),
+        aruco_full_res_detection=False,
+        aruco_corner_refine=False,
+    )
+    client.start_cameras()
+    client.start_stream(discovered_cameras[0]["id"])
+    time.sleep(2.0)
+    client.stop_stream(discovered_cameras[0]["id"])
+    client.stop_cameras()  # should not raise
+
+
+def test_save_mode_aruco2x2_finds_nothing(
+    client: CherupiClient,
+    discovered_cameras: list[dict],
+    tmp_output_dir: Path,
+) -> None:
+    """ARUCO2X2 with no marker visible — just asserts the mode runs cleanly.
+
+    Mirrors the ARUCO test above; splits each frame into 4 quadrants and
+    detects per-quadrant in parallel (batched by aruco_num_threads).
+    """
+    out = tmp_output_dir / "aruco2x2"
+    out.mkdir()
+    client.configure(width=1456, height=1088)
+    client.set_save_mode(
+        "aruco2x2",
+        output_dir=str(out),
+        aruco_full_res_detection=False,
+        aruco_num_threads=4,
+    )
+    client.start_cameras()
+    client.start_stream(discovered_cameras[0]["id"])
+    time.sleep(2.0)
+    client.stop_stream(discovered_cameras[0]["id"])
+    client.stop_cameras()  # should not raise
+
+
 def test_save_mode_none(
     client: CherupiClient,
     discovered_cameras: list[dict],
@@ -151,7 +205,16 @@ def test_save_mode_none(
 
 
 @pytest.mark.parametrize(
-    "mode", ["none", "buffer", "batch", "checkerboard", "checkerboard2x2"]
+    "mode",
+    [
+        "none",
+        "buffer",
+        "batch",
+        "checkerboard",
+        "checkerboard2x2",
+        "aruco",
+        "aruco2x2",
+    ],
 )
 def test_set_save_mode_accepted_in_any_state(
     client: CherupiClient, mode: str, tmp_output_dir: Path

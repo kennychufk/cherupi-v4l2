@@ -63,6 +63,8 @@ std::optional<SaveMode> parseSaveMode(const std::string& mode) {
   if (mode == "batch") return SaveMode::BATCH;
   if (mode == "checkerboard") return SaveMode::CHECKERBOARD;
   if (mode == "checkerboard2x2") return SaveMode::CHECKERBOARD2X2;
+  if (mode == "aruco") return SaveMode::ARUCO;
+  if (mode == "aruco2x2") return SaveMode::ARUCO2X2;
   return std::nullopt;
 }
 
@@ -136,6 +138,12 @@ std::optional<SaveConfig> buildSaveConfig(const json& message) {
           params["checkerboard_full_res_detection"];
     if (params.contains("checkerboard_num_threads"))
       config.checkerboard_num_threads = params["checkerboard_num_threads"];
+    if (params.contains("aruco_full_res_detection"))
+      config.aruco_full_res_detection = params["aruco_full_res_detection"];
+    if (params.contains("aruco_num_threads"))
+      config.aruco_num_threads = params["aruco_num_threads"];
+    if (params.contains("aruco_corner_refine"))
+      config.aruco_corner_refine = params["aruco_corner_refine"];
   }
 
   return config;

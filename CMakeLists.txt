@@ -130,6 +130,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/rate_controller.cpp
         src/command_parser.cpp
         src/checkerboard_detector.cpp
+        src/aruco_detector.cpp
     )
 
     # Header files
@@ -146,6 +147,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/frame_sink.hpp
         src/uws_frame_sink.hpp
         src/checkerboard_detector.h
+        src/aruco_detector.h
     )
 
     # Create executable

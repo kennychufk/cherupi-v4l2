@@ -73,7 +73,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 5;
+  uint32_t version = 6;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -97,14 +97,17 @@ struct ChunkHeader {
   //   0 if the metadata was not available.
   uint64_t timestamp_us;
   uint32_t frame_duration_us;
-  // v4 additions: variable-size checkerboard corner block. When the save mode
-  // is `checkerboard` or `checkerboard2x2` and detection found at least one
-  // board, the same WS message that carries this ChunkHeader also carries a
-  // CornerBlock immediately after. The block is laid out as
-  // `num_corner_sets × (CornerSetHeader + num_corners × {float x, float y})`.
-  // Coordinates are in full-frame Y-plane pixels regardless of the saver's
-  // internal `checkerboard_full_res_detection` setting or 2x2 quadrant split.
-  // Both fields are 0 when no corner block follows.
+  // v4 additions: variable-size detection block. When the save mode is a
+  // detector mode (`checkerboard`/`checkerboard2x2` from v4, `aruco`/`aruco2x2`
+  // from v6) and detection found at least one board/marker, the same WS message
+  // that carries this ChunkHeader also carries the block immediately after.
+  // `num_corner_sets` counts the records in the block (one per detected board,
+  // or one per detected ArUco marker); `corner_block_size` is its total byte
+  // length. The per-record layout depends on `detection_kind` (see below):
+  // `CornerSetHeader` records for checkerboard, `MarkerSetHeader` records for
+  // aruco. Coordinates are in full-frame Y-plane pixels regardless of the
+  // saver's `*_full_res_detection` setting or 2x2 quadrant split. Both fields
+  // are 0 when no block follows.
   uint32_t corner_block_size;
   uint16_t num_corner_sets;
   uint16_t reserved;
@@ -117,18 +120,50 @@ struct ChunkHeader {
   //   3=Failed). 0xFF when no AfState was reported for the frame.
   float lens_position;
   uint8_t af_state;
-  uint8_t reserved2[3];
+  // v6 addition: classifies the detection block that follows this header (and
+  // therefore how to parse each of its `num_corner_sets` records). 0 = none
+  // (no detector ran; no block), 1 = checkerboard (records are CornerSetHeader),
+  // 2 = aruco (records are MarkerSetHeader). See DetectionKind. Carried in a
+  // byte that was `reserved2[0]` (always 0) before v6, so ChunkHeader stays
+  // 68 bytes.
+  uint8_t detection_kind;
+  uint8_t reserved2[2];
 } __attribute__((packed));
 
-// Per corner-set header inside the CornerBlock (v4+). For `checkerboard` mode
-// the single emitted set has set_id=0. For `checkerboard2x2`, one set is
-// emitted per detecting quadrant with set_id = row*2 + col (0..3, where row
-// and col are 0 for top/left and 1 for bottom/right).
+// Classifies the detection block appended to a ChunkHeader (its `detection_kind`
+// field) and, equivalently, which per-record header layout the block uses.
+enum class DetectionKind : uint8_t {
+  NONE = 0,          // no detector ran; no block follows
+  CHECKERBOARD = 1,  // records are CornerSetHeader
+  ARUCO = 2,         // records are MarkerSetHeader
+};
+
+// Per corner-set header inside a checkerboard CornerBlock (v4+;
+// detection_kind == CHECKERBOARD). For `checkerboard` mode the single emitted
+// set has set_id=0. For `checkerboard2x2`, one set is emitted per detecting
+// quadrant with set_id = row*2 + col (0..3, where row and col are 0 for
+// top/left and 1 for bottom/right).
 struct CornerSetHeader {
   uint8_t set_id;
   // bit 0: coordinates are in full-frame Y-plane pixel space (always 1 in v4)
   uint8_t flags;
   uint16_t num_corners;  // = checkerboard_rows × checkerboard_cols
+  // followed by num_corners × { float x; float y; }  (8 bytes each)
+} __attribute__((packed));
+
+// Per-marker header inside an aruco MarkerBlock (v6+; detection_kind == ARUCO).
+// One record is emitted per detected ArUco/AprilTag marker. For `aruco` mode
+// every record has quadrant=0 (whole frame); for `aruco2x2`, quadrant =
+// row*2 + col (0..3) identifies the sub-frame the marker was detected in (the
+// same marker may appear in more than one quadrant record). The 4 corners
+// follow in the dictionary's canonical order (clockwise from the marker's
+// top-left).
+struct MarkerSetHeader {
+  int32_t marker_id;  // ArUco/AprilTag dictionary id (DICT_APRILTAG_16h5)
+  uint8_t quadrant;   // 0 (aruco) or row*2+col (aruco2x2, 0..3)
+  // bit 0: coordinates are in full-frame Y-plane pixel space (always 1 in v6)
+  uint8_t flags;
+  uint16_t num_corners;  // = 4
   // followed by num_corners × { float x; float y; }  (8 bytes each)
 } __attribute__((packed));
 
@@ -195,7 +230,39 @@ struct CameraConfig {
 };
 
 // Frame saving modes
-enum class SaveMode { NONE, BUFFER, BATCH, CHECKERBOARD, CHECKERBOARD2X2 };
+enum class SaveMode {
+  NONE,
+  BUFFER,
+  BATCH,
+  CHECKERBOARD,
+  CHECKERBOARD2X2,
+  ARUCO,
+  ARUCO2X2
+};
+
+// Map a save mode to the DetectionKind its detector emits (NONE for the
+// non-detector modes). Used to stamp ChunkHeader.detection_kind and to select
+// the block serialization format.
+inline DetectionKind detectionKindForMode(SaveMode mode) {
+  switch (mode) {
+    case SaveMode::CHECKERBOARD:
+    case SaveMode::CHECKERBOARD2X2:
+      return DetectionKind::CHECKERBOARD;
+    case SaveMode::ARUCO:
+    case SaveMode::ARUCO2X2:
+      return DetectionKind::ARUCO;
+    default:
+      return DetectionKind::NONE;
+  }
+}
+
+// True for the four modes whose frames flow through the async best-effort
+// detection worker (checkerboard/aruco, whole-frame or 2x2). These modes save
+// only frames with a detection and stream only detector-processed frames.
+inline bool isDetectorMode(SaveMode mode) {
+  return mode == SaveMode::CHECKERBOARD || mode == SaveMode::CHECKERBOARD2X2 ||
+         mode == SaveMode::ARUCO || mode == SaveMode::ARUCO2X2;
+}
 
 // Camera state
 enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };
@@ -213,6 +280,16 @@ struct SaveConfig {
   int checkerboard_cols = 11;
   bool checkerboard_full_res_detection = false;
   int checkerboard_num_threads = 4;
+
+  // ArUco detection parameters (aruco / aruco2x2 modes). The dictionary is
+  // hard-coded to DICT_APRILTAG_16h5. `aruco_full_res_detection` mirrors the
+  // checkerboard flag (false ⇒ detect on the 2x-subsampled Y plane for speed).
+  // `aruco_num_threads` bounds the aruco2x2 quadrant parallelism ([1, 4]).
+  // `aruco_corner_refine` false ⇒ CORNER_REFINE_NONE (fastest, real-time),
+  // true ⇒ CORNER_REFINE_SUBPIX (more precise corners, slower).
+  bool aruco_full_res_detection = false;
+  int aruco_num_threads = 4;
+  bool aruco_corner_refine = false;
 };
 
 // Message types for WebSocket protocol

@@ -41,6 +41,12 @@ void FrameSaver::configure(const SaveConfig& cfg) {
     checkerboard_detector = std::make_unique<CheckerboardDetector>(
         config.checkerboard_cols, config.checkerboard_rows);
   }
+
+  // Initialize aruco detector if needed
+  if (config.mode == SaveMode::ARUCO || config.mode == SaveMode::ARUCO2X2) {
+    aruco_detector =
+        std::make_unique<ArucoDetector>(config.aruco_corner_refine);
+  }
 }
 
 bool FrameSaver::createOutputDirectory() {
@@ -138,9 +144,7 @@ void FrameSaver::start() {
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
     buffered_frames.reserve(10000);
-  } else if (config.mode == SaveMode::BATCH ||
-             config.mode == SaveMode::CHECKERBOARD ||
-             config.mode == SaveMode::CHECKERBOARD2X2) {
+  } else if (config.mode == SaveMode::BATCH || isDetectorMode(config.mode)) {
     // Drop any partial batch left over from a previous session.
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -150,10 +154,9 @@ void FrameSaver::start() {
     for (size_t i = 0; i < config.writer_threads; i++) {
       writer_threads.emplace_back(&FrameSaver::writerThreadFunc, this);
     }
-    // Checkerboard modes run one async worker that does the CPU-heavy
-    // detection off the capture thread.
-    if (config.mode == SaveMode::CHECKERBOARD ||
-        config.mode == SaveMode::CHECKERBOARD2X2) {
+    // Detector modes (checkerboard/aruco) run one async worker that does the
+    // CPU-heavy detection off the capture thread.
+    if (isDetectorMode(config.mode)) {
       detection_thread = std::thread(&FrameSaver::detectionWorkerFunc, this);
     }
   }
@@ -162,12 +165,11 @@ void FrameSaver::start() {
 void FrameSaver::stop() {
   enabled = false;
 
-  // Checkerboard modes: shut down the detection worker FIRST. Its drain pass
+  // Detector modes: shut down the detection worker FIRST. Its drain pass
   // detects every still-pending frame and enqueues any resulting write task,
   // so all detections land in write_queue before the writer pool below is
   // told to stop. Tearing the writers down first could lose a late detection.
-  if (config.mode == SaveMode::CHECKERBOARD ||
-      config.mode == SaveMode::CHECKERBOARD2X2) {
+  if (isDetectorMode(config.mode)) {
     {
       std::lock_guard<std::mutex> lock(pending_mutex);
       stop_detection = true;
@@ -176,9 +178,7 @@ void FrameSaver::stop() {
     if (detection_thread.joinable()) detection_thread.join();
   }
 
-  if (config.mode == SaveMode::BATCH ||
-      config.mode == SaveMode::CHECKERBOARD ||
-      config.mode == SaveMode::CHECKERBOARD2X2) {
+  if (config.mode == SaveMode::BATCH || isDetectorMode(config.mode)) {
     // Flush any frames still held in a partial batch (BATCH mode) so they are
     // written before the workers exit, then signal threads to stop.
     {
@@ -198,11 +198,9 @@ void FrameSaver::stop() {
     writer_threads.clear();
   }
 
-  // Log checkerboard detection statistics
-  if ((config.mode == SaveMode::CHECKERBOARD ||
-       config.mode == SaveMode::CHECKERBOARD2X2) &&
-      frames_checked > 0) {
-    std::cout << "Checkerboard detection stats: " << checkerboards_detected
+  // Log detection statistics (checkerboard/aruco modes)
+  if (isDetectorMode(config.mode) && frames_checked > 0) {
+    std::cout << "Detection stats: " << checkerboards_detected
               << " detected out of " << frames_checked << " checked ("
               << (100.0 * checkerboards_detected / frames_checked) << "%)"
               << std::endl;
@@ -236,8 +234,7 @@ void FrameSaver::saveFrame(const FrameData& frame) {
       }
     }
     if (flushed) queue_cv.notify_all();
-  } else if (config.mode == SaveMode::CHECKERBOARD ||
-             config.mode == SaveMode::CHECKERBOARD2X2) {
+  } else if (isDetectorMode(config.mode)) {
     // Best-effort: hand the frame to the async detection worker instead of
     // detecting inline. Detection takes tens–hundreds of ms — far longer than
     // the inter-frame interval — so running it on the capture thread would
@@ -285,9 +282,23 @@ void FrameSaver::processDetection(FrameData frame) {
   frames_checked++;
 
   std::vector<CornerSet> sets;
-  const bool detected = (config.mode == SaveMode::CHECKERBOARD)
-                            ? detectCheckerboard(frame, sets)
-                            : detectCheckerboard2x2(frame, sets);
+  bool detected = false;
+  switch (config.mode) {
+    case SaveMode::CHECKERBOARD:
+      detected = detectCheckerboard(frame, sets);
+      break;
+    case SaveMode::CHECKERBOARD2X2:
+      detected = detectCheckerboard2x2(frame, sets);
+      break;
+    case SaveMode::ARUCO:
+      detected = detectAruco(frame, sets);
+      break;
+    case SaveMode::ARUCO2X2:
+      detected = detectAruco2x2(frame, sets);
+      break;
+    default:
+      break;
+  }
 
   if (detected) {
     checkerboards_detected++;
@@ -444,6 +455,134 @@ bool FrameSaver::detectCheckerboard2x2(const FrameData& frame,
           .count();
   LOG_INFO("FrameSaver",
            "Checkerboard2x2 detected: " + std::to_string(detected) +
+               " Total: " + std::to_string(total_time) + "ms");
+  return detected;
+}
+
+bool FrameSaver::detectAruco(const FrameData& frame,
+                             std::vector<CornerSet>& out_sets) {
+  auto start_tp = std::chrono::steady_clock::now();
+  out_sets.clear();
+
+  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+      frame, config.aruco_full_res_detection);
+  int out_width =
+      config.aruco_full_res_detection ? frame.width : frame.width / 2;
+  int out_height =
+      config.aruco_full_res_detection ? frame.height : frame.height / 2;
+
+  std::vector<ArucoDetector::Marker> markers;
+  bool detected = aruco_detector->detect(grayscale_data.data(), out_width,
+                                         out_height, /*stride=*/0, &markers);
+
+  // When detection ran on the subsampled Y plane, corner coordinates are in
+  // (W/2, H/2) space; multiply by 2 to map back to full-frame Y pixels.
+  const float scale = config.aruco_full_res_detection ? 1.0f : 2.0f;
+  for (auto& m : markers) {
+    CornerSet set;
+    set.set_id = 0;  // whole frame
+    set.marker_id = m.id;
+    set.corners.reserve(m.corners.size());
+    for (const auto& p : m.corners) {
+      set.corners.emplace_back(p.x * scale, p.y * scale);
+    }
+    out_sets.push_back(std::move(set));
+  }
+
+  auto end_tp = std::chrono::steady_clock::now();
+  auto total_time =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
+          .count();
+  LOG_INFO("FrameSaver", "Aruco markers: " + std::to_string(markers.size()) +
+                             " Total: " + std::to_string(total_time) + "ms");
+  return detected;
+}
+
+bool FrameSaver::detectAruco2x2(const FrameData& frame,
+                                std::vector<CornerSet>& out_sets) {
+  auto start_tp = std::chrono::steady_clock::now();
+  out_sets.clear();
+
+  std::vector<uint8_t> grayscale_data = frame_saver_helpers::extractYFromYUV420(
+      frame, config.aruco_full_res_detection);
+  const int full_width = config.aruco_full_res_detection
+                             ? static_cast<int>(frame.width)
+                             : static_cast<int>(frame.width / 2);
+  const int full_height = config.aruco_full_res_detection
+                              ? static_cast<int>(frame.height)
+                              : static_cast<int>(frame.height / 2);
+  const int sub_w = full_width / 2;
+  const int sub_h = full_height / 2;
+  if (sub_w <= 0 || sub_h <= 0) return false;
+
+  // Subsampled-mode coords need a final ×2 to land in full-frame Y pixels.
+  const float scale = config.aruco_full_res_detection ? 1.0f : 2.0f;
+
+  // Per-quadrant detection job. Each job writes its own slot in `results` so
+  // we never share a mutable vector across threads (the ArucoDetector itself
+  // is read-only under detectMarkers, so a single instance is safe to share).
+  struct QuadrantResult {
+    std::vector<ArucoDetector::Marker> markers;
+  };
+  std::array<QuadrantResult, 4> results;
+
+  const uint8_t* base = grayscale_data.data();
+  auto run_detect = [&](int row, int col, QuadrantResult* out) {
+    const uint8_t* src =
+        base + static_cast<size_t>(row) * sub_h * full_width +
+        static_cast<size_t>(col) * sub_w;
+    aruco_detector->detect(src, sub_w, sub_h, static_cast<size_t>(full_width),
+                           &out->markers);
+  };
+
+  constexpr std::array<std::pair<int, int>, 4> kQuadrants = {
+      {{0, 0}, {0, 1}, {1, 0}, {1, 1}}};
+  const size_t pool_size = std::clamp<size_t>(config.aruco_num_threads, 1, 4);
+
+  for (size_t i = 0; i < kQuadrants.size(); i += pool_size) {
+    const size_t batch = std::min(pool_size, kQuadrants.size() - i);
+    if (batch == 1) {
+      run_detect(kQuadrants[i].first, kQuadrants[i].second, &results[i]);
+    } else {
+      std::vector<std::future<void>> futures;
+      futures.reserve(batch);
+      for (size_t k = 0; k < batch; ++k) {
+        const auto& q = kQuadrants[i + k];
+        QuadrantResult* slot = &results[i + k];
+        futures.emplace_back(
+            std::async(std::launch::async, run_detect, q.first, q.second, slot));
+      }
+      for (auto& f : futures) f.get();
+    }
+  }
+
+  bool detected = false;
+  for (size_t i = 0; i < kQuadrants.size(); ++i) {
+    if (results[i].markers.empty()) continue;
+    detected = true;
+    const int row = kQuadrants[i].first;
+    const int col = kQuadrants[i].second;
+    // Translate quadrant-local cv coords → full-Y-plane → full-frame pixels.
+    const float ox = static_cast<float>(col * sub_w);
+    const float oy = static_cast<float>(row * sub_h);
+    for (auto& m : results[i].markers) {
+      CornerSet set;
+      set.set_id = static_cast<uint8_t>(row * 2 + col);
+      set.marker_id = m.id;
+      set.corners.reserve(m.corners.size());
+      for (const auto& p : m.corners) {
+        set.corners.emplace_back((p.x + ox) * scale, (p.y + oy) * scale);
+      }
+      out_sets.push_back(std::move(set));
+    }
+  }
+
+  auto end_tp = std::chrono::steady_clock::now();
+  auto total_time =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
+          .count();
+  LOG_INFO("FrameSaver",
+           "Aruco2x2 markers: " + std::to_string(out_sets.size()) +
                " Total: " + std::to_string(total_time) + "ms");
   return detected;
 }

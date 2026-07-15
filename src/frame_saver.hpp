@@ -13,16 +13,23 @@
 
 #include <opencv2/core/types.hpp>
 
+#include "aruco_detector.h"
 #include "checkerboard_detector.h"
 #include "types.hpp"
 
-// One detected checkerboard's worth of corners, already mapped back to
-// full-frame Y-plane pixel coordinates. `set_id` encodes which sub-frame the
-// corners came from: 0 for `checkerboard` mode (whole frame); 0..3 for
-// `checkerboard2x2` (row*2 + col, where row/col are 0 for top/left and 1 for
-// bottom/right).
+// One detection's worth of corners, already mapped back to full-frame Y-plane
+// pixel coordinates. Shared by the checkerboard and aruco paths.
+//
+// `set_id` encodes which sub-frame the corners came from: 0 for the whole-frame
+// modes (`checkerboard` / `aruco`); 0..3 for the 2x2 modes (row*2 + col, where
+// row/col are 0 for top/left and 1 for bottom/right).
+//
+// `marker_id` is the ArUco/AprilTag dictionary id for `aruco` / `aruco2x2`
+// (each detected marker is its own set of 4 corners); it is -1 for the
+// checkerboard modes, which have no id (the set holds rows×cols corners).
 struct CornerSet {
   uint8_t set_id = 0;
+  int marker_id = -1;
   std::vector<cv::Point2f> corners;
 };
 
@@ -66,6 +73,8 @@ class FrameSaver {
 
   // For checkerboard detection
   std::unique_ptr<CheckerboardDetector> checkerboard_detector;
+  // For aruco detection (aruco / aruco2x2 modes)
+  std::unique_ptr<ArucoDetector> aruco_detector;
 
   // Best-effort async checkerboard detection. Detection is CPU-intensive
   // (tens–hundreds of ms), so it cannot keep up with a high capture rate.
@@ -119,6 +128,17 @@ class FrameSaver {
   // coordinates translated to full-frame Y-plane pixel space.
   bool detectCheckerboard2x2(const FrameData& frame,
                              std::vector<CornerSet>& out_sets);
+  // ARUCO: detect markers on the whole Y plane (extracted per
+  // `aruco_full_res_detection`). `out_sets` receives one CornerSet per detected
+  // marker (set_id=0, marker_id=the id, 4 corners), coordinates translated to
+  // full-frame Y-plane pixel space. Returns true if any marker was found.
+  bool detectAruco(const FrameData& frame, std::vector<CornerSet>& out_sets);
+  // ARUCO2X2: split the Y plane into 4 equal quadrants and detect markers on
+  // each in parallel (batched by `aruco_num_threads`, clamped to [1, 4]).
+  // `out_sets` receives one CornerSet per detected marker (set_id = row*2+col,
+  // marker_id = the id), coordinates translated to full-frame Y-plane pixels.
+  // Returns true if any quadrant detected at least one marker.
+  bool detectAruco2x2(const FrameData& frame, std::vector<CornerSet>& out_sets);
   bool createOutputDirectory();  // New method for directory creation
 
  public:
@@ -149,8 +169,8 @@ class FrameSaver {
   // and returns true; the slot is then marked consumed so the same frame is
   // not streamed twice. Returns false when no fresh processed frame is
   // available (no detection has completed since the last take, or the save
-  // mode isn't a checkerboard mode). This is the ONLY source of streamable
-  // frames in checkerboard modes, so undetected frames never reach the client.
+  // mode isn't a detector mode). This is the ONLY source of streamable frames
+  // in detector modes, so undetected frames never reach the client.
   // Safe to call from the streaming thread.
   bool takeDetectedFrameForStreaming(uint32_t camera_id, FrameData& frame,
                                      std::vector<CornerSet>& sets) {

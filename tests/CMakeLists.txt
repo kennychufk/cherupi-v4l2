@@ -9,6 +9,7 @@ set(UNIT_SOURCES
     unit/frame_saver_modes_test.cpp
     unit/stream_chunking_test.cpp
     unit/checkerboard_detector_test.cpp
+    unit/aruco_detector_test.cpp
 )
 
 # Production sources included in the unit binary. StreamManager currently
@@ -26,6 +27,7 @@ add_executable(unit_tests
     ../src/frame_saver_helpers.cpp
     ../src/command_parser.cpp
     ../src/checkerboard_detector.cpp
+    ../src/aruco_detector.cpp
     ../src/camera.cpp
     ../src/camera_manager.cpp
 )

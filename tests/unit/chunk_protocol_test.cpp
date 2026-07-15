@@ -13,17 +13,20 @@ TEST(ChunkProtocolTest, StructSizesMatchWireFormat) {
   // timestamp_us uint64 + frame_duration_us uint32); to 60 at v4 (added
   // corner_block_size uint32 + num_corner_sets uint16 + reserved uint16); to
   // 68 at v5 (added lens_position float + af_state uint8 + reserved2 uint8[3]).
+  // v6 keeps ChunkHeader at 68 (one reserved2 byte became detection_kind) and
+  // adds MarkerSetHeader (8 bytes) for the aruco detection block.
   EXPECT_EQ(sizeof(ChunkStartMarker), 8u);
   EXPECT_EQ(sizeof(ChunkHeader), 68u);
   EXPECT_EQ(sizeof(ChunkData), 16u);
   EXPECT_EQ(sizeof(CornerSetHeader), 4u);
+  EXPECT_EQ(sizeof(MarkerSetHeader), 8u);
 }
 
 TEST(ChunkProtocolTest, StartMarkerByteLayout) {
   ChunkStartMarker marker{};
-  // 'CHUN' little-endian = 4E 55 48 43, version 5 = 05 00 00 00
+  // 'CHUN' little-endian = 4E 55 48 43, version 6 = 06 00 00 00
   const uint8_t expected[8] = {0x4E, 0x55, 0x48, 0x43,
-                               0x05, 0x00, 0x00, 0x00};
+                               0x06, 0x00, 0x00, 0x00};
   EXPECT_EQ(0, std::memcmp(&marker, expected, sizeof(expected)));
 }
 
@@ -81,7 +84,10 @@ TEST(ChunkProtocolTest, ChunkHeaderFieldOffsetsAreStable) {
   // v5 additions
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.lens_position) - base, 60);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.af_state) - base, 64);
-  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.reserved2) - base, 65);
+  // v6: detection_kind took over the first reserved2 byte (offset 65); the
+  // remaining reserved padding shifted to offset 66.
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.detection_kind) - base, 65);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.reserved2) - base, 66);
 }
 
 TEST(ChunkProtocolTest, CornerSetHeaderFieldOffsetsAreStable) {
@@ -90,6 +96,15 @@ TEST(ChunkProtocolTest, CornerSetHeaderFieldOffsetsAreStable) {
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.set_id) - base, 0);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.flags) - base, 1);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.num_corners) - base, 2);
+}
+
+TEST(ChunkProtocolTest, MarkerSetHeaderFieldOffsetsAreStable) {
+  MarkerSetHeader h{};
+  const uint8_t* base = reinterpret_cast<const uint8_t*>(&h);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.marker_id) - base, 0);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.quadrant) - base, 4);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.flags) - base, 5);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.num_corners) - base, 6);
 }
 
 }  // namespace

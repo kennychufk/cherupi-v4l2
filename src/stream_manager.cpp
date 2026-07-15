@@ -255,13 +255,14 @@ void StreamManager::streamingLoop() {
         continue;
       }
 
-      // Frame source depends on the save mode. In checkerboard modes the only
+      // Frame source depends on the save mode. In detector modes the only
       // streamable frames are the ones the detector has already processed, so
       // we pull from the saver's detected-frame slot (which carries the
       // corners); otherwise we pull the latest captured frame from the camera.
       const SaveMode mode = frame_saver ? frame_saver->getMode() : SaveMode::NONE;
-      const bool detector_gated = (mode == SaveMode::CHECKERBOARD ||
-                                   mode == SaveMode::CHECKERBOARD2X2);
+      const bool detector_gated = isDetectorMode(mode);
+      const uint8_t detection_kind =
+          static_cast<uint8_t>(detectionKindForMode(mode));
 
       FrameData frame;
       std::vector<CornerSet> corner_sets;
@@ -280,12 +281,14 @@ void StreamManager::streamingLoop() {
 
         bool success = false;
         if (header_only_mode) {
-          success = sendHeaderOnlyFrame(frame, camera_id, std::move(corner_sets));
+          success = sendHeaderOnlyFrame(frame, camera_id,
+                                        std::move(corner_sets), detection_kind);
           if (success) {
             stats.header_only_frames++;
           }
         } else {
-          success = sendChunkedFrame(frame, camera_id, std::move(corner_sets));
+          success = sendChunkedFrame(frame, camera_id, std::move(corner_sets),
+                                     detection_kind);
         }
 
         if (success) {
@@ -345,18 +348,34 @@ bool StreamManager::waitForBufferDrain() {
 bool StreamManager::sendFrameForTest(const FrameData& frame,
                                      uint32_t camera_id,
                                      std::vector<CornerSet> corner_sets) {
-  if (header_only_mode) {
-    return sendHeaderOnlyFrame(frame, camera_id, std::move(corner_sets));
+  // Infer the block format from the sets so tests exercise either path without
+  // a live save mode: any marker id present ⇒ aruco, else checkerboard (an
+  // empty set list carries no block, so NONE is fine).
+  DetectionKind kind = DetectionKind::NONE;
+  for (const auto& set : corner_sets) {
+    if (set.marker_id >= 0) {
+      kind = DetectionKind::ARUCO;
+      break;
+    }
+    kind = DetectionKind::CHECKERBOARD;
   }
-  return sendChunkedFrame(frame, camera_id, std::move(corner_sets));
+  const uint8_t detection_kind = static_cast<uint8_t>(kind);
+  if (header_only_mode) {
+    return sendHeaderOnlyFrame(frame, camera_id, std::move(corner_sets),
+                               detection_kind);
+  }
+  return sendChunkedFrame(frame, camera_id, std::move(corner_sets),
+                          detection_kind);
 }
 
 bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
                                         uint32_t camera_id,
-                                        std::vector<CornerSet> corner_sets) {
+                                        std::vector<CornerSet> corner_sets,
+                                        uint8_t detection_kind) {
   ChunkedTransfer transfer;
   transfer.frame = frame;
   transfer.corner_sets = std::move(corner_sets);
+  transfer.detection_kind = detection_kind;
   transfer.frame_uuid = generateFrameUUID();
   transfer.total_chunks = 0;
   transfer.current_chunk = 0;
@@ -372,12 +391,14 @@ bool StreamManager::sendHeaderOnlyFrame(const FrameData& frame,
 
 bool StreamManager::sendChunkedFrame(const FrameData& frame,
                                      uint32_t camera_id,
-                                     std::vector<CornerSet> corner_sets) {
+                                     std::vector<CornerSet> corner_sets,
+                                     uint8_t detection_kind) {
   {
     std::lock_guard<std::mutex> lock(transfer_mutex);
     current_transfer = std::make_unique<ChunkedTransfer>();
     current_transfer->frame = frame;
     current_transfer->corner_sets = std::move(corner_sets);
+    current_transfer->detection_kind = detection_kind;
     current_transfer->frame_uuid = generateFrameUUID();
     current_transfer->total_chunks =
         (frame.data.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -496,16 +517,22 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   std::lock_guard<std::mutex> lock(sink_mutex);
   if (!sink) return false;
 
-  // Corners were resolved when the frame was pulled (checkerboard modes hand
-  // the streamer only detector-processed frames, each carrying its own corner
+  // Corners were resolved when the frame was pulled (detector modes hand the
+  // streamer only detector-processed frames, each carrying its own corner
   // set), so no lookup is needed here.
   const std::vector<CornerSet>& corner_sets = transfer.corner_sets;
 
-  // Compute the variable corner-block size up front so we can encode it in
+  // The per-record header differs by detection kind: CornerSetHeader (4 bytes)
+  // for checkerboard, MarkerSetHeader (8 bytes, carries the marker id) for
+  // aruco. Compute the variable block size up front so it can be encoded in
   // ChunkHeader before the bytes go out.
+  const bool is_aruco =
+      transfer.detection_kind == static_cast<uint8_t>(DetectionKind::ARUCO);
+  const size_t record_header_size =
+      is_aruco ? sizeof(MarkerSetHeader) : sizeof(CornerSetHeader);
   uint32_t corner_block_size = 0;
   for (const auto& set : corner_sets) {
-    corner_block_size += static_cast<uint32_t>(sizeof(CornerSetHeader));
+    corner_block_size += static_cast<uint32_t>(record_header_size);
     corner_block_size += static_cast<uint32_t>(set.corners.size() *
                                                2 * sizeof(float));
   }
@@ -547,23 +574,37 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.reserved = 0;
   header.lens_position = transfer.frame.lens_position;
   header.af_state = transfer.frame.af_state;
+  header.detection_kind = transfer.detection_kind;
   header.reserved2[0] = 0;
   header.reserved2[1] = 0;
-  header.reserved2[2] = 0;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,
                  header_bytes + sizeof(ChunkHeader));
 
-  // Append the variable-size CornerBlock: { CornerSetHeader, corner xy floats }
-  // per set, packed back-to-back.
+  // Append the variable-size detection block: one record per set, packed
+  // back-to-back. The record header is a MarkerSetHeader (with the marker id)
+  // for aruco, or a CornerSetHeader for checkerboard; the corner xy floats that
+  // follow are identical in both. Empty corner_sets ⇒ no bytes appended.
   for (const auto& set : corner_sets) {
-    CornerSetHeader sh{};
-    sh.set_id = set.set_id;
-    sh.flags = 0x01;  // bit 0: full-frame Y-plane pixel coords
-    sh.num_corners = static_cast<uint16_t>(set.corners.size());
-    const uint8_t* sh_bytes = reinterpret_cast<const uint8_t*>(&sh);
-    message.insert(message.end(), sh_bytes, sh_bytes + sizeof(CornerSetHeader));
+    if (is_aruco) {
+      MarkerSetHeader mh{};
+      mh.marker_id = set.marker_id;
+      mh.quadrant = set.set_id;
+      mh.flags = 0x01;  // bit 0: full-frame Y-plane pixel coords
+      mh.num_corners = static_cast<uint16_t>(set.corners.size());
+      const uint8_t* mh_bytes = reinterpret_cast<const uint8_t*>(&mh);
+      message.insert(message.end(), mh_bytes,
+                     mh_bytes + sizeof(MarkerSetHeader));
+    } else {
+      CornerSetHeader sh{};
+      sh.set_id = set.set_id;
+      sh.flags = 0x01;  // bit 0: full-frame Y-plane pixel coords
+      sh.num_corners = static_cast<uint16_t>(set.corners.size());
+      const uint8_t* sh_bytes = reinterpret_cast<const uint8_t*>(&sh);
+      message.insert(message.end(), sh_bytes,
+                     sh_bytes + sizeof(CornerSetHeader));
+    }
     for (const auto& p : set.corners) {
       float xy[2] = {p.x, p.y};
       const uint8_t* xy_bytes = reinterpret_cast<const uint8_t*>(xy);

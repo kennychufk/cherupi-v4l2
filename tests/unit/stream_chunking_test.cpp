@@ -80,7 +80,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
   EXPECT_EQ(marker.magic, 0x4348554Eu);
-  EXPECT_EQ(marker.version, 5u);
+  EXPECT_EQ(marker.version, 6u);
 
   ChunkHeader header{};
   std::memcpy(&header, sink.messages[0].data() + sizeof(marker),
@@ -281,12 +281,14 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   // Parse marker + header from message 0.
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
-  EXPECT_EQ(marker.version, 5u);
+  EXPECT_EQ(marker.version, 6u);
 
   ChunkHeader header{};
   std::memcpy(&header,
               sink.messages[0].data() + sizeof(ChunkStartMarker),
               sizeof(header));
+  EXPECT_EQ(header.detection_kind,
+            static_cast<uint8_t>(DetectionKind::CHECKERBOARD));
   ASSERT_EQ(header.num_corner_sets, 1u);
   const uint32_t expected_corners = 11u * 8u;  // rows × cols
   ASSERT_EQ(header.corner_block_size,
@@ -319,6 +321,74 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
 
   sm.clearSink();
   saver.stop();
+}
+
+TEST(StreamChunkingTest, ChunkHeaderAppendsMarkerBlockForAruco) {
+  // Aruco block serialization: two markers (as would come from the detector),
+  // each a CornerSet with a marker_id and 4 corners. sendFrameForTest infers
+  // the aruco format from the marker_ids, so the header must carry
+  // detection_kind=ARUCO and a MarkerSetHeader per marker (with the id) rather
+  // than a CornerSetHeader.
+  CameraManager dummy_mgr;
+  FrameSaver dummy_saver;
+  StreamManager sm(&dummy_mgr, &dummy_saver);
+  RecordingSink sink;
+  sm.setSink(&sink);
+
+  std::vector<CornerSet> sets;
+  {
+    CornerSet a;
+    a.set_id = 0;  // quadrant (whole frame)
+    a.marker_id = 23;
+    a.corners = {{10.f, 20.f}, {50.f, 20.f}, {50.f, 60.f}, {10.f, 60.f}};
+    sets.push_back(a);
+    CornerSet b;
+    b.set_id = 3;  // bottom-right quadrant (as in aruco2x2)
+    b.marker_id = 7;
+    b.corners = {{110.f, 120.f}, {150.f, 120.f}, {150.f, 160.f}, {110.f, 160.f}};
+    sets.push_back(b);
+  }
+
+  FrameData frame = makeSyntheticFrame(StreamManager::CHUNK_SIZE / 2);
+  ASSERT_TRUE(sm.sendFrameForTest(frame, /*camera_id=*/0, sets));
+  ASSERT_GE(sink.messages.size(), 1u);
+
+  ChunkHeader header{};
+  std::memcpy(&header, sink.messages[0].data() + sizeof(ChunkStartMarker),
+              sizeof(header));
+  EXPECT_EQ(header.detection_kind, static_cast<uint8_t>(DetectionKind::ARUCO));
+  ASSERT_EQ(header.num_corner_sets, 2u);
+
+  const uint32_t per_marker =
+      sizeof(MarkerSetHeader) + 4u * 2u * sizeof(float);  // 8 + 32 = 40
+  ASSERT_EQ(header.corner_block_size, 2u * per_marker);
+  ASSERT_EQ(sink.messages[0].size(), sizeof(ChunkStartMarker) +
+                                         sizeof(ChunkHeader) +
+                                         header.corner_block_size);
+
+  const uint8_t* block =
+      sink.messages[0].data() + sizeof(ChunkStartMarker) + sizeof(ChunkHeader);
+
+  // First marker record.
+  MarkerSetHeader m0{};
+  std::memcpy(&m0, block, sizeof(m0));
+  EXPECT_EQ(m0.marker_id, 23);
+  EXPECT_EQ(m0.quadrant, 0u);
+  EXPECT_EQ(m0.flags & 0x01, 0x01);
+  EXPECT_EQ(m0.num_corners, 4u);
+  float xy0[2];
+  std::memcpy(xy0, block + sizeof(MarkerSetHeader), sizeof(xy0));
+  EXPECT_FLOAT_EQ(xy0[0], 10.f);
+  EXPECT_FLOAT_EQ(xy0[1], 20.f);
+
+  // Second marker record sits right after the first (header + 4 corners).
+  MarkerSetHeader m1{};
+  std::memcpy(&m1, block + per_marker, sizeof(m1));
+  EXPECT_EQ(m1.marker_id, 7);
+  EXPECT_EQ(m1.quadrant, 3u);
+  EXPECT_EQ(m1.num_corners, 4u);
+
+  sm.clearSink();
 }
 
 TEST(StreamChunkingTest, ClearingSinkResetsRateControl) {

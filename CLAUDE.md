@@ -2,7 +2,7 @@
 
 ## Summary
 
-WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cameras via libcamera. Single-client; binary frames over chunked transfer; optional saving and on-device checkerboard detection.
+WebSocket server for Raspberry Pi 5 that streams frames from multiple IMX519 cameras via libcamera. Single-client; binary frames over chunked transfer; optional saving and on-device checkerboard / ArUco (AprilTag) marker detection.
 
 ## Layout
 
@@ -33,8 +33,9 @@ All paths below are under `src/`.
 - `stream_manager.*` — round-robin streaming, backpressure/skipping, chunked transfer (writes to an abstract `FrameSink`)
 - `rate_controller.*` — `AdaptiveRateController`, used by `stream_manager`
 - `frame_sink.hpp` / `uws_frame_sink.hpp` — abstract byte sink + uWebSockets adapter
-- `frame_saver.*` / `frame_saver_helpers.*` — save modes NONE / BUFFER / BATCH / CHECKERBOARD plus pure helpers (filename, timestamped dir, Y-plane extraction)
+- `frame_saver.*` / `frame_saver_helpers.*` — save modes NONE / BUFFER / BATCH / CHECKERBOARD / ARUCO plus pure helpers (filename, timestamped dir, Y-plane extraction)
 - `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection
+- `aruco_detector.*` — OpenCV `cv::aruco::detectMarkers` detection (dictionary hard-coded to `DICT_APRILTAG_16h5`)
 - `types.hpp` — logger, protocol constants, `CameraConfig`, `SaveConfig`, chunk headers
 
 ## WebSocket Protocol
@@ -63,6 +64,8 @@ A per-camera `ERROR` state exists but is not currently a state-machine target.
 - `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
 - `CHECKERBOARD` — save only frames where a checkerboard is detected (`rows`, `cols`, `full_res_detection`, `num_threads`)
 - `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants and save if any quadrant detects a checkerboard. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
+- `ARUCO` — save only frames where at least one ArUco/AprilTag marker is detected (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`). Params: `aruco_full_res_detection`, `aruco_corner_refine` (false ⇒ `CORNER_REFINE_NONE`, true ⇒ `CORNER_REFINE_SUBPIX`). Each detected marker's id + 4 corners are reported to the streaming client.
+- `ARUCO2X2` — same params (`aruco_num_threads` for the quadrant parallelism, clamped `[1, 4]`); split each frame into 4 equal quadrants and save if any quadrant detects a marker.
 - Output directory optionally prepended with timestamp.
 
 ## Build
