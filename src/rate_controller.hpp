@@ -14,10 +14,10 @@ class AdaptiveRateController {
  public:
   static constexpr size_t WINDOW_SIZE = 20;
   static constexpr double MIN_CHUNKS_PER_SECOND = 50.0;
-  static constexpr double MAX_CHUNKS_PER_SECOND = 1000.0;
+  static constexpr double MAX_CHUNKS_PER_SECOND = 4000.0;
   static constexpr double RATE_INCREASE_FACTOR = 1.1;
   static constexpr double RATE_DECREASE_FACTOR = 0.5;
-  static constexpr double INITIAL_RATE = 200.0;
+  static constexpr double INITIAL_RATE = 4000.0;
 
   AdaptiveRateController();
 
