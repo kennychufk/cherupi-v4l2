@@ -1,9 +1,12 @@
 #include "websocket_server.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <string_view>
+#include <vector>
 
 #include "command_parser.hpp"
 
@@ -109,6 +112,9 @@ void WebSocketServer::run() {
                       break;
                     case command_parser::CommandKind::SetProcessMode:
                       handleSetProcessMode(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::TriggerCapture:
+                      handleTriggerCapture(ws, cmd.message);
                       break;
                     case command_parser::CommandKind::StartCameras:
                       handleStartCameras(ws);
@@ -365,6 +371,91 @@ void WebSocketServer::handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
   std::string mode = msg.value("mode", std::string());
   LOG_INFO("WebSocketServer", "Process mode configured: " + mode);
   sendStatus(ws, "Process mode configured: " + mode);
+}
+
+void WebSocketServer::handleTriggerCapture(uWS::WebSocket<false, true, int>* ws,
+                                           const json& msg) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::TriggerCapture, system_state)) {
+    sendError(ws, "trigger_capture requires RUNNING state");
+    return;
+  }
+  // The request is meaningful only in trigger mode; in any other mode it is
+  // rejected rather than silently changing what that mode saves.
+  if (frame_processor->getMode() != ProcessMode::TRIGGER) {
+    sendError(ws, "trigger_capture requires the 'trigger' process mode");
+    return;
+  }
+
+  // Which cameras to capture from: every running camera by default, or just
+  // the one named by an optional "camera_id".
+  std::vector<uint32_t> camera_ids;
+  if (msg.contains("camera_id") && msg["camera_id"].is_number_integer()) {
+    int64_t requested = msg["camera_id"].get<int64_t>();
+    if (requested < 0) {
+      sendError(ws, "camera_id must be non-negative");
+      return;
+    }
+    uint32_t camera_id = static_cast<uint32_t>(requested);
+    Camera* camera = camera_manager->getCamera(camera_id);
+    if (!camera || camera->getState() != CameraState::RUNNING) {
+      sendError(ws, "Camera " + std::to_string(camera_id) + " is not running");
+      return;
+    }
+    camera_ids.push_back(camera_id);
+  } else {
+    for (Camera* camera : camera_manager->getAllCameras()) {
+      if (camera->getState() == CameraState::RUNNING) {
+        camera_ids.push_back(camera->getId());
+      }
+    }
+    if (camera_ids.empty()) {
+      sendError(ws, "No running cameras to trigger");
+      return;
+    }
+  }
+
+  int skip_frames = frame_processor->getTriggerSkipFrames();
+  if (msg.contains("skip_frames") && msg["skip_frames"].is_number_integer()) {
+    skip_frames = std::max(0, msg["skip_frames"].get<int>());
+  }
+
+  // The ack is produced on a capture thread, so it must not touch `ws`
+  // directly. Capture the sink's shared_ptr here (on the loop thread) and let
+  // it marshal the send back onto the loop — it also no-ops safely if the
+  // client disconnects while the trigger is pending.
+  std::shared_ptr<UwsFrameSink> sink = active_sink;
+  auto trigger_id = frame_processor->armTrigger(
+      camera_ids, skip_frames, [sink](TriggerResult result) {
+        json response;
+        response["type"] = Protocol::TYPE_TRIGGER_RESULT;
+        response["trigger_id"] = result.trigger_id;
+        response["cancelled"] = result.cancelled;
+        response["captures"] = json::array();
+        for (const auto& capture : result.captures) {
+          json entry;
+          entry["camera_id"] = capture.camera_id;
+          entry["frame_id"] = capture.frame_id;
+          entry["filename"] = capture.filename;
+          response["captures"].push_back(std::move(entry));
+        }
+        if (sink) sink->sendText(response.dump());
+      });
+
+  if (!trigger_id) {
+    // The only other way to fail here is a processor that never started in
+    // trigger mode — i.e. set_process_mode was issued after start_cameras, so
+    // the pipeline is still running whatever mode was active at start.
+    sendError(ws, frame_processor->hasPendingTrigger()
+                      ? "A trigger capture is already pending"
+                      : "Frame processor is not running the trigger mode; send "
+                        "set_process_mode 'trigger' before start_cameras");
+    return;
+  }
+
+  LOG_INFO("WebSocketServer",
+           "Trigger capture " + std::to_string(*trigger_id) + " armed for " +
+               std::to_string(camera_ids.size()) + " camera(s)");
 }
 
 void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {

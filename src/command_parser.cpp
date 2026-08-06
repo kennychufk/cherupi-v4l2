@@ -1,5 +1,7 @@
 #include "command_parser.hpp"
 
+#include <algorithm>
+
 namespace command_parser {
 
 using nlohmann::json;
@@ -28,6 +30,8 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
     kind = CommandKind::Unconfigure;
   } else if (cmd == Protocol::CMD_SET_PROCESS_MODE) {
     kind = CommandKind::SetProcessMode;
+  } else if (cmd == Protocol::CMD_TRIGGER_CAPTURE) {
+    kind = CommandKind::TriggerCapture;
   } else if (cmd == Protocol::CMD_START_CAMERAS) {
     kind = CommandKind::StartCameras;
   } else if (cmd == Protocol::CMD_START_STREAM) {
@@ -61,6 +65,7 @@ std::optional<ProcessMode> parseProcessMode(const std::string& mode) {
   if (mode == "none") return ProcessMode::NONE;
   if (mode == "buffer") return ProcessMode::BUFFER;
   if (mode == "batch") return ProcessMode::BATCH;
+  if (mode == "trigger") return ProcessMode::TRIGGER;
   if (mode == "checkerboard") return ProcessMode::CHECKERBOARD;
   if (mode == "checkerboard2x2") return ProcessMode::CHECKERBOARD2X2;
   if (mode == "aruco") return ProcessMode::ARUCO;
@@ -85,6 +90,7 @@ bool isCommandAllowed(CommandKind kind, CameraState current) {
     case CommandKind::StartStream:
     case CommandKind::StopStream:
     case CommandKind::StopCameras:
+    case CommandKind::TriggerCapture:
       return current == CameraState::RUNNING;
     case CommandKind::SetLensPosition:
     case CommandKind::SetExposureTime:
@@ -146,6 +152,10 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
       config.aruco_num_threads = params["aruco_num_threads"];
     if (params.contains("aruco_corner_refine"))
       config.aruco_corner_refine = params["aruco_corner_refine"];
+    if (params.contains("trigger_skip_frames") &&
+        params["trigger_skip_frames"].is_number_integer())
+      config.trigger_skip_frames =
+          std::max(0, params["trigger_skip_frames"].get<int>());
   }
 
   return config;

@@ -2,11 +2,14 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -31,6 +34,25 @@ struct CornerSet {
   uint8_t set_id = 0;
   int marker_id = -1;
   std::vector<cv::Point2f> corners;
+};
+
+// Outcome of one TRIGGER-mode capture, handed to the client once every armed
+// camera has delivered its frame. One entry per camera, in the order the
+// cameras delivered (not camera_id order).
+struct TriggerResult {
+  struct Capture {
+    uint32_t camera_id = 0;
+    uint32_t frame_id = 0;
+    // Path the frame was queued to be written to; empty when the trigger mode
+    // is running with save_frames off (capture acknowledged, nothing written).
+    std::string filename;
+  };
+  uint32_t trigger_id = 0;
+  std::vector<Capture> captures;
+  // Set when the trigger was abandoned before every armed camera delivered
+  // (capture stopped while it was pending). `captures` then holds only the
+  // cameras that made it, so a waiting client is never left hanging.
+  bool cancelled = false;
 };
 
 class FrameProcessor {
@@ -106,6 +128,29 @@ class FrameProcessor {
   std::unordered_map<uint32_t, DetectedFrame> detected_for_stream;
   std::mutex detected_mutex;
 
+  // TRIGGER mode: a capture request arms every camera named in the request and
+  // stays pending until each of them has delivered a frame; only those frames
+  // are written. At most one trigger is outstanding at a time (a second
+  // request while one is pending is rejected), which keeps the robot loop
+  // request↔ack correspondence unambiguous.
+  struct PendingTrigger {
+    uint32_t id = 0;
+    // camera_id → frames still to be discarded before this camera's capture
+    // (from the request's skip_frames). A camera is done once it is erased.
+    std::map<uint32_t, int> waiting;
+    TriggerResult result;
+    std::function<void(TriggerResult)> on_complete;
+  };
+  std::unique_ptr<PendingTrigger> pending_trigger;  // guarded by trigger_mutex
+  std::mutex trigger_mutex;
+  uint32_t next_trigger_id = 1;  // guarded by trigger_mutex
+
+  // Capture-thread half of TRIGGER mode: consume one delivered frame against
+  // the pending trigger, queueing a write task when the frame is the one that
+  // was asked for. Fires the completion callback (outside the lock) once the
+  // last armed camera has been served.
+  void handleTriggerFrame(const FrameData& frame);
+
   void writerThreadFunc();
   // Worker-thread loop: pull pending frames (round-robin per camera), run
   // detection, and publish results. Drains all pending frames on stop.
@@ -152,6 +197,25 @@ class FrameProcessor {
 
   // Called for each captured frame
   void saveFrame(const FrameData& frame);
+
+  // TRIGGER mode: arm a capture across `camera_ids` (all of them must deliver a
+  // frame before the trigger completes). `skip_frames` frames are discarded per
+  // camera first — 0 means "save the very next frame each camera delivers".
+  // `on_complete` runs on the capture thread of the last camera to be served,
+  // so it must be cheap and thread-safe (the server marshals the ack back onto
+  // the uWS loop). Returns the new trigger's id, or std::nullopt when the
+  // processor is not in an armable state: not enabled, not TRIGGER mode,
+  // `camera_ids` empty, or a trigger is already pending.
+  std::optional<uint32_t> armTrigger(const std::vector<uint32_t>& camera_ids,
+                                     int skip_frames,
+                                     std::function<void(TriggerResult)> on_complete);
+
+  // Whether a trigger is currently armed and waiting for frames.
+  bool hasPendingTrigger();
+
+  // Default per-camera skip count from the configured ProcessConfig, used when
+  // a trigger_capture request does not override it.
+  int getTriggerSkipFrames() const { return config.trigger_skip_frames; }
 
   // For buffer mode - write all buffered frames to disk
   void flushBufferedFrames();

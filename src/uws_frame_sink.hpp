@@ -57,6 +57,23 @@ class UwsFrameSink : public FrameSink,
     return true;
   }
 
+  // Send a TEXT control message from any thread, with the same loop-marshalling
+  // and lifetime guarantees as send(). Used for replies produced off the loop
+  // thread (e.g. the trigger_capture ack, which is emitted by the capture
+  // thread once the triggered frame arrives). Not part of FrameSink: the
+  // streaming path only ever sends binary.
+  bool sendText(std::string payload) {
+    if (!ws_ || !loop_) return false;
+    if (!valid_.load(std::memory_order_acquire)) return false;
+    auto self = shared_from_this();
+    loop_->defer([self = std::move(self), payload = std::move(payload)]() mutable {
+      if (self->valid_.load(std::memory_order_acquire)) {
+        self->ws_->send(payload, uWS::OpCode::TEXT);
+      }
+    });
+    return true;
+  }
+
   size_t bufferedAmount() const override {
     // Combine the queued-but-not-yet-sent bytes (tracked here) with whatever
     // uWS reports as already-buffered. Reading ws_->getBufferedAmount() from

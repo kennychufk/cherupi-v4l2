@@ -19,6 +19,7 @@ enum class CommandKind {
   Configure,
   Unconfigure,
   SetProcessMode,
+  TriggerCapture,
   StartCameras,
   StartStream,
   StopStream,
@@ -50,7 +51,9 @@ std::optional<ProcessMode> parseProcessMode(const std::string& mode);
 
 // State-machine gate: is `kind` allowed while the system is in `current`?
 // `discover`, `set_process_mode`, `reset_frame_counts`, `set_header_only` are
-// always allowed. Lifecycle commands gate on `current`.
+// always allowed. Lifecycle commands gate on `current`. `trigger_capture`
+// requires RUNNING (and, on top of this gate, the TRIGGER process mode — that
+// check lives in the server since it depends on the frame processor).
 bool isCommandAllowed(CommandKind kind, CameraState current);
 
 // Convert a successful CameraConfig build. Pure: no camera, no transport.

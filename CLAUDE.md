@@ -42,6 +42,8 @@ All paths below are under `src/`.
 
 Port 9001, single client. Text (JSON) for control, binary (chunked `CHUN` header + N `CHNK` data packets) for frames. YUV420 output; 32 KiB chunks; header-only mode skips payload.
 
+Most commands answer synchronously with `status`/`error`. The one exception is `trigger_capture` (TRIGGER mode), whose `trigger_result` ack is emitted from a capture thread once the triggered frame arrives — marshalled back onto the uWS loop via `UwsFrameSink::sendText`, since uWS sockets are loop-thread-only.
+
 Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 
 **Keep `docs/websocket-protocol.md` in sync with any change to the protocol or client-server behavior** (commands, response shapes, state transitions, binary struct layout, chunk/version constants, error conditions). Update it in the same commit as the code change.
@@ -64,6 +66,7 @@ Set via `set_process_mode`; each mode names what happens to a captured frame. Wh
 - `NONE` — no processing
 - `BUFFER` — in-memory ring, flushed to disk on stop
 - `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
+- `TRIGGER` — save-on-demand: frames stream live but nothing is written until the client sends `trigger_capture`, which saves one frame per armed camera (all running cameras by default, or one via `camera_id`) and acks asynchronously with `trigger_result` once every armed camera has delivered. `skip_frames` (default from `trigger_skip_frames`) discards settling frames first. One trigger outstanding at a time. Built for a robot-arm calibration rig — move, stop, trigger — so saved frames carry no motion blur.
 - `CHECKERBOARD` — detect a checkerboard and report its corners to the client (`rows`, `cols`, `full_res_detection`, `num_threads`); when `save_frames`, also save frames where one is detected
 - `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants, detect in each, report every detecting quadrant's corners; when `save_frames`, save if any quadrant detects. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
 - `ARUCO` — detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) and report each marker's id + 4 corners to the client. Params: `aruco_full_res_detection`, `aruco_corner_refine` (false ⇒ `CORNER_REFINE_NONE`, true ⇒ `CORNER_REFINE_SUBPIX`). When `save_frames`, also save frames where a marker is detected.

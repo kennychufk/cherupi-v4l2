@@ -236,6 +236,7 @@ enum class ProcessMode {
   NONE,
   BUFFER,
   BATCH,
+  TRIGGER,
   CHECKERBOARD,
   CHECKERBOARD2X2,
   ARUCO,
@@ -266,6 +267,14 @@ inline DetectionKind detectionKindForMode(ProcessMode mode) {
 inline bool isDetectorMode(ProcessMode mode) {
   return mode == ProcessMode::CHECKERBOARD || mode == ProcessMode::CHECKERBOARD2X2 ||
          mode == ProcessMode::ARUCO || mode == ProcessMode::ARUCO2X2;
+}
+
+// True for the modes that persist frames through the async writer pool (as
+// opposed to BUFFER, which holds everything in RAM until stop). The pool is
+// only actually started when `save_frames` is also set.
+inline bool usesWriterPool(ProcessMode mode) {
+  return mode == ProcessMode::BATCH || mode == ProcessMode::TRIGGER ||
+         isDetectorMode(mode);
 }
 
 // Camera state
@@ -305,6 +314,14 @@ struct ProcessConfig {
   bool aruco_full_res_detection = false;
   int aruco_num_threads = 4;
   bool aruco_corner_refine = false;
+
+  // TRIGGER mode: how many freshly delivered frames to discard per camera
+  // before saving the triggered one. 0 (the default) saves the very next frame
+  // each camera delivers after the trigger arrives. Raise it when the frame
+  // already in flight at trigger time may still carry motion blur (e.g. a
+  // robotic arm that has only just come to rest). Overridable per request via
+  // the trigger_capture command's `skip_frames` param.
+  int trigger_skip_frames = 0;
 };
 
 // Message types for WebSocket protocol
@@ -315,6 +332,7 @@ constexpr const char* CMD_GET_STATE = "get_state";
 constexpr const char* CMD_CONFIGURE = "configure";
 constexpr const char* CMD_UNCONFIGURE = "unconfigure";
 constexpr const char* CMD_SET_PROCESS_MODE = "set_process_mode";
+constexpr const char* CMD_TRIGGER_CAPTURE = "trigger_capture";
 constexpr const char* CMD_START_CAMERAS = "start_cameras";
 constexpr const char* CMD_START_STREAM = "start_stream";
 constexpr const char* CMD_STOP_STREAM = "stop_stream";
@@ -333,6 +351,7 @@ constexpr const char* TYPE_STATE = "state";
 constexpr const char* TYPE_STATUS = "status";
 constexpr const char* TYPE_FRAME = "frame";
 constexpr const char* TYPE_ERROR = "error";
+constexpr const char* TYPE_TRIGGER_RESULT = "trigger_result";
 constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
 constexpr const char* TYPE_LENS_POSITION_LIMITS = "lens_position_limits";
 }  // namespace Protocol

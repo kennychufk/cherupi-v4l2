@@ -352,6 +352,25 @@ class CherupiClient:
             body["params"] = params
         return self.command(body)
 
+    def trigger_capture(
+        self,
+        camera_id: Optional[int] = None,
+        skip_frames: Optional[int] = None,
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Fire a `trigger` mode capture and wait for the `trigger_result` ack.
+
+        The ack is asynchronous: it arrives only once every armed camera has
+        delivered its triggered frame, so the timeout must cover at least one
+        frame interval per camera (plus `skip_frames` more).
+        """
+        body: Dict[str, Any] = {"cmd": "trigger_capture"}
+        if camera_id is not None:
+            body["camera_id"] = camera_id
+        if skip_frames is not None:
+            body["skip_frames"] = skip_frames
+        return self.command(body, expect=("trigger_result",), timeout=timeout)
+
     def start_cameras(self) -> Dict[str, Any]:
         return self.command({"cmd": "start_cameras"})
 

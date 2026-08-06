@@ -49,6 +49,7 @@ TEST(CommandParserTest, ProcessModeLookup) {
   EXPECT_EQ(command_parser::parseProcessMode("none"), ProcessMode::NONE);
   EXPECT_EQ(command_parser::parseProcessMode("buffer"), ProcessMode::BUFFER);
   EXPECT_EQ(command_parser::parseProcessMode("batch"), ProcessMode::BATCH);
+  EXPECT_EQ(command_parser::parseProcessMode("trigger"), ProcessMode::TRIGGER);
   EXPECT_EQ(command_parser::parseProcessMode("checkerboard"),
             ProcessMode::CHECKERBOARD);
   EXPECT_EQ(command_parser::parseProcessMode("checkerboard2x2"),
@@ -106,7 +107,7 @@ TEST(CommandParserTest, StateGateStartCamerasRequiresConfigured) {
 
 TEST(CommandParserTest, StateGateStreamCommandsRequireRunning) {
   for (auto cmd : {CommandKind::StartStream, CommandKind::StopStream,
-                   CommandKind::StopCameras}) {
+                   CommandKind::StopCameras, CommandKind::TriggerCapture}) {
     EXPECT_FALSE(command_parser::isCommandAllowed(cmd, CameraState::IDLE));
     EXPECT_FALSE(
         command_parser::isCommandAllowed(cmd, CameraState::CONFIGURED));
@@ -143,6 +144,40 @@ TEST(CommandParserTest, BuildProcessConfigAppliesMode) {
   ASSERT_TRUE(cfg.has_value());
   EXPECT_EQ(cfg->mode, ProcessMode::BATCH);
   EXPECT_EQ(cfg->batch_size, 7u);
+}
+
+TEST(CommandParserTest, ValidTriggerCaptureCommand) {
+  auto result = command_parser::parseCommand(R"({"cmd":"trigger_capture"})");
+  ASSERT_TRUE(std::holds_alternative<command_parser::ParsedCommand>(result));
+  EXPECT_EQ(std::get<command_parser::ParsedCommand>(result).kind,
+            CommandKind::TriggerCapture);
+}
+
+TEST(CommandParserTest, BuildProcessConfigAppliesTriggerParams) {
+  auto msg = nlohmann::json::parse(
+      R"({"mode":"trigger","params":{"trigger_skip_frames":2}})");
+  auto cfg = command_parser::buildProcessConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_EQ(cfg->mode, ProcessMode::TRIGGER);
+  EXPECT_EQ(cfg->trigger_skip_frames, 2);
+}
+
+TEST(CommandParserTest, BuildProcessConfigTriggerSkipFramesDefaultsAndClamps) {
+  auto plain = command_parser::buildProcessConfig(
+      nlohmann::json::parse(R"({"mode":"trigger"})"));
+  ASSERT_TRUE(plain.has_value());
+  EXPECT_EQ(plain->trigger_skip_frames, 0);
+
+  // Negative and non-integer values fall back to a sane non-negative count.
+  auto negative = command_parser::buildProcessConfig(nlohmann::json::parse(
+      R"({"mode":"trigger","params":{"trigger_skip_frames":-3}})"));
+  ASSERT_TRUE(negative.has_value());
+  EXPECT_EQ(negative->trigger_skip_frames, 0);
+
+  auto wrong_type = command_parser::buildProcessConfig(nlohmann::json::parse(
+      R"({"mode":"trigger","params":{"trigger_skip_frames":"two"}})"));
+  ASSERT_TRUE(wrong_type.has_value());
+  EXPECT_EQ(wrong_type->trigger_skip_frames, 0);
 }
 
 TEST(CommandParserTest, BuildProcessConfigAppliesArucoParams) {

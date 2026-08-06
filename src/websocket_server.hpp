@@ -40,6 +40,8 @@ class WebSocketServer {
   void handleUnconfigure(uWS::WebSocket<false, true, int>* ws);
   void handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
                          const nlohmann::json& params);
+  void handleTriggerCapture(uWS::WebSocket<false, true, int>* ws,
+                            const nlohmann::json& msg);
   void handleStartCameras(uWS::WebSocket<false, true, int>* ws);
   void handleStartStream(uWS::WebSocket<false, true, int>* ws,
                          const nlohmann::json& params);

@@ -38,7 +38,7 @@ IDLE ─────────────────────────
 
 - **IDLE** — discovery done, no camera pipeline allocated. Accepts `configure`.
 - **CONFIGURED** — camera pipeline configured (libcamera acquired, buffers allocated); not yet capturing. Accepts `start_cameras` (→ RUNNING) or `unconfigure` (→ IDLE, releases pipeline resources).
-- **RUNNING** — cameras capturing. `start_stream` / `stop_stream` enable per-camera delivery. `stop_cameras` returns to CONFIGURED.
+- **RUNNING** — cameras capturing. `start_stream` / `stop_stream` enable per-camera delivery; `trigger_capture` (in the `trigger` process mode) saves a frame on demand. `stop_cameras` returns to CONFIGURED.
 
 To re-configure with a different `CameraConfig`: `unconfigure` (if CONFIGURED) or `stop_cameras` then `unconfigure` (if RUNNING), then `configure`.
 
@@ -143,12 +143,13 @@ Configure the optional on-device frame-processing pipeline (detection and/or sav
 
 **Request**
 ```json
-{"cmd": "set_process_mode", "mode": "none|buffer|batch|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
+{"cmd": "set_process_mode", "mode": "none|buffer|batch|trigger|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
   "save_frames": true,
   "output_dir": ".",
   "prepend_timestamp_to_dir": false,
   "batch_size": 10,
   "writer_threads": 4,
+  "trigger_skip_frames": 0,
   "checkerboard_rows": 8,
   "checkerboard_cols": 11,
   "checkerboard_full_res_detection": false,
@@ -168,6 +169,7 @@ The mode names **what is done to each captured frame**. Whether processed frames
 | `none` | No processing |
 | `buffer` | Ring-buffer in RAM; flushed to disk on `stop_cameras` |
 | `batch` | Multi-threaded writer; `writer_threads` workers, flushes every `batch_size` frames |
+| `trigger` | Nothing is written until the client sends [`trigger_capture`](#417-trigger_capture); each request saves one frame per armed camera through the `writer_threads` pool. Streaming is unaffected — live preview keeps running so the operator can see what is framed. Built for automated calibration rigs: move the camera, wait for it to stop, then trigger, so no saved frame carries motion blur. `trigger_skip_frames` (default `0`) sets the default number of frames to discard per camera before the kept one, overridable per request. |
 | `checkerboard` | Detect an OpenCV checkerboard; report its corners to the streaming client (§5.4.1). When `save_frames`, also save frames in which a checkerboard is detected |
 | `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and detect a checkerboard in each; report the corners of every detecting quadrant. When `save_frames`, save the whole frame if **any** quadrant detects. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
 | `aruco` | Detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) on the Y plane (full-res or 2x2-subsampled per `aruco_full_res_detection`); report each marker's **id** and **4 corners** to the streaming client (§5.4.2). When `save_frames`, also save frames in which at least one marker is detected. |
@@ -175,7 +177,7 @@ The mode names **what is done to each captured frame**. Whether processed frames
 
 `save_frames` (default `true`): when `false`, disk writing is disabled while detection still runs and still streams its side-products (corners/markers). In a detector mode this is the **optimized detection-only pipeline** — the writer pool is never started and the per-detection full-frame copy into the write queue is skipped, so `frames_saved` stays `0`. For `buffer`/`batch` (which have no side-product) `false` simply produces no output.
 
-`checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`. `output_dir`, `prepend_timestamp_to_dir`, `batch_size`, and `writer_threads` are ignored when `save_frames` is `false`.
+`checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`; `trigger_skip_frames` applies to `trigger`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`. `output_dir`, `prepend_timestamp_to_dir`, `batch_size`, and `writer_threads` are ignored when `save_frames` is `false`.
 
 All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`) run detection **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result (this is independent of `save_frames`). See §5.4 and §5.7.
 
@@ -374,7 +376,37 @@ All discovered cameras on a given server run the same sensor type (selected via 
 
 Unlike `get_frame_duration_limits` (which uses `{0, 0}` to mean "unavailable"), the lens-range fields use JSON `null` for "unavailable", because `0` dioptres (infinity focus) is itself a valid limit. Clients should fall back to a sensible default range when a field is `null`.
 
-### 4.17 Server response types (summary)
+### 4.17 `trigger_capture`
+Required state: **RUNNING**, and the process mode must be `trigger` (§4.5). Saves one frame per armed camera — the camera shutter-button of the protocol. In any other process mode the request is rejected with an `error` and nothing is saved.
+
+**Request**
+```json
+{"cmd": "trigger_capture", "camera_id": 0, "skip_frames": 0}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `camera_id` | integer | *(absent)* | Trigger only this camera. When omitted, **every running camera** is armed and the trigger completes when all of them have delivered — the right shape for a multi-camera rig where all views must correspond to the same pose. Errors if the named camera isn't running. |
+| `skip_frames` | integer ≥ 0 | `trigger_skip_frames` from `set_process_mode` (itself `0`) | Frames to discard **per camera** before the one that is kept. `0` saves the very next frame each camera delivers. Raise it when the frame already in flight when the trigger arrives may still be blurred — e.g. an arm that has only just come to rest. |
+
+**Response** → `trigger_result`, sent **asynchronously** once every armed camera has delivered its frame and that frame has been handed to the writer pool. This is the signal a robot loop waits on before moving again. Note the frame is queued for writing, not yet flushed to disk, when the ack is sent.
+
+```json
+{"type": "trigger_result", "trigger_id": 3, "cancelled": false,
+ "captures": [{"camera_id": 0, "frame_id": 412, "filename": "calib/cam0-412.yuv"}]}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `trigger_id` | integer | Monotonic per-session id, starting at `1` and reset by `start_cameras`. Lets a client match acks to requests. |
+| `cancelled` | boolean | `true` when capture stopped (`stop_cameras`) while the trigger was still waiting on a camera. `captures` then holds only the cameras that did deliver, so a waiting client is never left hanging. |
+| `captures[]` | array | One entry per camera that delivered, **in delivery order** (not `camera_id` order): `camera_id`, the saved frame's `frame_id`, and the `filename` it was queued to. `filename` is empty when the mode runs with `save_frames: false` (capture acknowledged, nothing written). |
+
+Only **one trigger may be outstanding at a time** — a second `trigger_capture` while one is pending returns an `error` (`"A trigger capture is already pending"`) rather than queueing, so the request↔ack correspondence in a robot loop is never ambiguous. Frames arriving while no trigger is armed, and further frames from a camera already served by the pending trigger, are discarded.
+
+Errors: not RUNNING, process mode isn't `trigger`, named camera not running, no running cameras, or a trigger already pending. As with every mode, `set_process_mode` must be sent **before** `start_cameras` — switching into `trigger` on an already-running pipeline leaves the processor in the mode it started with, and `trigger_capture` then errors with a message saying so.
+
+### 4.18 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
@@ -383,6 +415,7 @@ Unlike `get_frame_duration_limits` (which uses `{0, 0}` to mean "unavailable"), 
 | `status` | `message`, optionally `frames_saved`, `bytes_written` | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
+| `trigger_result` | `trigger_id`, `cancelled`, `captures[]` | Asynchronous ack for `trigger_capture` — sent when every armed camera has delivered its frame (or the trigger was cancelled by `stop_cameras`) |
 | `error` | `message` | Bad JSON, unknown command, wrong state, invalid arg, handler exception |
 
 ## 5. Binary Frame Protocol
@@ -553,6 +586,8 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 | Wrong state for command | `error`, state unchanged |
 | Unknown `camera_id` | `error` |
 | Invalid `process_mode` value | `error` |
+| `trigger_capture` outside the `trigger` process mode | `error` (`"trigger_capture requires the 'trigger' process mode"`), nothing saved |
+| `trigger_capture` while one is already pending | `error` (`"A trigger capture is already pending"`) |
 | Binary frame sent by client | `error` (`"Only text messages are accepted for commands"`) |
 | Second client connection attempt | HTTP `503` at upgrade (never becomes a WebSocket) |
 
@@ -569,4 +604,5 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `4` | `ChunkHeader` extended to 60 bytes: added `corner_block_size` (uint32, offset 52), `num_corner_sets` (uint16, offset 56), `reserved` (uint16, offset 58). New variable-size `CornerBlock` may follow the header in the same WS message when the save mode is `checkerboard` or `checkerboard2x2` and detection found at least one board on that frame. |
 | `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. Companion text command `get_lens_position_limits` / `lens_position_limits` response added (§4.16) to expose the hardware `LensPosition` range; text-only, no binary change. |
 | `6` | `ChunkHeader` stays 68 bytes: the first `reserved2` byte (offset 65) became `detection_kind` (uint8: 0=none, 1=checkerboard, 2=aruco), with `reserved2` shrinking to uint8[2] at offset 66. New `aruco` / `aruco2x2` save modes added (§4.5); when active, the detection block that follows the header uses the new `MarkerSetHeader` record layout (§5.4.2), carrying each marker's `id` (`int32`) and 4 corners. The checkerboard block format (§5.4.1) is unchanged. Old (`detection_kind = 0`) still means "no detection block". |
+| `6` (control-protocol only) | New `trigger` process mode plus the `trigger_capture` command and its asynchronous `trigger_result` response (§4.17), and the `trigger_skip_frames` param on `set_process_mode`. Text-only: the binary `ChunkHeader` and detection-block formats are unchanged, so `version` stays `6`. |
 | `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |
