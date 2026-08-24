@@ -1,13 +1,17 @@
 #include "websocket_server.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string_view>
 #include <vector>
 
+#include "capacity.hpp"
 #include "command_parser.hpp"
 
 using json = nlohmann::json;
@@ -274,6 +278,9 @@ void WebSocketServer::run() {
 void WebSocketServer::stop() {
   LOG_INFO("WebSocketServer", "Stopping server");
 
+  // Join the watchdog before anything it observes is torn down.
+  stopCaptureWatchdog();
+
   // Clean up any active connection
   cleanupConnection();
 
@@ -465,8 +472,16 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     return;
   }
 
-  // Start frame processor first (if not NONE mode)
+  // Refuse a mode that arithmetically cannot keep up before any of it runs.
+  // frame_processor->start() has to come first because the budget it resolves
+  // is one of the inputs, so the check reads the started processor and we tear
+  // it back down if the answer is no.
   frame_processor->start();
+  if (const std::string reason = checkCaptureFeasibility(); !reason.empty()) {
+    frame_processor->stop();
+    sendError(ws, reason);
+    return;
+  }
 
   // Set up the frame callback whenever any processing is active (detection
   // and/or saving); the processor itself decides what to do per frame.
@@ -482,6 +497,7 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
   // Start all cameras
   if (camera_manager->startAll()) {
     system_state = CameraState::RUNNING;
+    startCaptureWatchdog();
     sendStatus(ws, "All cameras started successfully");
   } else {
     frame_processor->stop();
@@ -531,6 +547,10 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
 
   LOG_INFO("WebSocketServer", "Stopping all cameras");
 
+  // Before anything else, so it cannot mistake an orderly shutdown for a
+  // stalled sensor and fire a spurious capture_timeout.
+  stopCaptureWatchdog();
+
   // Stop streaming first
   stream_manager->stopAllStreaming();
 
@@ -553,6 +573,18 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
   status["message"] = "All cameras stopped";
   status["frames_saved"] = frame_processor->getFramesSaved();
   status["bytes_written"] = frame_processor->getBytesWritten();
+  // Non-zero means capture outran its sink and the recording has a gap. The
+  // client needs this to know its dataset is incomplete.
+  const size_t dropped = frame_processor->getFramesDroppedForBacklog();
+  status["frames_dropped_backlog"] = dropped;
+  if (dropped > 0) {
+    LOG_WARN("WebSocketServer",
+             "Dropped " + std::to_string(dropped) +
+                 " frame(s) at the backlog budget of " +
+                 capacity::formatBytes(
+                     frame_processor->getBacklogBudgetBytes()) +
+                 " during this session");
+  }
 
   ws->send(status.dump(), uWS::OpCode::TEXT);
 }
@@ -705,6 +737,115 @@ void WebSocketServer::handleGetLensPositionLimits(
   response["default"] = limits.def;
   response["num_cameras"] = num_cameras;
   ws->send(response.dump(), uWS::OpCode::TEXT);
+}
+
+void WebSocketServer::startCaptureWatchdog() {
+  stopCaptureWatchdog();
+  watchdog_stop = false;
+  capture_watchdog = std::thread(&WebSocketServer::captureWatchdogLoop, this);
+  LOG_INFO("WebSocketServer", "Capture watchdog started");
+}
+
+void WebSocketServer::stopCaptureWatchdog() {
+  watchdog_stop = true;
+  if (capture_watchdog.joinable()) capture_watchdog.join();
+}
+
+void WebSocketServer::captureWatchdogLoop() {
+  using namespace std::chrono_literals;
+  while (!watchdog_stop.load()) {
+    // 250 ms ticks: fast enough that the report follows the frontend timeout
+    // closely, slow enough to be free. Camera::captureStalledForUs does the
+    // actual threshold arithmetic per camera.
+    std::this_thread::sleep_for(250ms);
+    if (watchdog_stop.load()) break;
+    for (const auto& stalled : camera_manager->pollStalledCameras()) {
+      reportCaptureStall(stalled);
+    }
+  }
+  LOG_DEBUG("WebSocketServer", "Capture watchdog stopped");
+}
+
+void WebSocketServer::reportCaptureStall(
+    const CameraManager::StalledCamera& stalled) {
+  const double seconds = static_cast<double>(stalled.stalled_for_us) / 1e6;
+  std::ostringstream detail;
+  detail << "Camera " << stalled.camera_id << " has delivered no frame for "
+         << std::fixed << std::setprecision(1) << seconds
+         << " s. The usual cause is libcamera's frontend watchdog firing "
+            "(\"Camera frontend has timed out!\"), which is unrecoverable - "
+            "capture never resumes on its own. Issue stop_cameras then "
+            "start_cameras to rebuild the pipeline (reconfiguring is not "
+            "needed). If frames resume by themselves this was a transient "
+            "stall and no action is required.";
+  LOG_ERROR("WebSocketServer", detail.str());
+
+  // The most common cause on a small-memory host is the backlog having eaten
+  // the machine, so say so when the numbers point that way — it turns a
+  // mysterious stall into an actionable one.
+  const size_t dropped = frame_processor->getFramesDroppedForBacklog();
+  json response;
+  response["type"] = Protocol::TYPE_ERROR;
+  response["code"] = "capture_timeout";
+  response["camera_id"] = stalled.camera_id;
+  response["stalled_for_us"] = stalled.stalled_for_us;
+  response["message"] = detail.str();
+  response["backlog_bytes"] = frame_processor->getBacklogBytes();
+  response["backlog_budget_bytes"] = frame_processor->getBacklogBudgetBytes();
+  response["frames_dropped_backlog"] = dropped;
+
+  // Any send from this thread must be marshalled onto the uWS loop; sendText
+  // does that and no-ops safely if the client has already gone away.
+  if (auto sink = active_sink) sink->sendText(response.dump());
+}
+
+std::string WebSocketServer::checkCaptureFeasibility() {
+  const ProcessConfig& cfg = frame_processor->getConfig();
+  const size_t camera_count = camera_manager->getCameraCount();
+  if (cfg.mode == ProcessMode::NONE || camera_count == 0) return {};
+
+  Camera* first = camera_manager->getCamera(0);
+  if (!first) return {};
+  const CameraConfig& geometry = first->getConfig();
+
+  const auto [hw_min, hw_max] = camera_manager->getFrameDurationLimitsHw();
+  const capacity::Demand demand = capacity::computeDemand(
+      geometry.width, geometry.height, camera_count,
+      camera_manager->getCurrentFrameDuration(), hw_min);
+
+  LOG_INFO("WebSocketServer",
+           "Capture demand: " + capacity::formatBytes(demand.bytes_per_frame) +
+               "/frame x " + std::to_string(demand.frames_per_second).substr(0, 5) +
+               " fps x " + std::to_string(camera_count) + " camera(s) = " +
+               capacity::formatRate(demand.bytes_per_second));
+
+  std::vector<capacity::Verdict> verdicts;
+  verdicts.push_back(capacity::checkBufferHeadroom(
+      cfg.mode, cfg.save_frames, demand,
+      frame_processor->getBacklogBudgetBytes()));
+
+  // Only probe the disk when a verdict actually depends on it — the probe
+  // writes 32 MiB O_DIRECT, which costs over a second on an SD card.
+  if (cfg.mode == ProcessMode::BATCH && cfg.save_frames) {
+    const size_t disk_rate =
+        cfg.disk_write_bytes_per_sec > 0
+            ? cfg.disk_write_bytes_per_sec
+            : capacity::diskWriteBytesPerSecond(
+                  frame_processor->getActualOutputDir());
+    verdicts.push_back(capacity::checkDiskThroughput(
+        cfg.mode, cfg.save_frames, demand, disk_rate));
+  }
+
+  for (const auto& verdict : verdicts) {
+    if (verdict.feasible) continue;
+    if (cfg.allow_overcommit) {
+      LOG_WARN("WebSocketServer",
+               "Starting anyway (allow_overcommit): " + verdict.reason);
+      continue;
+    }
+    return verdict.reason;
+  }
+  return {};
 }
 
 void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,

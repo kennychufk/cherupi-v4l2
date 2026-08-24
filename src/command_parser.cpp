@@ -156,6 +156,19 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
         params["trigger_skip_frames"].is_number_integer())
       config.trigger_skip_frames =
           std::max(0, params["trigger_skip_frames"].get<int>());
+    // Resource guards. All three are optional; 0 / absent means "decide at
+    // start()" for the two byte counts, and "refuse an infeasible mode" for
+    // allow_overcommit.
+    if (params.contains("backlog_max_bytes") &&
+        params["backlog_max_bytes"].is_number_unsigned())
+      config.backlog_max_bytes = params["backlog_max_bytes"].get<size_t>();
+    if (params.contains("disk_write_bytes_per_sec") &&
+        params["disk_write_bytes_per_sec"].is_number_unsigned())
+      config.disk_write_bytes_per_sec =
+          params["disk_write_bytes_per_sec"].get<size_t>();
+    if (params.contains("allow_overcommit") &&
+        params["allow_overcommit"].is_boolean())
+      config.allow_overcommit = params["allow_overcommit"];
   }
 
   return config;

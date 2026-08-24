@@ -63,6 +63,26 @@ class Camera {
   bool waitForNewFrame(std::chrono::milliseconds timeout);
   void releaseStreamingFrame();
 
+  // Capture watchdog. libcamera's RPi pipeline handler gives up on a stalled
+  // frontend after 5x the frame duration and logs "Camera frontend has timed
+  // out!" — after which onRequestComplete() is never called again for the
+  // life of the camera. Nothing in libcamera tells us that happened, so the
+  // only signal is the absence of frames. These two let a supervisor notice.
+  //
+  // Returns how long ago the last frame completed, in µs, but only once that
+  // exceeds the stall threshold — 0 means "not stalled" (including a camera
+  // that isn't RUNNING, or one that hasn't produced its first frame yet).
+  // The threshold is 10x the observed inter-frame interval, floored at 3 s,
+  // so it always trips after libcamera's own watchdog rather than racing it.
+  uint64_t captureStalledForUs() const;
+  // Latch a stalled camera so a supervisor reports it exactly once per stall
+  // episode. Returns true the first time; false while the latch is still set.
+  // The next delivered frame clears it. This does NOT change the camera's
+  // lifecycle state: it stays RUNNING, because stop() and unconfigure() must
+  // still run to release the libcamera resources, and start() must be able to
+  // bring it back — stop_cameras + start_cameras is the recovery path.
+  bool markCaptureFailed();
+
   std::function<void(const FrameData&)> onFrameCaptured;
   std::function<void()> onFrameAvailable;
   void setFrameAvailableCallback(std::function<void()> callback);
@@ -117,8 +137,10 @@ class Camera {
   bool has_new_frame = false;
   std::condition_variable new_frame_cv;
 
+  // Gate only — there is deliberately no FrameData here. getFrameForStreaming
+  // hands the caller the frame directly; a member copy would be a second
+  // 17.9 MB memcpy per frame that nothing ever read.
   std::mutex streaming_frame_mutex;
-  FrameData streaming_frame;
   bool streaming_frame_in_use = false;
 
   libcamera::Stream* raw_stream_{nullptr};
@@ -127,6 +149,18 @@ class Camera {
   // Per-camera frame timing diagnostics (libcamera completion thread only).
   uint64_t last_frame_ts_ns_ = 0;  // hardware timestamp of previous frame (ns)
   uint32_t fps_log_counter_ = 0;   // counts frames between periodic FPS logs
+
+  // Capture watchdog state, published by the libcamera completion thread and
+  // read by whichever thread supervises the cameras. Wall-clock (steady) time
+  // is what matters here, not the hardware timestamp: a stalled frontend stops
+  // producing hardware timestamps altogether.
+  std::atomic<uint64_t> last_frame_wall_us_{0};
+  // Exponential moving average of the observed inter-frame interval (µs), so
+  // the stall threshold tracks the cadence actually being achieved rather than
+  // the one that was requested. 0 until two frames have arrived.
+  std::atomic<uint64_t> observed_interval_us_{0};
+  // Set by markCaptureFailed() so a stall is reported once, not every tick.
+  std::atomic<bool> capture_failed_{false};
 
   // Focus state. af_continuous_ true ⇒ AfModeContinuous; false ⇒ AfModeManual
   // at lens_position_ dioptres. focus_generation_ is bumped on every

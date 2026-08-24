@@ -337,6 +337,153 @@ TEST_F(FrameProcessorTempDir, TriggerWithSaveFramesOffAcksWithoutWriting) {
   EXPECT_TRUE(fs::is_empty(dir));
 }
 
+// --- Backlog budget -------------------------------------------------------
+// The regression these guard: BUFFER used to retain every frame with no bound,
+// so at 4608x2592 (17.9 MB/frame) ~54 frames exhausted a 1 GB Pi, the
+// libcamera frontend timed out under the swap thrash, and the process was
+// OOM-killed — losing the very frames it was buffering.
+
+TEST_F(FrameProcessorTempDir, BufferModeStopsAtTheBacklogBudget) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
+  cfg.output_dir = dir.string();
+  cfg.backlog_max_bytes = 64;  // exactly 4 frames of 16 bytes
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+  EXPECT_EQ(saver.getBacklogBudgetBytes(), 64u);
+
+  for (uint32_t i = 0; i < 10; ++i) saver.saveFrame(makeFrame(0, i));
+
+  // Four accepted, six refused — and the budget is respected exactly.
+  EXPECT_EQ(saver.getBacklogBytes(), 64u);
+  EXPECT_EQ(saver.getFramesDroppedForBacklog(), 6u);
+
+  // The frames kept are the *earliest* ones, so the flush yields a usable
+  // contiguous prefix rather than a scattered set of survivors.
+  saver.flushBufferedFrames();
+  EXPECT_EQ(saver.getFramesSaved(), 4u);
+  for (uint32_t i = 0; i < 4; ++i)
+    EXPECT_TRUE(fs::exists(dir / ("cam0-" + std::to_string(i) + ".yuv"))) << i;
+  for (uint32_t i = 4; i < 10; ++i)
+    EXPECT_FALSE(fs::exists(dir / ("cam0-" + std::to_string(i) + ".yuv"))) << i;
+
+  saver.stop();
+}
+
+TEST_F(FrameProcessorTempDir, FlushReturnsTheBudgetForReuse) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
+  cfg.output_dir = dir.string();
+  cfg.backlog_max_bytes = 32;  // 2 frames
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+
+  saver.saveFrame(makeFrame(0, 0));
+  saver.saveFrame(makeFrame(0, 1));
+  saver.saveFrame(makeFrame(0, 2));  // refused
+  EXPECT_EQ(saver.getFramesDroppedForBacklog(), 1u);
+
+  saver.flushBufferedFrames();
+  // Flushing hands the bytes back, so the budget is not leaked away a session
+  // at a time.
+  EXPECT_EQ(saver.getBacklogBytes(), 0u);
+
+  saver.saveFrame(makeFrame(0, 3));
+  EXPECT_EQ(saver.getBacklogBytes(), 16u);
+  EXPECT_EQ(saver.getFramesDroppedForBacklog(), 1u);  // unchanged
+
+  saver.stop();
+}
+
+TEST_F(FrameProcessorTempDir, BatchModeReleasesTheBudgetAsItWrites) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BATCH;
+  cfg.output_dir = dir.string();
+  cfg.batch_size = 1;  // hand every frame straight to the writers
+  cfg.writer_threads = 2;
+  cfg.backlog_max_bytes = 1024 * 1024;  // ample for 64 x 512 B
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+
+  for (uint32_t i = 0; i < 64; ++i) saver.saveFrame(makeFrame(0, i, 512));
+  saver.stop();  // joins the writers
+
+  EXPECT_EQ(saver.getFramesDroppedForBacklog(), 0u);
+  EXPECT_EQ(saver.getFramesSaved(), 64u);
+  // The point of the test: every written frame gave its bytes back. Without
+  // the release in writerThreadFunc this would sit at 64 * 512 and the budget
+  // would be permanently spent after one session's worth of frames.
+  EXPECT_EQ(saver.getBacklogBytes(), 0u);
+}
+
+TEST_F(FrameProcessorTempDir, BatchModeDropsRatherThanGrowsWhenTheSinkIsSlower) {
+  // The batch-mode half of the same failure: on the reproduction hardware the
+  // SD card sustained 21.5 MB/s against a 35.8 MB/s demand, so write_queue
+  // grew without limit until the box died. Pushing frames faster than the
+  // writers retire them must now cost frames, never memory.
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BATCH;
+  cfg.output_dir = dir.string();
+  cfg.batch_size = 1;
+  cfg.writer_threads = 1;
+  cfg.backlog_max_bytes = 4096;  // 8 frames of 512 B in flight, at most
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+
+  for (uint32_t i = 0; i < 64; ++i) {
+    saver.saveFrame(makeFrame(0, i, 512));
+    // Never exceeds the budget, however far ahead of the writer we get.
+    EXPECT_LE(saver.getBacklogBytes(), cfg.backlog_max_bytes);
+  }
+  saver.stop();
+
+  // Some frames made it, some were refused, and the two account for all 64.
+  EXPECT_GT(saver.getFramesSaved(), 0u);
+  EXPECT_GT(saver.getFramesDroppedForBacklog(), 0u);
+  EXPECT_EQ(saver.getFramesSaved() + saver.getFramesDroppedForBacklog(), 64u);
+  EXPECT_EQ(saver.getBacklogBytes(), 0u);
+}
+
+TEST_F(FrameProcessorTempDir, ZeroBudgetDerivesOneFromAvailableMemory) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
+  cfg.output_dir = dir.string();
+  // backlog_max_bytes left at its 0 default.
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+  // Whatever this host reports, the budget must be a real bound — never 0,
+  // which reserveBacklog treats as "unbounded".
+  EXPECT_GE(saver.getBacklogBudgetBytes(), 64u * 1024 * 1024);
+  saver.stop();
+}
+
+TEST_F(FrameProcessorTempDir, SaveFramesOffNeverTouchesTheBudget) {
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::BUFFER;
+  cfg.output_dir = dir.string();
+  cfg.save_frames = false;
+  cfg.backlog_max_bytes = 16;
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+  for (uint32_t i = 0; i < 10; ++i) saver.saveFrame(makeFrame(0, i));
+  // Nothing is retained, so nothing is charged and nothing is "dropped".
+  EXPECT_EQ(saver.getBacklogBytes(), 0u);
+  EXPECT_EQ(saver.getFramesDroppedForBacklog(), 0u);
+  saver.stop();
+}
+
 TEST_F(FrameProcessorTempDir, CountersIncrementPerCamera) {
   ProcessConfig cfg;
   cfg.mode = ProcessMode::BUFFER;

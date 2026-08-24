@@ -2,10 +2,25 @@
 
 #include <sys/mman.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
+
+namespace {
+
+// Monotonic microseconds. Used for the capture watchdog rather than the
+// hardware timestamp, because a stalled frontend stops producing hardware
+// timestamps at all — the whole point is to measure their absence.
+uint64_t nowMonotonicUs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+}  // namespace
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
                const CameraConfig& cfg, std::string model)
@@ -256,6 +271,12 @@ bool Camera::start() {
   }
   applied_frame_duration_generation_ = frame_duration_generation_.load();
 
+  // Arm the capture watchdog before the first request goes out, so a camera
+  // that never delivers a single frame is still reported as stalled.
+  last_frame_wall_us_.store(nowMonotonicUs());
+  observed_interval_us_.store(0);
+  capture_failed_.store(false);
+
   should_stop = false;
   if (lcam->start(&controls) < 0) {
     LOG_ERROR("Camera",
@@ -377,6 +398,25 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     auto afs_meta = request->metadata().get(libcamera::controls::AfState);
     if (afs_meta) af_state = static_cast<uint8_t>(*afs_meta);
 
+    // Feed the capture watchdog: wall-clock arrival time plus an EMA of the
+    // interval between arrivals. Done before the (potentially slow) frame copy
+    // and callback below so a slow consumer doesn't look like a dead sensor.
+    {
+      const uint64_t now_us = nowMonotonicUs();
+      const uint64_t prev_us = last_frame_wall_us_.exchange(now_us);
+      // A frame arrived, so any stall is over. Clearing the latch means each
+      // stall *episode* is reported once: a permanent frontend timeout yields
+      // exactly one report (no frame ever clears it), while a transient stall
+      // that recovers can be reported again if it happens later.
+      capture_failed_.store(false);
+      if (prev_us > 0 && now_us > prev_us) {
+        const uint64_t interval = now_us - prev_us;
+        const uint64_t ema = observed_interval_us_.load();
+        observed_interval_us_.store(ema == 0 ? interval
+                                            : (ema * 3 + interval) / 4);
+      }
+    }
+
     // Periodic FPS diagnostics at INFO level (every 30 frames per camera).
     if (last_frame_ts_ns_ > 0) {
       uint64_t interval_ns = hw_ts_ns - last_frame_ts_ns_;
@@ -440,7 +480,10 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     if (onFrameCaptured) onFrameCaptured(frame);
     {
       std::lock_guard<std::mutex> lock(latest_frame_mutex);
-      latest_frame = frame;
+      // Move: `frame` is not touched again below, and at 4608x2592 a copy here
+      // is 17.9 MB of memcpy on the completion thread — the thread that must
+      // requeue this request before libcamera's dequeue watchdog fires.
+      latest_frame = std::move(frame);
       has_new_frame = true;
     }
     new_frame_cv.notify_one();
@@ -581,10 +624,12 @@ bool Camera::getFrameForStreaming(FrameData& frame) {
 
   {
     std::lock_guard<std::mutex> stream_lock(streaming_frame_mutex);
-    streaming_frame = latest_frame;
     streaming_frame_in_use = true;
-    frame = streaming_frame;
   }
+  // Move rather than copy: `has_new_frame` goes false in the same critical
+  // section, so the moved-from `latest_frame` is never read before the
+  // completion thread republishes into it.
+  frame = std::move(latest_frame);
   has_new_frame = false;
   return true;
 }
@@ -605,4 +650,49 @@ void Camera::releaseStreamingFrame() {
 
 void Camera::setFrameAvailableCallback(std::function<void()> callback) {
   onFrameAvailable = callback;
+}
+
+uint64_t Camera::captureStalledForUs() const {
+  if (state != CameraState::RUNNING) return 0;
+  const uint64_t last = last_frame_wall_us_.load();
+  if (last == 0) return 0;  // not started
+  const uint64_t now = nowMonotonicUs();
+  if (now <= last) return 0;
+  const uint64_t elapsed = now - last;
+
+  // Expected cadence: the slowest of what we are seeing, what was asked for,
+  // and what a manual shutter alone forces (frame duration can never be
+  // shorter than the exposure). Taking the maximum matters because the EMA
+  // lags a deliberate slow-down: switching 2 fps -> 0.1 fps would otherwise be
+  // measured against the old 0.5 s cadence and reported as a stall, when in
+  // fact the camera is doing exactly what it was told.
+  uint64_t expected = observed_interval_us_.load();
+  const int64_t requested = frame_duration_us_.load();
+  if (requested > 0)
+    expected = std::max(expected, static_cast<uint64_t>(requested));
+  if (!ae_auto_.load()) {
+    const int32_t shutter = exposure_time_us_.load();
+    if (shutter > 0)
+      expected = std::max(expected, static_cast<uint64_t>(shutter));
+  }
+  // Nothing known yet (auto cadence, no frame delivered): assume 1 s.
+  if (expected == 0) expected = 1000000;
+  // 10x the cadence, never under 3 s. libcamera's own frontend watchdog is 5x
+  // the frame duration floored at 1 s, so this always trips afterwards: when
+  // we report a stall, the frontend really is gone rather than merely late.
+  const uint64_t limit = std::max<uint64_t>(expected * 10, 3000000);
+  return elapsed > limit ? elapsed : 0;
+}
+
+bool Camera::markCaptureFailed() {
+  if (capture_failed_.exchange(true)) return false;
+  // Deliberately NOT a lifecycle state change. Moving to CameraState::ERROR
+  // here would wedge the documented recovery: stop() early-returns unless the
+  // camera is RUNNING (so libcamera would be left started with
+  // requestCompleted still connected, and unconfigure() would then free
+  // buffers underneath it), and start() refuses anything but CONFIGURED. The
+  // latch above is all the once-only reporting needs.
+  LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) +
+                          ": capture has stopped delivering frames");
+  return true;
 }

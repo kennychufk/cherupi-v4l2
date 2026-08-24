@@ -126,6 +126,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/camera_manager.cpp
         src/frame_processor.cpp
         src/frame_processor_helpers.cpp
+        src/capacity.cpp
         src/stream_manager.cpp
         src/rate_controller.cpp
         src/command_parser.cpp

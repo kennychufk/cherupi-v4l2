@@ -150,6 +150,19 @@ void CameraManager::setStreamManagerNotify(std::function<void()> callback) {
   for (auto& camera : cameras) camera->setFrameAvailableCallback(callback);
 }
 
+std::vector<CameraManager::StalledCamera> CameraManager::pollStalledCameras() {
+  std::vector<StalledCamera> stalled;
+  for (auto& camera : cameras) {
+    const uint64_t stalled_for = camera->captureStalledForUs();
+    if (stalled_for == 0) continue;
+    // markCaptureFailed() is the once-only gate: a camera already reported
+    // stays silent, so a supervisor emits one error per failure, not per tick.
+    if (!camera->markCaptureFailed()) continue;
+    stalled.push_back({camera->getId(), stalled_for});
+  }
+  return stalled;
+}
+
 bool CameraManager::areAnyRunning() const {
   for (const auto& camera : cameras) {
     if (camera->getState() == CameraState::RUNNING) return true;

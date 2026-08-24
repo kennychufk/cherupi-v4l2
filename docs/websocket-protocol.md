@@ -156,7 +156,10 @@ Configure the optional on-device frame-processing pipeline (detection and/or sav
   "checkerboard_num_threads": 4,
   "aruco_full_res_detection": false,
   "aruco_num_threads": 4,
-  "aruco_corner_refine": false
+  "aruco_corner_refine": false,
+  "backlog_max_bytes": 0,
+  "disk_write_bytes_per_sec": 0,
+  "allow_overcommit": false
 }}
 ```
 
@@ -167,7 +170,7 @@ The mode names **what is done to each captured frame**. Whether processed frames
 | Mode | Behavior |
 |---|---|
 | `none` | No processing |
-| `buffer` | Ring-buffer in RAM; flushed to disk on `stop_cameras` |
+| `buffer` | Held in RAM; flushed to disk on `stop_cameras`. Bounded by `backlog_max_bytes` — see [§4.5.1](#451-resource-guards). Nothing is written before the flush, so this mode's entire capacity is that budget. |
 | `batch` | Multi-threaded writer; `writer_threads` workers, flushes every `batch_size` frames |
 | `trigger` | Nothing is written until the client sends [`trigger_capture`](#417-trigger_capture); each request saves one frame per armed camera through the `writer_threads` pool. Streaming is unaffected — live preview keeps running so the operator can see what is framed. Built for automated calibration rigs: move the camera, wait for it to stop, then trigger, so no saved frame carries motion blur. `trigger_skip_frames` (default `0`) sets the default number of frames to discard per camera before the kept one, overridable per request. |
 | `checkerboard` | Detect an OpenCV checkerboard; report its corners to the streaming client (§5.4.1). When `save_frames`, also save frames in which a checkerboard is detected |
@@ -183,6 +186,31 @@ All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`)
 
 **Response** → `status` (`"Process mode configured: <mode>"`) or `error` on invalid mode.
 
+#### 4.5.1 Resource guards
+
+A mode that retains every frame (`buffer`) or writes every frame (`batch`) builds
+a backlog whenever it outruns its sink. Uncapped, that backlog grows until the
+kernel OOM-kills the server mid-capture — and on the way there the swap thrash
+starves libcamera's completion thread past the RPi dequeue watchdog, which kills
+the capture pipeline permanently (see [§7.1](#71-capture-timeouts)). At
+4608x2592 YUV420 one frame is 17.9 MB, so on a 1 GB Pi 5 this takes about
+**54 frames** — under half a minute at 2 fps.
+
+Three params bound that, all optional:
+
+| Param | Default | Meaning |
+|---|---|---|
+| `backlog_max_bytes` | `0` | Ceiling on RAM held by frames captured but not yet written (`buffer`'s store plus the writer pool's queue). `0` ⇒ the server derives one: half of `MemAvailable`, clamped to `[64 MiB, 2 GiB]`. |
+| `disk_write_bytes_per_sec` | `0` | Sustained write throughput of `output_dir`'s filesystem, used by the `start_cameras` feasibility check. `0` ⇒ the server measures it once with a 32 MiB `O_DIRECT` probe (adds ~1.5 s to the first `start_cameras` in `batch` mode). |
+| `allow_overcommit` | `false` | Start even when the feasibility check says the mode cannot keep up. The check still runs and still logs; it just stops refusing. |
+
+**On reaching the budget** the server keeps the frames it has already accepted
+and refuses new ones, so a flush yields a usable contiguous *prefix* of the
+capture rather than a scattered set of survivors. It logs one warning and then
+counts silently; the total is reported as `frames_dropped_backlog` in the
+`stop_cameras` reply (§4.9) and in a `capture_timeout` error (§7.1). A non-zero
+count means the recording has a gap.
+
 ### 4.6 `start_cameras`
 Required state: **CONFIGURED**. Starts frame processing (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
 
@@ -190,6 +218,29 @@ Required state: **CONFIGURED**. Starts frame processing (if non-`none`) and all 
 {"cmd": "start_cameras"}
 ```
 Response: `status` or `error`.
+
+Beyond the usual wrong-state failure, this **refuses to start** when the
+configured mode provably cannot keep up with the camera on this hardware, and
+the `error` message names the arithmetic. Two checks run, both skipped when
+`allow_overcommit` is set:
+
+- **`batch` vs. disk throughput** — `bytes_per_frame x fps x cameras` against
+  the measured (or declared) write rate of `output_dir`. Only `batch` writes
+  every captured frame continuously; `trigger` and the detector modes write only
+  what is asked for or detected, so neither has a rate to check ahead of time.
+- **`buffer` vs. the backlog budget** — refused only when the budget cannot hold
+  even two seconds of capture, which is a misconfiguration rather than an
+  intent. A budget that holds a short-but-deliberate window is allowed, and
+  degrades by dropping frames at the ceiling.
+
+Example refusal:
+
+```json
+{
+  "type": "error",
+  "message": "batch mode at 17.9 MB/frame x 2.00 fps needs 35.8 MB/s, but this filesystem sustains only 21.0 MB/s (1.7x too slow). ..."
+}
+```
 
 ### 4.7 `start_stream`
 Required state: **RUNNING**. Begin binary delivery for one camera.
@@ -220,9 +271,13 @@ Required state: **RUNNING**. Stops streaming, stops capture, flushes pending sav
   "type": "status",
   "message": "All cameras stopped",
   "frames_saved": 1234,
-  "bytes_written": 567890123
+  "bytes_written": 567890123,
+  "frames_dropped_backlog": 0
 }
 ```
+
+`frames_dropped_backlog` counts frames refused because the backlog budget was
+full (§4.5.1). Non-zero ⇒ capture outran its sink and the recording has a gap.
 
 ### 4.10 `reset_frame_counts`
 Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on the saver. Allowed in any state.
@@ -412,11 +467,12 @@ Errors: not RUNNING, process mode isn't `trigger`, named camera not running, no 
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
 | `state` | `state` (`"idle"` \| `"configured"` \| `"running"`) | Reply to `get_state` |
-| `status` | `message`, optionally `frames_saved`, `bytes_written` | Successful command, state change |
+| `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
 | `trigger_result` | `trigger_id`, `cancelled`, `captures[]` | Asynchronous ack for `trigger_capture` — sent when every armed camera has delivered its frame (or the trigger was cancelled by `stop_cameras`) |
-| `error` | `message` | Bad JSON, unknown command, wrong state, invalid arg, handler exception |
+| `error` | `message`, optionally `code` and code-specific fields | Bad JSON, unknown command, wrong state, invalid arg, handler exception, infeasible mode (§4.6) |
+| `error` (`code: "capture_timeout"`) | `code`, `camera_id`, `stalled_for_us`, `message`, `backlog_bytes`, `backlog_budget_bytes`, `frames_dropped_backlog` | **Unsolicited.** A camera has stopped delivering frames (§7.1) |
 
 ## 5. Binary Frame Protocol
 
@@ -590,6 +646,62 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 | `trigger_capture` while one is already pending | `error` (`"A trigger capture is already pending"`) |
 | Binary frame sent by client | `error` (`"Only text messages are accepted for commands"`) |
 | Second client connection attempt | HTTP `503` at upgrade (never becomes a WebSocket) |
+| Mode cannot keep up with the camera | `error` at `start_cameras`, state stays **CONFIGURED** (§4.6) |
+| A camera stops delivering frames | **unsolicited** `error` with `code: "capture_timeout"` (§7.1) |
+
+### 7.1 Capture timeouts
+
+Everything else in this section is a reply to something the client sent. This
+one is not: the server pushes it whenever a camera stops delivering frames.
+
+libcamera's Raspberry Pi pipeline handler gives up on a stalled frontend after
+5x the frame duration (floored at 1 s), logging:
+
+```
+WARN  V4L2 /dev/video4[19:cap]: Dequeue timer of 2495000.00us has expired!
+ERROR RPI  Camera frontend has timed out!
+```
+
+After that, `requestCompleted` is **never called again for the life of that
+camera**. libcamera surfaces nothing to the application, so the only evidence is
+the absence of frames — which is why an unguarded server presents this as an
+indefinite hang on a perfectly healthy WebSocket rather than as a failure.
+
+A watchdog therefore polls every camera and reports one error per failure once a
+camera has been silent for **10x its cadence, never less than 3 s**. The cadence
+is the slowest of the observed inter-frame interval, the locked
+`FrameDurationLimits`, and any manual `ExposureTime` — so deliberately dropping
+to a slow frame rate never reads as a stall. The threshold sits above
+libcamera's own watchdog by construction, so when this fires the frontend really
+is gone.
+
+```json
+{
+  "type": "error",
+  "code": "capture_timeout",
+  "camera_id": 0,
+  "stalled_for_us": 5712345,
+  "message": "Camera 0 has delivered no frame for 5.7 s. The usual cause is ...",
+  "backlog_bytes": 304611328,
+  "backlog_budget_bytes": 320233472,
+  "frames_dropped_backlog": 17
+}
+```
+
+**Recovery is not automatic**: issue `stop_cameras` then `start_cameras` to
+rebuild the pipeline. Reconfiguring is not required, and the camera is left in
+its normal **RUNNING** lifecycle state precisely so that path stays open — the
+report is a latch, not a state transition.
+
+The latch clears on the next delivered frame, so each stall *episode* is
+reported once. A real frontend timeout therefore yields exactly one error (no
+frame ever arrives to clear it); a transient stall that recovers on its own
+yields one error and then resumes, and may be reported again if it recurs.
+
+The three backlog fields are included because memory exhaustion is the most
+common cause on a small-memory host — `backlog_bytes` at the budget with a
+non-zero drop count points at the mode's resource demands (§4.5.1) rather than
+at the sensor or its cable.
 
 ## 8. Versioning
 
@@ -605,4 +717,5 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `5` | `ChunkHeader` extended to 68 bytes: added per-frame focus metadata `lens_position` (float, offset 60; dioptres, `NaN` if unavailable) and `af_state` (uint8, offset 64; libcamera `AfState`, `0xFF` if unavailable), plus `reserved2` (uint8[3], offset 65). Populated from libcamera `LensPosition` / `AfState` request metadata for every frame in manual, auto and continuous AF. Companion text command `get_lens_position_limits` / `lens_position_limits` response added (§4.16) to expose the hardware `LensPosition` range; text-only, no binary change. |
 | `6` | `ChunkHeader` stays 68 bytes: the first `reserved2` byte (offset 65) became `detection_kind` (uint8: 0=none, 1=checkerboard, 2=aruco), with `reserved2` shrinking to uint8[2] at offset 66. New `aruco` / `aruco2x2` save modes added (§4.5); when active, the detection block that follows the header uses the new `MarkerSetHeader` record layout (§5.4.2), carrying each marker's `id` (`int32`) and 4 corners. The checkerboard block format (§5.4.1) is unchanged. Old (`detection_kind = 0`) still means "no detection block". |
 | `6` (control-protocol only) | New `trigger` process mode plus the `trigger_capture` command and its asynchronous `trigger_result` response (§4.17), and the `trigger_skip_frames` param on `set_process_mode`. Text-only: the binary `ChunkHeader` and detection-block formats are unchanged, so `version` stays `6`. |
+| `6` (control-protocol only) | Resource guards added. `set_process_mode` gains `backlog_max_bytes`, `disk_write_bytes_per_sec` and `allow_overcommit` (§4.5.1); `start_cameras` may now refuse an infeasible mode (§4.6); the `stop_cameras` status gains `frames_dropped_backlog` (§4.9); and a new **unsolicited** `error` with `code: "capture_timeout"` reports a camera that has stopped delivering frames (§7.1) — the first server-initiated message that is not a reply or a binary frame. Text-only; `version` stays `6`. |
 | `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |

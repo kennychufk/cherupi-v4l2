@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -13,6 +14,20 @@
 #include "types.hpp"
 
 namespace {
+
+namespace fs = std::filesystem;
+
+// These two tests exercise the streaming path, not the writing path, but the
+// detector modes they use still queue a write task per detection. Point that at
+// the build tree's scratch directory: `output_dir = "."` made every run drop a
+// stray cam<N>-<M>.yuv into whatever directory the test binary was invoked from
+// (i.e. the repo root, via ctest).
+std::string scratchOutputDir() {
+  fs::path dir = fs::path(CHERUPI_TEST_SCRATCH_DIR) / "stream_chunking";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  return dir.string();
+}
 
 // Detection is async/best-effort, so poll the saver's detected-frame slot
 // until the worker publishes a processed frame for `camera_id`. Returns false
@@ -171,7 +186,7 @@ TEST(StreamChunkingTest, ChunkHeaderEmitsZeroCornerBlockOnNoDetection) {
   cfg.checkerboard_full_res_detection = true;
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
-  cfg.output_dir = ".";
+  cfg.output_dir = scratchOutputDir();
   saver.configure(cfg);
   saver.start();
 
@@ -258,7 +273,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   cfg.checkerboard_full_res_detection = true;
   cfg.checkerboard_num_threads = 4;
   cfg.writer_threads = 1;
-  cfg.output_dir = ".";
+  cfg.output_dir = scratchOutputDir();
 
   FrameProcessor saver;
   saver.configure(cfg);

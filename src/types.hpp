@@ -191,36 +191,12 @@ struct FrameData {
   float lens_position = std::numeric_limits<float>::quiet_NaN();  // dioptres
   uint8_t af_state = 0xFF;  // libcamera AfState enum, 0xFF = unavailable
 
-  FrameData() = default;
-  FrameData(const FrameData& other)
-      : data(other.data),
-        frame_id(other.frame_id),
-        camera_id(other.camera_id),
-        width(other.width),
-        height(other.height),
-        bytes_per_line(other.bytes_per_line),
-        pixel_format(other.pixel_format),
-        timestamp_us(other.timestamp_us),
-        frame_duration_us(other.frame_duration_us),
-        lens_position(other.lens_position),
-        af_state(other.af_state) {}
-
-  FrameData& operator=(const FrameData& other) {
-    if (this != &other) {
-      data = other.data;
-      frame_id = other.frame_id;
-      camera_id = other.camera_id;
-      width = other.width;
-      height = other.height;
-      bytes_per_line = other.bytes_per_line;
-      pixel_format = other.pixel_format;
-      timestamp_us = other.timestamp_us;
-      frame_duration_us = other.frame_duration_us;
-      lens_position = other.lens_position;
-      af_state = other.af_state;
-    }
-    return *this;
-  }
+  // Rule of zero, deliberately. This used to hand-roll a copy constructor and
+  // copy assignment that were byte-for-byte what the compiler generates — but
+  // *declaring* them suppressed the implicit move operations, so every
+  // `std::move(frame)` in the codebase silently deep-copied `data` instead.
+  // At 4608x2592 YUV420 that is 17.9 MB per accidental copy, on the capture
+  // thread. Letting the compiler generate all five keeps moves actually moving.
 };
 
 // Camera configuration
@@ -314,6 +290,33 @@ struct ProcessConfig {
   bool aruco_full_res_detection = false;
   int aruco_num_threads = 4;
   bool aruco_corner_refine = false;
+
+  // Upper bound, in bytes, on the RAM held by the in-flight frame backlog:
+  // BUFFER's `buffered_frames` plus the writer pool's `write_queue` and
+  // `pending_batch`. 0 ⇒ derive one at start() from MemAvailable (see
+  // capacity::defaultBacklogBudgetBytes).
+  //
+  // This bound is the difference between degrading and dying. Without it a
+  // mode that retains or writes every frame grows unboundedly whenever it
+  // outruns its sink, until the kernel OOM-kills the server mid-capture —
+  // taking the frames it was collecting with it. On a 1 GB Pi 5 at 4608x2592
+  // that is ~54 frames, i.e. under half a minute at 2 fps.
+  //
+  // On reaching the budget the processor keeps the earliest, contiguous run of
+  // frames and refuses new ones, counting the drops (getFramesDroppedForBacklog)
+  // and warning once. Frames already accepted are always flushed on stop.
+  size_t backlog_max_bytes = 0;
+
+  // Sustained write throughput of `output_dir`'s filesystem, in bytes/s, used
+  // by the start_cameras feasibility check. 0 ⇒ measure it once with a short
+  // O_DIRECT probe (see capacity::diskWriteBytesPerSecond). Set it explicitly
+  // to skip the probe on a device whose throughput you already know.
+  size_t disk_write_bytes_per_sec = 0;
+
+  // Start capture even when the feasibility check says this mode cannot keep
+  // up on this hardware. The check still runs and still logs, but start_cameras
+  // no longer refuses — frames are dropped at the backlog budget instead.
+  bool allow_overcommit = false;
 
   // TRIGGER mode: how many freshly delivered frames to discard per camera
   // before saving the triggered one. 0 (the default) saves the very next frame

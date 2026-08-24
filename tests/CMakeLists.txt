@@ -6,6 +6,7 @@ set(UNIT_SOURCES
     unit/chunk_protocol_test.cpp
     unit/command_parser_test.cpp
     unit/frame_processor_helpers_test.cpp
+    unit/capacity_test.cpp
     unit/frame_processor_modes_test.cpp
     unit/stream_chunking_test.cpp
     unit/checkerboard_detector_test.cpp
@@ -25,6 +26,7 @@ add_executable(unit_tests
     ../src/rate_controller.cpp
     ../src/frame_processor.cpp
     ../src/frame_processor_helpers.cpp
+    ../src/capacity.cpp
     ../src/command_parser.cpp
     ../src/checkerboard_detector.cpp
     ../src/aruco_detector.cpp

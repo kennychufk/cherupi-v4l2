@@ -88,6 +88,30 @@ class FrameProcessor {
   std::atomic<size_t> frames_checked{0};
   std::atomic<size_t> frames_detected{0};
 
+  // --- Backlog accounting -------------------------------------------------
+  // Bytes currently held by frames that have been accepted but not yet written
+  // out: BUFFER's `buffered_frames` plus the writer pool's `write_queue` and
+  // `pending_batch`. Incremented when a frame is accepted, decremented when it
+  // leaves. Atomic so the check on the capture thread needs no extra lock.
+  std::atomic<size_t> backlog_bytes{0};
+  // Budget resolved in start(): config.backlog_max_bytes, or a default derived
+  // from MemAvailable when that is 0.
+  std::atomic<size_t> backlog_budget{0};
+  // Frames refused because accepting them would have exceeded the budget.
+  std::atomic<size_t> frames_dropped_backlog{0};
+  // Latches on the first refusal so the warning is logged once per session
+  // rather than once per dropped frame.
+  std::atomic<bool> backlog_warned{false};
+
+  // Reserve `bytes` against the budget. Returns false when the frame does not
+  // fit, in which case nothing is reserved, the drop is counted, and the first
+  // such refusal is logged. Keeping the earliest contiguous run of frames (as
+  // opposed to evicting the oldest) is what makes the flush on stop useful:
+  // a prefix of a capture is a usable dataset, a ring of survivors is not.
+  bool reserveBacklog(size_t bytes);
+  // Return `bytes` to the budget once the frame has been written or dropped.
+  void releaseBacklog(size_t bytes);
+
   // Per-camera frame saving counters
   std::unordered_map<uint32_t, std::atomic<uint32_t>> frames_saved_per_camera;
   // std::mutex is not used to protect the map because the numbers do not need
@@ -224,8 +248,18 @@ class FrameProcessor {
   size_t getBytesWritten() const { return bytes_written; }
   size_t getFramesChecked() const { return frames_checked; }
   size_t getDetections() const { return frames_detected; }
+  // Bytes of captured frames currently held in RAM awaiting write/flush.
+  size_t getBacklogBytes() const { return backlog_bytes; }
+  // The budget in force for this session (resolved in start()).
+  size_t getBacklogBudgetBytes() const { return backlog_budget; }
+  // Frames refused because the backlog budget was full. Non-zero means the
+  // capture outran its sink and the recording has gaps.
+  size_t getFramesDroppedForBacklog() const { return frames_dropped_backlog; }
   bool isEnabled() const { return enabled; }
   ProcessMode getMode() const { return config.mode; }
+  // The mode's full configuration, for callers that need to reason about its
+  // resource demands (the start_cameras feasibility check).
+  const ProcessConfig& getConfig() const { return config; }
   const std::string& getActualOutputDir() const { return actual_output_dir; }
 
   // Streamer-facing: hand off the most recent detector-processed frame for

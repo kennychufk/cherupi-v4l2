@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "capacity.hpp"
 #include "frame_processor_helpers.hpp"
 
 FrameProcessor::~FrameProcessor() { stop(); }
@@ -126,6 +127,22 @@ void FrameProcessor::start() {
   frames_checked = 0;
   frames_detected = 0;
 
+  // Resolve the backlog budget for this session. Without a bound here, a mode
+  // that retains or writes every frame grows until the kernel OOM-kills the
+  // server mid-capture; with one, it drops frames and keeps running.
+  backlog_bytes = 0;
+  frames_dropped_backlog = 0;
+  backlog_warned = false;
+  const size_t budget =
+      config.backlog_max_bytes > 0
+          ? config.backlog_max_bytes
+          : capacity::defaultBacklogBudgetBytes(capacity::availableMemoryBytes());
+  backlog_budget = budget;
+  LOG_INFO("FrameProcessor",
+           "Backlog budget: " + capacity::formatBytes(budget) +
+               (config.backlog_max_bytes > 0 ? " (configured)"
+                                             : " (derived from MemAvailable)"));
+
   // Reset per-camera counters
   frames_saved_per_camera.clear();
 
@@ -148,10 +165,12 @@ void FrameProcessor::start() {
   }
 
   if (config.mode == ProcessMode::BUFFER) {
-    // Reserve space for buffered frames
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.clear();
-    buffered_frames.reserve(10000);
+    // The previous flat reserve(10000) encoded an intent -- 10000 frames --
+    // that is 179 GB at 4608x2592. The budget resolved above is the real
+    // limit, so start small and let growth be bounded by it instead.
+    buffered_frames.reserve(64);
   } else if (usesWriterPool(config.mode)) {
     // The writer pool exists only to persist frames. When save_frames is off we
     // skip it entirely: a detector mode then runs detection solely to stream
@@ -241,15 +260,64 @@ void FrameProcessor::stop() {
   }
 }
 
+bool FrameProcessor::reserveBacklog(size_t bytes) {
+  const size_t budget = backlog_budget.load();
+  if (budget == 0) return true;  // unbounded (start() not run); nothing to gate
+
+  // Compare-exchange rather than a plain fetch_add so two capture threads
+  // cannot both see room and jointly overshoot the budget.
+  size_t held = backlog_bytes.load(std::memory_order_relaxed);
+  while (held + bytes <= budget) {
+    if (backlog_bytes.compare_exchange_weak(held, held + bytes,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+
+  frames_dropped_backlog.fetch_add(1, std::memory_order_relaxed);
+  if (!backlog_warned.exchange(true)) {
+    LOG_WARN("FrameProcessor",
+             "Backlog budget of " + capacity::formatBytes(budget) +
+                 " reached (" + capacity::formatBytes(held) + " held, " +
+                 capacity::formatBytes(bytes) +
+                 " per frame): capture is outrunning its sink. Keeping the "
+                 "frames already accepted and dropping new ones from here on, "
+                 "so the recording will have a gap. Further drops are counted, "
+                 "not logged.");
+  }
+  return false;
+}
+
+void FrameProcessor::releaseBacklog(size_t bytes) {
+  if (bytes == 0) return;
+  // Saturating subtract via CAS, not load-then-fetch_sub: several writer
+  // threads release concurrently, so a stale `held` could over-subtract and
+  // wrap the counter — which would silently disable the budget (a huge value
+  // never satisfies `held + bytes <= budget`, so every later frame is dropped)
+  // for the rest of the session.
+  size_t held = backlog_bytes.load(std::memory_order_relaxed);
+  while (!backlog_bytes.compare_exchange_weak(
+      held, held > bytes ? held - bytes : 0, std::memory_order_acq_rel,
+      std::memory_order_relaxed)) {
+  }
+}
+
 void FrameProcessor::saveFrame(const FrameData& frame) {
   if (!enabled) return;
 
   if (config.mode == ProcessMode::BUFFER) {
     if (!config.save_frames) return;  // nothing to persist → nothing to buffer
+    // BUFFER never drains before stop(), so the budget is its whole capacity.
+    if (!reserveBacklog(frame.data.size())) return;
     std::lock_guard<std::mutex> lock(buffer_mutex);
     buffered_frames.push_back(frame);
   } else if (config.mode == ProcessMode::BATCH) {
     if (!config.save_frames) return;  // no writer pool started
+    // The writer pool drains continuously, so the budget only bites when the
+    // disk cannot keep up with capture -- exactly the case that used to grow
+    // write_queue without limit until the box died.
+    if (!reserveBacklog(frame.data.size())) return;
     WriteTask task;
     task.filename = generateFilename(frame.camera_id, frame.frame_id);
     task.data = frame.data;
@@ -360,7 +428,7 @@ void FrameProcessor::handleTriggerFrame(const FrameData& frame) {
     }
   }
 
-  if (queue_write) {
+  if (queue_write && reserveBacklog(frame.data.size())) {
     // Copy the multi-MB payload outside trigger_mutex so a second camera's
     // callback isn't held up behind this one's memcpy.
     task.data = frame.data;
@@ -432,7 +500,7 @@ void FrameProcessor::processDetection(FrameData frame) {
     // frame payload into the write queue on every detection, which is the main
     // win of the no-save detection pipeline (the frame is still moved once into
     // the streaming slot below).
-    if (config.save_frames) {
+    if (config.save_frames && reserveBacklog(frame.data.size())) {
       WriteTask task;
       task.filename = generateFilename(frame.camera_id, frame.frame_id);
       task.data = frame.data;  // frame is moved into the stream slot below
@@ -726,7 +794,9 @@ void FrameProcessor::flushBufferedFrames() {
   std::cout << "Writing " << buffered_frames.size()
             << " buffered frames to disk..." << std::endl;
 
+  size_t flushed_bytes = 0;
   for (const auto& frame : buffered_frames) {
+    flushed_bytes += frame.data.size();
     std::string filename = generateFilename(frame.camera_id, frame.frame_id);
     std::ofstream file(filename, std::ios::binary);
     if (file) {
@@ -740,6 +810,9 @@ void FrameProcessor::flushBufferedFrames() {
   }
 
   buffered_frames.clear();
+  // Hand the budget back so a subsequent session starts with a clear backlog
+  // even if start() is never reached (e.g. stop_cameras without a restart).
+  releaseBacklog(flushed_bytes);
 
   std::cout << "Finished writing buffered frames" << std::endl;
 }
@@ -758,6 +831,11 @@ void FrameProcessor::writerThreadFunc() {
       WriteTask task = std::move(write_queue.front());
       write_queue.pop();
       lock.unlock();
+
+      // The frame's bytes stop counting against the backlog budget once this
+      // task has been dealt with, written or not — holding them after the
+      // buffer is gone would leak the budget away a frame at a time.
+      const size_t task_bytes = task.data.size();
 
       // Write with O_DIRECT for better SSD performance
       int fd = ::open(task.filename.c_str(),
@@ -781,6 +859,7 @@ void FrameProcessor::writerThreadFunc() {
         }
         close(fd);
       }
+      releaseBacklog(task_bytes);
     }
   }
 }

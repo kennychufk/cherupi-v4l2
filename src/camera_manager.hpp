@@ -40,6 +40,17 @@ class CameraManager {
   bool areAnyRunning() const;
   void resetFrameCounts();
 
+  // One camera whose capture has stopped delivering frames (see
+  // Camera::captureStalledForUs), reported exactly once per camera.
+  struct StalledCamera {
+    uint32_t camera_id = 0;
+    uint64_t stalled_for_us = 0;
+  };
+  // Sweep every camera and return the ones that have newly stalled, flagging
+  // each so it is not reported again. Cheap enough to call on a timer; safe to
+  // call from any thread.
+  std::vector<StalledCamera> pollStalledCameras();
+
   // Apply the same focus setting to every discovered camera. lens_position
   // semantics: < 0 ⇒ continuous AF; ≥ 0 ⇒ manual at that dioptre value.
   void setLensPosition(float lens_position);

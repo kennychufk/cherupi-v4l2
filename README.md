@@ -74,11 +74,26 @@ Full specification, including binary header layout and chunk framing, lives in [
 Set with `set_save_mode` before `start_cameras`:
 
 - `none` — stream only
-- `buffer` — in-memory ring
+- `buffer` — held in RAM, flushed on stop (bounded, see below)
 - `batch` — multi-threaded disk writer (`writer_threads`, `batch_size`)
 - `checkerboard` — detect and save only frames containing a checkerboard (`checkerboard_rows`, `checkerboard_cols`, `checkerboard_full_res_detection`, `checkerboard_num_threads`)
 
 Common parameters: `output_dir`, `prepend_timestamp_to_dir`. Saved YUV420 frames can be converted to images with `yuv420_convert`.
+
+### Resource guards
+
+Full-resolution frames are large (17.9 MB at 4608x2592), so a mode that keeps
+or writes every frame can outrun its sink. The server bounds the resulting
+backlog rather than growing until it is OOM-killed:
+
+- `backlog_max_bytes` — RAM ceiling for captured-but-unwritten frames. `0` (default) ⇒ half of `MemAvailable`. On reaching it, the frames already accepted are kept and new ones are dropped and counted.
+- `disk_write_bytes_per_sec` — declared write rate of `output_dir`. `0` ⇒ measured once with a 32 MiB `O_DIRECT` probe.
+- `allow_overcommit` — start even when `start_cameras` judges the mode unable to keep up (it refuses by default, with the arithmetic in the error message).
+
+A camera that stops delivering frames is reported as an unsolicited
+`error` with `code: "capture_timeout"`; recover with `stop_cameras` then
+`start_cameras`. See [`docs/websocket-protocol.md`](docs/websocket-protocol.md)
+§4.5.1, §4.6 and §7.1.
 
 ## Limitations
 

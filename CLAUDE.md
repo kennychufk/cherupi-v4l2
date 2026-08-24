@@ -36,6 +36,7 @@ All paths below are under `src/`.
 - `frame_processor.*` / `frame_processor_helpers.*` — `FrameProcessor` runs the per-frame process modes NONE / BUFFER / BATCH / CHECKERBOARD / ARUCO plus pure helpers (filename, timestamped dir, Y-plane extraction)
 - `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection
 - `aruco_detector.*` — OpenCV `cv::aruco::detectMarkers` detection (dictionary hard-coded to `DICT_APRILTAG_16h5`)
+- `capacity.*` — resource arithmetic: bytes/frame, the backlog budget derived from `MemAvailable`, an `O_DIRECT` probe of the output filesystem's sustained write rate, and the feasibility verdicts `start_cameras` gates on. Pure except for the two OS probes, so the arithmetic is unit-tested.
 - `types.hpp` — logger, protocol constants, `CameraConfig`, `ProcessConfig`, chunk headers
 
 ## WebSocket Protocol
@@ -57,14 +58,14 @@ Full specification: [`docs/websocket-protocol.md`](docs/websocket-protocol.md).
 - `stop_cameras` RUNNING→CONFIGURED (halts capture, keeps pipeline)
 - `unconfigure` CONFIGURED→IDLE (releases libcamera resources)
 
-A per-camera `ERROR` state exists but is not currently a state-machine target.
+A per-camera `ERROR` state exists but is not currently a state-machine target — and deliberately so. A stalled camera is flagged by a latch in `Camera` (`markCaptureFailed`), not by a state change: `Camera::stop()` early-returns unless the camera is `RUNNING`, so moving a stalled camera to `ERROR` would leave libcamera started with `requestCompleted` still connected and make `stop_cameras` + `start_cameras` — the documented recovery — impossible.
 
 ## Process Modes
 
 Set via `set_process_mode`; each mode names what happens to a captured frame. Whether processed frames are also written to disk is an orthogonal axis — `save_frames` (default `true`).
 
 - `NONE` — no processing
-- `BUFFER` — in-memory ring, flushed to disk on stop
+- `BUFFER` — held in RAM, flushed to disk on stop. Bounded by `backlog_max_bytes` (see **Resource Guards**); nothing is written before the flush, so that budget is the mode's entire capacity.
 - `BATCH` — multi-threaded disk writer (`writer_threads`, `batch_size`)
 - `TRIGGER` — save-on-demand: frames stream live but nothing is written until the client sends `trigger_capture`, which saves one frame per armed camera (all running cameras by default, or one via `camera_id`) and acks asynchronously with `trigger_result` once every armed camera has delivered. `skip_frames` (default from `trigger_skip_frames`) discards settling frames first. One trigger outstanding at a time. Built for a robot-arm calibration rig — move, stop, trigger — so saved frames carry no motion blur.
 - `CHECKERBOARD` — detect a checkerboard and report its corners to the client (`rows`, `cols`, `full_res_detection`, `num_threads`); when `save_frames`, also save frames where one is detected
@@ -88,6 +89,31 @@ CMake 3.14+, C++17. Targets:
 - System: `libcamera` (pkg-config), `OpenCV`, `OpenSSL`, `zlib`, pthreads
 - Fetched: `nlohmann/json` v3.11.3, `uSockets` v0.8.8, `uWebSockets` v20.62.0
 - Flags: `-O3 -march=armv8.2-a+fp16+simd -mtune=cortex-a76 -ffast-math -funroll-loops -ftree-vectorize`
+
+## Resource Guards
+
+At 4608x2592 YUV420 a frame is **17.9 MB**. A mode that retains every frame
+(`BUFFER`) or writes every frame (`BATCH`) builds a backlog whenever it outruns
+its sink, and an unbounded backlog does not merely waste memory — it kills
+capture:
+
+```
+backlog grows -> swap thrash -> libcamera's completion thread misses the RPi
+dequeue watchdog (5x frame duration, floored at 1 s) -> "Camera frontend has
+timed out!" -> requestCompleted never fires again -> OOM kill
+```
+
+On a 1 GB Pi 5 that is ~54 frames, i.e. under half a minute at 2 fps. Three
+mechanisms bound it, all configured through `set_process_mode`:
+
+1. **`ProcessConfig::backlog_max_bytes`** caps the RAM held by captured-but-unwritten frames (`buffered_frames` + `write_queue` + `pending_batch`), accounted in `FrameProcessor::reserveBacklog` / `releaseBacklog`. `0` ⇒ half of `MemAvailable`, clamped to `[64 MiB, 2 GiB]`. On reaching it the processor **keeps the frames already accepted and refuses new ones**, so a flush yields a usable contiguous prefix; drops are counted (`getFramesDroppedForBacklog`) and warned once.
+2. **A feasibility gate in `start_cameras`** refuses a mode that provably cannot keep up: `BATCH` against the measured write rate of `output_dir`, `BUFFER` against a budget too small to hold two seconds. `allow_overcommit` downgrades the refusal to a warning.
+3. **A capture watchdog** (`WebSocketServer::captureWatchdogLoop`, 250 ms ticks) reports a camera that has gone silent for 10x its cadence (min 3 s) as an unsolicited `error` with `code: "capture_timeout"`. libcamera surfaces a frontend timeout to nobody, so without this the server hangs silently on a healthy socket. The cadence is the slowest of observed interval, locked `FrameDurationLimits` and manual `ExposureTime`, so a deliberate slow-down never reads as a stall.
+
+`FrameData` is intentionally rule-of-zero. It used to hand-roll a copy
+constructor and copy assignment identical to the compiler's, which suppressed
+the implicit *move* operations — so every `std::move(frame)` in the codebase
+silently deep-copied a multi-MB payload. Do not reintroduce them.
 
 ## Key Design Points
 

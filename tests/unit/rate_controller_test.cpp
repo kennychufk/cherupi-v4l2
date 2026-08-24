@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -12,19 +13,35 @@ TEST(AdaptiveRateControllerTest, InitialRateAndDelay) {
   EXPECT_DOUBLE_EQ(rc.getCurrentRate(),
                    AdaptiveRateController::INITIAL_RATE);
 
-  // Expected delay at 200 Hz is 5 ms = 5000 us.
+  // The delay is just the reciprocal of the rate, so derive the expectation
+  // from the constant rather than hard-coding a figure that goes stale the
+  // next time INITIAL_RATE is retuned (it already did, in 57fd041).
+  const double expected_us = 1e6 / AdaptiveRateController::INITIAL_RATE;
   auto delay = rc.getChunkDelay();
-  EXPECT_NEAR(delay.count(), 5000, 100);
+  EXPECT_NEAR(delay.count(), expected_us, std::max(1.0, expected_us * 0.02));
 }
 
 TEST(AdaptiveRateControllerTest, SuccessesBumpRateUpward) {
   AdaptiveRateController rc;
-  const double initial = rc.getCurrentRate();
+  // INITIAL_RATE currently equals MAX_CHUNKS_PER_SECOND, so a fresh
+  // controller has no headroom to climb into. Back off first, then verify a
+  // run of successes recovers — that is the behaviour under test, and it holds
+  // whatever the two constants are set to.
+  rc.recordBackpressure();
+  const double after_backoff = rc.getCurrentRate();
+  ASSERT_LT(after_backoff, AdaptiveRateController::MAX_CHUNKS_PER_SECOND);
 
-  // The controller increases its rate after >10 successes.
-  for (int i = 0; i < 11; ++i) rc.recordChunkSent();
+  // getCurrentRate() reports the *smoothed* rate, which keeps converging
+  // toward the freshly-reduced target for several rounds before the 1.1x
+  // increases overtake it. So assert the contract that matters — sustained
+  // success recovers the rate to the ceiling — not a single step of it.
+  for (int round = 0; round < 40; ++round) {
+    for (int i = 0; i < 11; ++i) rc.recordChunkSent();
+  }
 
-  EXPECT_GT(rc.getCurrentRate(), initial);
+  EXPECT_GT(rc.getCurrentRate(), after_backoff);
+  EXPECT_NEAR(rc.getCurrentRate(), AdaptiveRateController::MAX_CHUNKS_PER_SECOND,
+              AdaptiveRateController::MAX_CHUNKS_PER_SECOND * 0.05);
 }
 
 TEST(AdaptiveRateControllerTest, BackpressureReducesRateSignificantly) {
