@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <memory>
+
 #include <chrono>
 #include <cstdint>
 
@@ -20,11 +22,13 @@ TEST(CameraFrameCaptureTest, ProducesYuv420FramesOfExpectedSize) {
   Camera* cam = mgr.getCamera(0);
   ASSERT_NE(cam, nullptr);
 
-  ASSERT_TRUE(cam->waitForNewFrame(std::chrono::milliseconds(2000)));
+  uint64_t cursor = 0;
+  ASSERT_TRUE(cam->waitForNewFrame(cursor, std::chrono::milliseconds(2000)));
 
-  FrameData frame;
-  ASSERT_TRUE(cam->getFrameForStreaming(frame));
-  cam->releaseStreamingFrame();
+  std::shared_ptr<const FrameData> shared;
+  ASSERT_TRUE(cam->getFrameForStreaming(cursor, shared));
+  ASSERT_NE(shared, nullptr);
+  const FrameData& frame = *shared;
 
   EXPECT_EQ(frame.pixel_format, static_cast<uint32_t>(V4L2_PIX_FMT_YUV420));
   EXPECT_GT(frame.width, 0u);
@@ -46,14 +50,12 @@ TEST(CameraFrameCaptureTest, DeliversMultipleFrames) {
   ASSERT_NE(cam, nullptr);
 
   int received = 0;
+  uint64_t cursor = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while (received < 10 && std::chrono::steady_clock::now() < deadline) {
-    if (!cam->waitForNewFrame(std::chrono::milliseconds(500))) break;
-    FrameData frame;
-    if (cam->getFrameForStreaming(frame)) {
-      cam->releaseStreamingFrame();
-      ++received;
-    }
+    if (!cam->waitForNewFrame(cursor, std::chrono::milliseconds(500))) break;
+    std::shared_ptr<const FrameData> frame;
+    if (cam->getFrameForStreaming(cursor, frame)) ++received;
   }
 
   EXPECT_GE(received, 10) << "Expected at least 10 frames in 3 seconds";

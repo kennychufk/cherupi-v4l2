@@ -59,9 +59,21 @@ class Camera {
   // released by stop() (state flag vs. actual ownership).
   bool unconfigure();
 
-  bool getFrameForStreaming(FrameData& frame);
-  bool waitForNewFrame(std::chrono::milliseconds timeout);
-  void releaseStreamingFrame();
+  // Streamer-facing publication slot. Multi-consumer by design: the commander
+  // and the observer each drive their own streaming thread, so each keeps its
+  // own cursor (`last_seen_seq`, 0 for a fresh consumer) and takes a shared
+  // reference to the newest frame. Nobody copies the payload and neither
+  // consumer can starve the other; a consumer that falls behind simply skips
+  // to the newest frame (latest-wins per consumer).
+  //
+  // Returns true and advances the cursor when a frame newer than
+  // `last_seen_seq` is available. Safe from any thread.
+  bool getFrameForStreaming(uint64_t& last_seen_seq,
+                            std::shared_ptr<const FrameData>& frame);
+  // Block until a frame newer than `last_seen_seq` is published, capture
+  // stops, or `timeout` elapses.
+  bool waitForNewFrame(uint64_t last_seen_seq,
+                       std::chrono::milliseconds timeout);
 
   // Capture watchdog. libcamera's RPi pipeline handler gives up on a stalled
   // frontend after 5x the frame duration and logs "Camera frontend has timed
@@ -132,16 +144,15 @@ class Camera {
   std::atomic<uint32_t> frame_counter{0};
   std::atomic<uint32_t> frames_dropped{0};
 
+  // The newest captured frame, shared read-only with every streamer that asks
+  // for it, plus a sequence number that only ever grows (it is deliberately
+  // not reset by start()/stop(), so a consumer's cursor stays valid across
+  // capture cycles). stop() drops the frame so a consumer that subscribes
+  // later never receives a stale pre-stop frame.
   std::mutex latest_frame_mutex;
-  FrameData latest_frame;
-  bool has_new_frame = false;
+  std::shared_ptr<const FrameData> latest_frame_;
+  uint64_t latest_seq_ = 0;
   std::condition_variable new_frame_cv;
-
-  // Gate only — there is deliberately no FrameData here. getFrameForStreaming
-  // hands the caller the frame directly; a member copy would be a second
-  // 17.9 MB memcpy per frame that nothing ever read.
-  std::mutex streaming_frame_mutex;
-  bool streaming_frame_in_use = false;
 
   libcamera::Stream* raw_stream_{nullptr};
   std::atomic<bool> should_stop{false};

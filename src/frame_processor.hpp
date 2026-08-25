@@ -140,17 +140,21 @@ class FrameProcessor {
   uint32_t last_detected_camera_ = std::numeric_limits<uint32_t>::max();
 
   // Latest detector-processed frame per camera, awaiting streaming. Written by
-  // the detection worker, drained by the streamer via
-  // takeDetectedFrameForStreaming(). `fresh` is set on publish and cleared on
-  // take so each processed frame streams at most once; latest-wins means an
-  // unconsumed earlier frame is overwritten (dropped).
+  // the detection worker, read by the streamers via
+  // getDetectedFrameForStreaming(). Multi-consumer: each streamer (commander,
+  // observer) keeps its own cursor against `seq`, which is drawn from one
+  // counter that is never reset — so clearing the map between sessions can
+  // never rewind a cursor — and the frame is shared read-only rather than
+  // moved out. Latest-wins: an earlier frame no streamer picked up is
+  // overwritten (dropped).
   struct DetectedFrame {
-    FrameData frame;
+    std::shared_ptr<const FrameData> frame;
     std::vector<CornerSet> sets;
-    bool fresh = false;
+    uint64_t seq = 0;
   };
   std::unordered_map<uint32_t, DetectedFrame> detected_for_stream;
   std::mutex detected_mutex;
+  uint64_t detected_seq_counter_ = 0;  // guarded by detected_mutex
 
   // TRIGGER mode: a capture request arms every camera named in the request and
   // stays pending until each of them has delivered a frame; only those frames
@@ -262,25 +266,28 @@ class FrameProcessor {
   const ProcessConfig& getConfig() const { return config; }
   const std::string& getActualOutputDir() const { return actual_output_dir; }
 
-  // Streamer-facing: hand off the most recent detector-processed frame for
-  // `camera_id`, if one is waiting. On success fills `frame` and `sets` (the
-  // corners found on it, possibly empty when detection ran but found no board)
-  // and returns true; the slot is then marked consumed so the same frame is
-  // not streamed twice. Returns false when no fresh processed frame is
-  // available (no detection has completed since the last take, or the save
-  // mode isn't a detector mode). This is the ONLY source of streamable frames
-  // in detector modes, so undetected frames never reach the client.
-  // Safe to call from the streaming thread.
-  bool takeDetectedFrameForStreaming(uint32_t camera_id, FrameData& frame,
-                                     std::vector<CornerSet>& sets) {
+  // Streamer-facing: hand out the most recent detector-processed frame for
+  // `camera_id` if it is newer than the caller's cursor `last_seen_seq` (0 for
+  // a fresh consumer). On success fills `frame` (shared, read-only) and `sets`
+  // (the corners found on it, possibly empty when detection ran but found no
+  // board), advances the cursor, and returns true — so each consumer streams a
+  // given processed frame at most once. Returns false when nothing newer is
+  // available (no detection has completed since the caller's last take, or the
+  // process mode isn't a detector mode). This is the ONLY source of streamable
+  // frames in detector modes, so undetected frames never reach a client.
+  // Safe to call from any streaming thread.
+  bool getDetectedFrameForStreaming(uint32_t camera_id, uint64_t& last_seen_seq,
+                                    std::shared_ptr<const FrameData>& frame,
+                                    std::vector<CornerSet>& sets) {
     std::lock_guard<std::mutex> lock(detected_mutex);
     auto it = detected_for_stream.find(camera_id);
-    if (it == detected_for_stream.end() || !it->second.fresh) return false;
-    // Consume: move the frame/corners out (the slot is marked stale, so the
-    // moved-from state is never read before the worker republishes).
-    frame = std::move(it->second.frame);
-    sets = std::move(it->second.sets);
-    it->second.fresh = false;
+    if (it == detected_for_stream.end() || !it->second.frame ||
+        it->second.seq <= last_seen_seq) {
+      return false;
+    }
+    frame = it->second.frame;
+    sets = it->second.sets;
+    last_seen_seq = it->second.seq;
     return true;
   }
 

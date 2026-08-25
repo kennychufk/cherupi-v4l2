@@ -13,8 +13,11 @@
 #   TELEFACET_DIR       Path to cppWs/telefacet     (enables Option 3 if set).
 #   CHERUPI_BUILD_DIR   Server build dir            (default: build/).
 #   CHERUPI_WS_URL      WebSocket URL               (default: ws://localhost:9001).
+#   CHERUPI_SENSOR      Sensor model substring for `discover` in the Python
+#                       suite (default: imx519). Set TELEFACET_SENSOR alongside
+#                       it for the web suite's sensor-aware files.
 #
-# Requires a Pi 5 with IMX519 cameras connected. No fake-camera mode exists.
+# Requires a Pi 5 with cameras connected. No fake-camera mode exists.
 
 set -u -o pipefail
 

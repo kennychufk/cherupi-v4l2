@@ -34,8 +34,13 @@ std::string scratchOutputDir() {
 // on timeout. On success `frame`/`sets` hold what the streamer would send.
 bool waitForDetectedFrame(FrameProcessor& saver, uint32_t camera_id,
                           FrameData& frame, std::vector<CornerSet>& sets) {
+  uint64_t cursor = 0;  // a fresh consumer
+  std::shared_ptr<const FrameData> shared;
   for (int i = 0; i < 400; ++i) {
-    if (saver.takeDetectedFrameForStreaming(camera_id, frame, sets)) return true;
+    if (saver.getDetectedFrameForStreaming(camera_id, cursor, shared, sets)) {
+      frame = *shared;
+      return true;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   return false;
@@ -404,6 +409,71 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsMarkerBlockForAruco) {
   EXPECT_EQ(m1.num_corners, 4u);
 
   sm.clearSink();
+}
+
+TEST(StreamChunkingTest, PrioritySnapshotReflectsSinkAndBackpressure) {
+  // What the observer's session sees of the commander's. The pure verdict is
+  // covered in stream_priority_test; this checks the session reports its
+  // sink, subscriptions and backpressure history truthfully.
+  CameraManager dummy_mgr;
+  FrameProcessor dummy_saver;
+  StreamManager commander(&dummy_mgr, &dummy_saver, ClientRole::COMMANDER);
+  EXPECT_EQ(commander.getRole(), ClientRole::COMMANDER);
+
+  // No commander connected: always clear.
+  EXPECT_FALSE(commander.prioritySnapshot().has_sink);
+  EXPECT_TRUE(commander.isClearForLowerPriority());
+
+  RecordingSink sink;
+  sink.buffered = 2 * StreamManager::SOFT_BUFFER_LIMIT;
+  commander.setSink(&sink);
+  auto s = commander.prioritySnapshot();
+  EXPECT_TRUE(s.has_sink);
+  EXPECT_EQ(s.buffered_bytes, sink.buffered);
+  // Nothing subscribed (the dummy manager has no cameras), so the commander
+  // is not consuming payload bandwidth: clear even with a full buffer.
+  EXPECT_FALSE(s.streaming_payload);
+  EXPECT_TRUE(commander.isClearForLowerPriority());
+
+  commander.notifyBackpressure(true);
+  s = commander.prioritySnapshot();
+  EXPECT_TRUE(s.in_backpressure);
+  EXPECT_LT(s.since_last_backpressure, stream_priority::kBackpressureHold);
+
+  commander.notifyBackpressure(false);
+  s = commander.prioritySnapshot();
+  EXPECT_FALSE(s.in_backpressure);
+  // The hold window is measured from the entry into backpressure.
+  EXPECT_LT(s.since_last_backpressure, stream_priority::kBackpressureHold);
+
+  // A new connection starts with a clean history.
+  commander.clearSink();
+  commander.setSink(&sink);
+  s = commander.prioritySnapshot();
+  EXPECT_FALSE(s.in_backpressure);
+  EXPECT_GE(s.since_last_backpressure, stream_priority::kBackpressureHold);
+  commander.clearSink();
+}
+
+TEST(StreamChunkingTest, ObserverSessionSendsWhileCommanderIsClear) {
+  // The observer's chunking path consults the commander before every chunk;
+  // with the commander clear it must behave exactly like an unlinked session.
+  CameraManager dummy_mgr;
+  FrameProcessor dummy_saver;
+  StreamManager commander(&dummy_mgr, &dummy_saver, ClientRole::COMMANDER);
+  StreamManager observer(&dummy_mgr, &dummy_saver, ClientRole::OBSERVER);
+  observer.setYieldTo(&commander);
+  EXPECT_EQ(observer.getRole(), ClientRole::OBSERVER);
+
+  RecordingSink observer_sink;
+  observer.setSink(&observer_sink);
+
+  const size_t payload = StreamManager::CHUNK_SIZE * 2 + 5;
+  FrameData frame = makeSyntheticFrame(payload);
+  ASSERT_TRUE(observer.sendFrameForTest(frame, 0));
+  EXPECT_EQ(observer_sink.messages.size(), 1u + 3u);
+
+  observer.clearSink();
 }
 
 TEST(StreamChunkingTest, ClearingSinkResetsRateControl) {

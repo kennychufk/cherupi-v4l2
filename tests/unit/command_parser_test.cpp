@@ -344,4 +344,118 @@ TEST(CommandParserTest, StateGateGetLensPositionLimitsRequiresConfiguredOrRunnin
   EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING));
 }
 
+// --- Client roles ------------------------------------------------------------
+
+TEST(CommandParserTest, RoleForPathSelectsObserverOnlyForObserverPath) {
+  using command_parser::roleForPath;
+  EXPECT_EQ(roleForPath("/"), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath(""), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath("/commander"), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath("/anything/else"), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath("/observer"), ClientRole::OBSERVER);
+  EXPECT_EQ(roleForPath("/observer/"), ClientRole::OBSERVER);
+  EXPECT_EQ(roleForPath("/observer?x=1"), ClientRole::OBSERVER);
+  // Exact match only: no prefixes, no case folding.
+  EXPECT_EQ(roleForPath("/observers"), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath("/observer/x"), ClientRole::COMMANDER);
+  EXPECT_EQ(roleForPath("/Observer"), ClientRole::COMMANDER);
+}
+
+TEST(CommandParserTest, CommanderMayIssueEveryCommand) {
+  for (CommandKind kind :
+       {CommandKind::Discover, CommandKind::GetState, CommandKind::Configure,
+        CommandKind::Unconfigure, CommandKind::SetProcessMode,
+        CommandKind::TriggerCapture, CommandKind::StartCameras,
+        CommandKind::StartStream, CommandKind::StopStream,
+        CommandKind::StopCameras, CommandKind::ResetFrameCounts,
+        CommandKind::SetHeaderOnly, CommandKind::SetLensPosition,
+        CommandKind::SetExposureTime, CommandKind::SetFrameDuration,
+        CommandKind::GetFrameDurationLimits,
+        CommandKind::GetLensPositionLimits}) {
+    EXPECT_TRUE(command_parser::isCommandPermitted(kind, ClientRole::COMMANDER))
+        << static_cast<int>(kind);
+  }
+}
+
+TEST(CommandParserTest, ObserverIsLimitedToReadOnlyCommands) {
+  for (CommandKind kind :
+       {CommandKind::Discover, CommandKind::GetState, CommandKind::StartStream,
+        CommandKind::StopStream, CommandKind::SetHeaderOnly,
+        CommandKind::GetFrameDurationLimits,
+        CommandKind::GetLensPositionLimits}) {
+    EXPECT_TRUE(command_parser::isCommandPermitted(kind, ClientRole::OBSERVER))
+        << static_cast<int>(kind);
+  }
+  for (CommandKind kind :
+       {CommandKind::Configure, CommandKind::Unconfigure,
+        CommandKind::SetProcessMode, CommandKind::TriggerCapture,
+        CommandKind::StartCameras, CommandKind::StopCameras,
+        CommandKind::ResetFrameCounts, CommandKind::SetLensPosition,
+        CommandKind::SetExposureTime, CommandKind::SetFrameDuration}) {
+    EXPECT_FALSE(command_parser::isCommandPermitted(kind, ClientRole::OBSERVER))
+        << static_cast<int>(kind);
+  }
+}
+
+TEST(CommandParserTest, ObserverMaySubscribeInAnyStateCommanderNeedsRunning) {
+  for (CommandKind kind : {CommandKind::StartStream, CommandKind::StopStream}) {
+    for (CameraState state : {CameraState::IDLE, CameraState::CONFIGURED,
+                              CameraState::RUNNING}) {
+      EXPECT_TRUE(command_parser::isCommandAllowed(kind, state,
+                                                   ClientRole::OBSERVER));
+    }
+    EXPECT_FALSE(command_parser::isCommandAllowed(kind, CameraState::IDLE,
+                                                  ClientRole::COMMANDER));
+    EXPECT_FALSE(command_parser::isCommandAllowed(kind, CameraState::CONFIGURED,
+                                                  ClientRole::COMMANDER));
+    EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING,
+                                                 ClientRole::COMMANDER));
+  }
+  // The role changes nothing else.
+  EXPECT_FALSE(command_parser::isCommandAllowed(
+      CommandKind::GetFrameDurationLimits, CameraState::IDLE,
+      ClientRole::OBSERVER));
+  EXPECT_TRUE(command_parser::isCommandAllowed(
+      CommandKind::GetFrameDurationLimits, CameraState::CONFIGURED,
+      ClientRole::OBSERVER));
+}
+
+// --- start_stream options ----------------------------------------------------
+
+TEST(CommandParserTest, BuildStreamRequestDefaults) {
+  auto r = command_parser::buildStreamRequest(
+      nlohmann::json::parse(R"({"cmd":"start_stream","camera_id":2})"));
+  ASSERT_TRUE(std::holds_alternative<command_parser::StreamRequest>(r));
+  const auto& req = std::get<command_parser::StreamRequest>(r);
+  EXPECT_EQ(req.camera_id, 2u);
+  EXPECT_DOUBLE_EQ(req.options.max_fps, 0.0);
+  EXPECT_EQ(req.options.subsample, 1u);
+}
+
+TEST(CommandParserTest, BuildStreamRequestParsesOptions) {
+  auto r = command_parser::buildStreamRequest(nlohmann::json::parse(
+      R"({"cmd":"start_stream","camera_id":0,"max_fps":2.5,"subsample":4})"));
+  ASSERT_TRUE(std::holds_alternative<command_parser::StreamRequest>(r));
+  const auto& req = std::get<command_parser::StreamRequest>(r);
+  EXPECT_EQ(req.camera_id, 0u);
+  EXPECT_DOUBLE_EQ(req.options.max_fps, 2.5);
+  EXPECT_EQ(req.options.subsample, 4u);
+}
+
+TEST(CommandParserTest, BuildStreamRequestRejectsBadInput) {
+  auto bad = [](const char* text) {
+    auto r = command_parser::buildStreamRequest(nlohmann::json::parse(text));
+    return std::holds_alternative<std::string>(r);
+  };
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream"})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":"0"})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":-1})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":0,"subsample":3})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":0,"subsample":16})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":0,"subsample":0})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":0,"max_fps":-1})"));
+  EXPECT_TRUE(bad(R"({"cmd":"start_stream","camera_id":0,"max_fps":"fast"})"));
+  EXPECT_FALSE(bad(R"({"cmd":"start_stream","camera_id":0,"max_fps":0,"subsample":8})"));
+}
+
 }  // namespace

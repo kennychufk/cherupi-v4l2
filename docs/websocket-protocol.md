@@ -1,20 +1,43 @@
 # cherupi-v4l2 WebSocket Protocol
 
-This document specifies the wire protocol between a client and the `camera_ws_server`. It covers connection, control commands (JSON text), server responses (JSON text), and the binary chunked frame format.
+This document specifies the wire protocol between a client and the `camera_ws_server`. It covers connection and client roles, control commands (JSON text), server responses (JSON text), and the binary chunked frame format.
 
 ## 1. Connection
 
 | Item | Value |
 |---|---|
-| URL | `ws://<host>:9001/` (any path matches `/*`) |
+| URL | `ws://<host>:9001/` for a **commander**, `ws://<host>:9001/observer` for an **observer** (§1.1) |
 | Subprotocol | none |
 | Compression | disabled |
 | Max payload | 16 MiB |
-| Idle timeout | 120 s |
+| Idle timeout | 120 s (the server pings idle sockets, so a silent observer stays connected as long as its library answers pings — browsers and the usual client libraries do) |
 | Max backpressure | 10 MiB |
-| Concurrent clients | **1** — additional connections get HTTP `503 Service Unavailable` during upgrade |
+| Concurrent clients | **1 commander + 1 observer** — a further connection in a role whose slot is taken gets HTTP `503 Service Unavailable` during upgrade, with body `Server already has a <role> client` |
 
-On client disconnect the server keeps cameras running (so frame processing can continue) and only releases the client slot.
+On client disconnect the server keeps cameras running (so frame processing can continue, and so the other client keeps receiving frames) and only releases that role's slot.
+
+### 1.1 Client roles
+
+A connection holds one of two roles, fixed at upgrade time by the URL path:
+
+| Role | Path | Access |
+|---|---|---|
+| **commander** | `/` (also `/commander`, or any path other than `/observer`) | Read-write. Owns the camera lifecycle (`configure` … `stop_cameras`), the camera attributes (`set_lens_position`, `set_exposure_time`, `set_frame_duration`), the process mode and triggers, and its own stream. This is the mission-critical client — e.g. the vision component of a robot controller. |
+| **observer** | `/observer` (a trailing slash or query string is tolerated) | Read-only. May discover cameras, query state and limits, and subscribe to frames — with or without payload — but can change nothing. Intended as a CCTV-style telemetry view for humans. |
+
+Clients written before roles existed connect to the bare URL and are therefore commanders; nothing changes for them.
+
+Permitted commands per role:
+
+| Command | commander | observer |
+|---|---|---|
+| `discover`, `get_state`, `get_frame_duration_limits`, `get_lens_position_limits` | ✓ | ✓ |
+| `start_stream`, `stop_stream`, `set_header_only` | ✓ | ✓ (own stream only; see §4.7) |
+| `configure`, `unconfigure`, `start_cameras`, `stop_cameras`, `set_process_mode`, `trigger_capture`, `reset_frame_counts`, `set_lens_position`, `set_exposure_time`, `set_frame_duration` | ✓ | ✗ → `error` with `code: "forbidden"` (§7) |
+
+The two streams are **independent**: each role has its own subscription set, its own header-only flag and its own rate control, so the commander can have streaming off while the observer watches, and vice versa. When both stream at once the commander has **priority** (§5.8). The observer's subscription is **persistent** across camera stop/start cycles, and the server **pushes `state` messages** to both clients so an observer can wait indefinitely for a commander to start the cameras without polling (§3.1).
+
+Unsolicited messages by role: the `state` push (§3.1) and the `capture_timeout` error (§7.1) go to both clients; `trigger_result` (§4.17) goes to the commander only.
 
 ### Close codes observed/logged
 `1000` normal, `1001` going away, `1006` abnormal (no close frame), `1009` message too big, any other treated as unexpected.
@@ -43,6 +66,17 @@ IDLE ─────────────────────────
 To re-configure with a different `CameraConfig`: `unconfigure` (if CONFIGURED) or `stop_cameras` then `unconfigure` (if RUNNING), then `configure`.
 
 Commands rejected outside the required state return an `error` response but do not change state.
+
+### 3.1 State pushes
+
+Every transition is announced to **both** connected clients with an unsolicited `state` message — the same shape as the `get_state` reply (§4.2) — whose `cause` names the command that caused it (`configure`, `unconfigure`, `start_cameras`, `stop_cameras`). The same message is also pushed to a client when the *other* role connects or disconnects (`cause` = `commander_connected`, `commander_disconnected`, `observer_connected`, `observer_disconnected`), so an observer UI can show whether a commander is present.
+
+The push follows the command's own `status` reply on the commander's socket. A client that issues `get_state` should match the reply by `cause: "query"` rather than by type alone.
+
+```json
+{"type": "state", "state": "running", "cause": "start_cameras",
+ "role": "observer", "commander_connected": true, "observer_connected": true}
+```
 
 ## 4. Control Protocol (Text / JSON)
 
@@ -92,10 +126,16 @@ Query the current state-machine state. Allowed in any state. Clients should send
 
 **Response**
 ```json
-{"type": "state", "state": "idle"}
+{"type": "state", "state": "idle", "cause": "query",
+ "role": "commander", "commander_connected": true, "observer_connected": false}
 ```
 
-`state` is one of `"idle"`, `"configured"`, or `"running"`.
+| Field | Meaning |
+|---|---|
+| `state` | `"idle"`, `"configured"` or `"running"` |
+| `cause` | `"query"` for a reply; the triggering command or connection event for a push (§3.1) |
+| `role` | The recipient's own role, `"commander"` or `"observer"` |
+| `commander_connected`, `observer_connected` | Whether each role's slot is currently occupied |
 
 ### 4.3 `configure`
 Apply identical configuration to all cameras. Required state: **IDLE**.
@@ -243,15 +283,26 @@ Example refusal:
 ```
 
 ### 4.7 `start_stream`
-Required state: **RUNNING**. Begin binary delivery for one camera.
+Subscribe the **calling connection** to binary delivery for one camera. Each role has its own subscription set; this command never affects the other client's stream.
 
 ```json
-{"cmd": "start_stream", "camera_id": 0}
+{"cmd": "start_stream", "camera_id": 0, "max_fps": 5, "subsample": 2}
 ```
-Response: `status` or `error` (e.g. unknown `camera_id`, cameras not running).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `camera_id` | integer | *(required)* | A camera id from `discover`. |
+| `max_fps` | number ≥ 0 | `0` | Cap on the frames per second delivered for this camera; `0` = uncapped. Enforced latest-wins: when the cap next allows a send, the newest available frame is sent, so a capped stream never lags capture. |
+| `subsample` | `1`, `2`, `4` or `8` | `1` | Decimate the streamed YUV420 payload by this factor in each dimension (box average of a `subsample × subsample` block; `2` cuts the payload to a quarter). The frame header's `width`/`height`/`bytes_per_line` and any detection block describe the **decimated** frame (§5.3, §5.4). Header-only frames report the decimated geometry too. |
+
+Re-issuing `start_stream` for a camera that is already subscribed updates its options in place.
+
+**Required state:** a **commander** needs **RUNNING**, and its subscriptions are cleared by `stop_cameras` and by its disconnect. An **observer** may subscribe in **any state** — the subscription is **persistent**: it survives `stop_cameras` / `start_cameras` cycles (frames simply stop and resume) and is cleared only by `stop_stream` or the observer's own disconnect. Cameras must have been discovered (by either client) so `camera_id` can be validated.
+
+Response: `status` (`"Started streaming camera 0"`, followed by the non-default options and, for an observer subscribing while the cameras are not running, `" - subscribed; frames will flow once the cameras are running"`) or `error` (unknown `camera_id`, invalid option, commander outside RUNNING).
 
 ### 4.8 `stop_stream`
-Stop binary delivery for one camera. Cameras keep capturing.
+Stop binary delivery for one camera on the calling connection. Cameras keep capturing; the other client's stream is unaffected.
 
 ```json
 {"cmd": "stop_stream", "camera_id": 0}
@@ -259,7 +310,7 @@ Stop binary delivery for one camera. Cameras keep capturing.
 Response: `status` or `error` (if camera wasn't streaming).
 
 ### 4.9 `stop_cameras`
-Required state: **RUNNING**. Stops streaming, stops capture, flushes pending saves, returns to **CONFIGURED**.
+Required state: **RUNNING**. Stops the commander's streaming, stops capture, flushes pending saves, returns to **CONFIGURED**. The observer's subscriptions are kept (§4.7); it resumes on the next `start_cameras`.
 
 ```json
 {"cmd": "stop_cameras"}
@@ -276,8 +327,11 @@ Required state: **RUNNING**. Stops streaming, stops capture, flushes pending sav
 }
 ```
 
-`frames_dropped_backlog` counts frames refused because the backlog budget was
-full (§4.5.1). Non-zero ⇒ capture outran its sink and the recording has a gap.
+`frames_saved`, `bytes_written` and `frames_dropped_backlog` are totals for the
+capture session that just ended — they are zeroed by `start_cameras`, not
+carried across sessions of one server process. `frames_dropped_backlog` counts
+frames refused because the backlog budget was full (§4.5.1). Non-zero ⇒
+capture outran its sink and the recording has a gap.
 
 ### 4.10 `reset_frame_counts`
 Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on the saver. Allowed in any state.
@@ -288,7 +342,7 @@ Zeros `frame_counter`, `frames_dropped` on every camera and `frames_saved` on th
 Response: `status`.
 
 ### 4.11 `set_header_only`
-Toggle header-only streaming mode. When enabled, streamed frames carry a chunk header with `total_chunks = 0` and `total_size = 0`, and **no `CHNK` data packets follow**. Useful for timing/metadata probes without transferring pixel bytes.
+Toggle header-only streaming mode **for the calling connection** (each role has its own flag). When enabled, streamed frames carry a chunk header with `total_chunks = 0` and `total_size = 0`, and **no `CHNK` data packets follow**. Useful for timing/metadata probes without transferring pixel bytes.
 
 ```json
 {"cmd": "set_header_only", "enabled": true}
@@ -466,17 +520,18 @@ Errors: not RUNNING, process mode isn't `trigger`, named camera not running, no 
 | `type` | Fields | When |
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
-| `state` | `state` (`"idle"` \| `"configured"` \| `"running"`) | Reply to `get_state` |
+| `state` | `state` (`"idle"` \| `"configured"` \| `"running"`), `cause`, `role`, `commander_connected`, `observer_connected` | Reply to `get_state` (`cause: "query"`); **also unsolicited** on every state transition and when the other role connects/disconnects (§3.1) |
 | `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
 | `trigger_result` | `trigger_id`, `cancelled`, `captures[]` | Asynchronous ack for `trigger_capture` — sent when every armed camera has delivered its frame (or the trigger was cancelled by `stop_cameras`) |
 | `error` | `message`, optionally `code` and code-specific fields | Bad JSON, unknown command, wrong state, invalid arg, handler exception, infeasible mode (§4.6) |
-| `error` (`code: "capture_timeout"`) | `code`, `camera_id`, `stalled_for_us`, `message`, `backlog_bytes`, `backlog_budget_bytes`, `frames_dropped_backlog` | **Unsolicited.** A camera has stopped delivering frames (§7.1) |
+| `error` (`code: "forbidden"`) | `code`, `message` | An observer sent a command reserved for the commander (§1.1). Nothing changed. |
+| `error` (`code: "capture_timeout"`) | `code`, `camera_id`, `stalled_for_us`, `message`, `backlog_bytes`, `backlog_budget_bytes`, `frames_dropped_backlog` | **Unsolicited**, sent to both clients. A camera has stopped delivering frames (§7.1) |
 
 ## 5. Binary Frame Protocol
 
-Binary messages are only sent server → client while at least one camera is streaming. Each logical frame is delivered as:
+Binary messages are only sent server → client while the receiving connection has at least one camera subscribed and the cameras are running. The commander and the observer each get their own stream — the same captured frame may go to both, under different `frame_uuid`s. Each logical frame is delivered as:
 
 ```
 1 × [ChunkStartMarker ‖ ChunkHeader]        (single binary WS message)
@@ -507,9 +562,9 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 8 | `camera_id` | `uint32` | Source camera index |
 | 12 | `total_chunks` | `uint32` | Number of `CHNK` packets to follow. **`0` ⇒ header-only frame, no data packets** |
 | 16 | `total_size` | `uint32` | Total payload bytes across all chunks. `0` in header-only mode |
-| 20 | `bytes_per_line` | `uint32` | Stride of Y plane |
-| 24 | `width` | `uint32` | Pixels |
-| 28 | `height` | `uint32` | Pixels |
+| 20 | `bytes_per_line` | `uint32` | Stride of Y plane. Equals `width` on a subsampled stream (tightly packed). |
+| 24 | `width` | `uint32` | Pixels — of the **streamed** frame, i.e. the decimated size when the subscription uses `subsample > 1` (§4.7) |
+| 28 | `height` | `uint32` | Pixels — likewise |
 | 32 | `pixel_format` | `uint32` | V4L2 FourCC (currently `V4L2_PIX_FMT_YUV420` = `'YU12'` = `0x32315559`) |
 | 36 | `frames_saved` | `uint32` | Saver's count for this camera at send time |
 | 40 | `timestamp_us` | `uint64` | Monotonic hardware capture timestamp in µs (from libcamera `FrameMetadata::timestamp / 1000`). Diff consecutive values for the same `camera_id` to compute actual inter-frame interval (real fps). `0` if unavailable. |
@@ -531,7 +586,7 @@ Immediately follows `ChunkHeader` in the same WebSocket message. Carries the res
 - `detection_kind = 1` (checkerboard, §5.4.1) — records are `CornerSetHeader`.
 - `detection_kind = 2` (aruco, §5.4.2) — records are `MarkerSetHeader`.
 
-In every case the block is `num_corner_sets` records packed back-to-back, each record being a fixed header followed by `num_corners × { float x, float y }` corner coordinates. Corner coordinates are little-endian IEEE-754, `8` bytes each, in **full-frame Y-plane pixel space** regardless of the saver's `*_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame.
+In every case the block is `num_corner_sets` records packed back-to-back, each record being a fixed header followed by `num_corners × { float x, float y }` corner coordinates. Corner coordinates are little-endian IEEE-754, `8` bytes each, in the **streamed frame's Y-plane pixel space** regardless of the saver's `*_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame. For a full-resolution stream that is full-frame pixel space; on a subsampled stream (§4.7) the coordinates are divided by the factor along with the frame.
 
 In all four detector modes the streamer only ever sends frames the on-device detector has already processed (see §5.7), so every streamed frame reflects a detection result. When detection found nothing, `num_corner_sets = 0`, `corner_block_size = 0`, and no records follow (`detection_kind` still reports which detector ran). When it found one or more, the block carries them. In the non-detector process modes no detector runs and the block is always absent (`detection_kind = 0`, `num_corner_sets = 0`).
 
@@ -602,7 +657,19 @@ The server monitors `ws.getBufferedAmount()` with hysteresis (enter at 512 KiB, 
 
 Header-only mode bypasses the payload path entirely and is unaffected by data backpressure.
 
+Backpressure is tracked **per connection**: the commander's and the observer's sockets have separate buffers, separate hysteresis and separate rate controllers, so a slow observer link never throttles the commander.
+
 **Detector modes.** In `checkerboard` / `checkerboard2x2` / `aruco` / `aruco2x2` an additional gate sits in front of streaming: the frame stream is fed exclusively by the best-effort detector (§4.5). Frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector), and only a frame the detector has finished processing — regardless of whether anything was found — is ever eligible to send. A processed frame may still be dropped afterwards by ordinary backpressure. The net effect is that the streamed frame rate in these modes is bounded by **detector throughput**, not capture rate, so `frame_id` gaps are correspondingly larger and expected.
+
+### 5.8 Streaming priority (commander over observer)
+
+When both clients stream at once over a bandwidth-limited link, the commander's frames come first. The server cannot shape the network, so priority is a rule on what it is willing to **enqueue** for the observer:
+
+> The observer's streamer hands a chunk to its socket only while the commander's connection is **clear**. The commander is clear when it is not consuming payload bandwidth — no commander connected, no camera subscribed, or header-only mode — or when its socket shows no sign of congestion: buffered-but-unsent bytes ≤ 512 KiB (the soft limit of §5.7), its drain handler not reporting backpressure, and **no backpressure event in the last 1 s**.
+
+While the commander is not clear the observer **withholds** new frames (nothing is fetched, so when the commander clears the observer sends the newest frame rather than a stale one — latest-wins) and **pauses mid-frame** between chunks; an observer frame that cannot complete within 5 s is abandoned (the observer's client garbage-collects the incomplete frame, exactly as for a stalled transfer). Observer chunks may still interleave with commander chunks while the commander is uncongested — the rule stops the observer from adding to a stressed link, it does not serialise the two streams.
+
+Consequences: with the commander idle or header-only the observer is unconstrained (except by its own link); with the commander saturating the link the observer's frame rate drops toward zero and the commander sees the same delivery as it would alone. A commander whose *receiver* is slow also reads as congested, so the observer yields conservatively. Observers should use `max_fps` and `subsample` (§4.7) to keep their demand small in the first place.
 
 ## 6. Typical Session
 
@@ -633,6 +700,27 @@ client → {"cmd":"unconfigure"}
 server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 ```
 
+An observer (connected to `/observer`) alongside that commander:
+
+```text
+observer → {"cmd":"discover"}
+server   → {"type":"discovery","cameras":[{"id":0,"type":"imx519"},{"id":1,"type":"imx519"}]}
+observer → {"cmd":"get_state"}
+server   → {"type":"state","state":"idle","cause":"query","role":"observer","commander_connected":true,"observer_connected":true}
+observer → {"cmd":"start_stream","camera_id":0,"subsample":2,"max_fps":5}
+server   → {"type":"status","message":"Started streaming camera 0 (subsample 2) (max 5 fps) - subscribed; frames will flow once the cameras are running"}
+   ... commander configures and starts the cameras ...
+server   → {"type":"state","state":"configured","cause":"configure","role":"observer",...}
+server   → {"type":"state","state":"running","cause":"start_cameras","role":"observer",...}
+server   → <binary: CHUN + header (width/height halved, frame_uuid=B)>
+server   → <binary: CHNK ...>
+   ... commander stops the cameras: frames pause, the subscription stays ...
+server   → {"type":"state","state":"configured","cause":"stop_cameras","role":"observer",...}
+   ... commander starts them again: frames resume without a new start_stream ...
+observer → {"cmd":"configure","params":{}}
+server   → {"type":"error","code":"forbidden","message":"Command 'configure' is not permitted for an observer client (read-only); only the commander may issue it"}
+```
+
 ## 7. Error Conditions
 
 | Cause | Response |
@@ -645,7 +733,9 @@ server → {"type":"status","message":"Unconfigured: returned to IDLE"}
 | `trigger_capture` outside the `trigger` process mode | `error` (`"trigger_capture requires the 'trigger' process mode"`), nothing saved |
 | `trigger_capture` while one is already pending | `error` (`"A trigger capture is already pending"`) |
 | Binary frame sent by client | `error` (`"Only text messages are accepted for commands"`) |
-| Second client connection attempt | HTTP `503` at upgrade (never becomes a WebSocket) |
+| Observer sends a commander-only command (§1.1) | `error` with `code: "forbidden"`, state unchanged |
+| Invalid `start_stream` option (`subsample` not 1/2/4/8, `max_fps` < 0) | `error` |
+| Second connection in a role whose slot is taken | HTTP `503` at upgrade (never becomes a WebSocket); the other role's slot is unaffected |
 | Mode cannot keep up with the camera | `error` at `start_cameras`, state stays **CONFIGURED** (§4.6) |
 | A camera stops delivering frames | **unsolicited** `error` with `code: "capture_timeout"` (§7.1) |
 
@@ -688,6 +778,9 @@ is gone.
 }
 ```
 
+The error is pushed to **both** clients: the commander is the one that can
+recover, and an observer should show the outage rather than a frozen picture.
+
 **Recovery is not automatic**: issue `stop_cameras` then `start_cameras` to
 rebuild the pipeline. Reconfiguring is not required, and the camera is left in
 its normal **RUNNING** lifecycle state precisely so that path stays open — the
@@ -718,4 +811,5 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `6` | `ChunkHeader` stays 68 bytes: the first `reserved2` byte (offset 65) became `detection_kind` (uint8: 0=none, 1=checkerboard, 2=aruco), with `reserved2` shrinking to uint8[2] at offset 66. New `aruco` / `aruco2x2` save modes added (§4.5); when active, the detection block that follows the header uses the new `MarkerSetHeader` record layout (§5.4.2), carrying each marker's `id` (`int32`) and 4 corners. The checkerboard block format (§5.4.1) is unchanged. Old (`detection_kind = 0`) still means "no detection block". |
 | `6` (control-protocol only) | New `trigger` process mode plus the `trigger_capture` command and its asynchronous `trigger_result` response (§4.17), and the `trigger_skip_frames` param on `set_process_mode`. Text-only: the binary `ChunkHeader` and detection-block formats are unchanged, so `version` stays `6`. |
 | `6` (control-protocol only) | Resource guards added. `set_process_mode` gains `backlog_max_bytes`, `disk_write_bytes_per_sec` and `allow_overcommit` (§4.5.1); `start_cameras` may now refuse an infeasible mode (§4.6); the `stop_cameras` status gains `frames_dropped_backlog` (§4.9); and a new **unsolicited** `error` with `code: "capture_timeout"` reports a camera that has stopped delivering frames (§7.1) — the first server-initiated message that is not a reply or a binary frame. Text-only; `version` stays `6`. |
+| `6` (control-protocol only) | **Client roles.** The single client slot became one **commander** (read-write, path `/`) plus one **observer** (read-only, path `/observer`) slot (§1.1); observer write commands fail with `code: "forbidden"`. `state` replies gained `cause`, `role`, `commander_connected`, `observer_connected`, and `state` is now also **pushed** on every transition and on the other role's connect/disconnect (§3.1). `start_stream` gained per-camera `max_fps` and `subsample` options (§4.7) and, for observers, works in any state with a subscription that persists across `stop_cameras`/`start_cameras`; `set_header_only` and backpressure became per connection. Commander-over-observer streaming priority defined (§5.8). On a subsampled stream the header geometry and detection coordinates describe the decimated frame. Binary layout unchanged, so `version` stays `6`. |
 | `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |

@@ -28,6 +28,7 @@ import pytest
 import websocket
 
 from .client import CherupiClient, CommandError
+from .conftest import TEST_CONFIG
 
 
 # --- helpers ----------------------------------------------------------------
@@ -65,6 +66,10 @@ def _drive_to_idle(server_url: str) -> None:
             pass
         try:
             c.stop_cameras()
+        except Exception:
+            pass
+        try:
+            c.command({"cmd": "set_frame_duration", "frame_duration": -1})
         except Exception:
             pass
         try:
@@ -145,7 +150,7 @@ def test_abrupt_disconnect_in_configured_preserves_state(fresh_url: str) -> None
     a = CherupiClient(fresh_url)
     a.connect()
     a.discover()
-    a.configure(width=1456, height=1088)
+    a.configure(**TEST_CONFIG)
     a.abrupt_close()
 
     b = CherupiClient(fresh_url)
@@ -153,7 +158,7 @@ def test_abrupt_disconnect_in_configured_preserves_state(fresh_url: str) -> None
     try:
         # Still CONFIGURED → configure must error.
         with pytest.raises(CommandError):
-            b.configure(width=1456, height=1088)
+            b.configure(**TEST_CONFIG)
         # start_cameras must succeed without re-configuring.
         b.start_cameras()
         b.stop_cameras()
@@ -170,7 +175,7 @@ def test_abrupt_disconnect_during_streaming_preserves_state(fresh_url: str) -> N
     if not cams:
         pytest.skip("No cameras")
     cam_id = cams[0]["id"]
-    a.configure(width=1456, height=1088)
+    a.configure(**TEST_CONFIG)
     a.start_cameras()
     a.start_stream(cam_id)
     a.next_frame(timeout=5.0)  # prove streaming is healthy
@@ -181,7 +186,7 @@ def test_abrupt_disconnect_during_streaming_preserves_state(fresh_url: str) -> N
     try:
         # Still RUNNING → configure must error.
         with pytest.raises(CommandError):
-            b.configure(width=1456, height=1088)
+            b.configure(**TEST_CONFIG)
         # streaming_cameras was cleared on disconnect; we must re-issue.
         b.start_stream(cam_id)
         frame = b.next_frame(timeout=5.0)
@@ -212,8 +217,12 @@ def test_save_continues_during_disconnect(
     if not cams:
         pytest.skip("No cameras")
     cam_id = cams[0]["id"]
-    a.configure(width=1456, height=1088)
-    a.set_process_mode("batch", output_dir=str(out), batch_size=5, writer_threads=2)
+    a.configure(**TEST_CONFIG)
+    # 10 fps + allow_overcommit: keep the server's batch-vs-disk guard (§4.6)
+    # out of a test that is about disconnects (see test_save_modes).
+    a.command({"cmd": "set_frame_duration", "frame_duration": 100_000})
+    a.set_process_mode("batch", output_dir=str(out), batch_size=5,
+                       writer_threads=2, allow_overcommit=True)
     a.start_cameras()
     a.start_stream(cam_id)
     # Confirm streaming is up before we drop.

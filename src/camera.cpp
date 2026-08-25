@@ -314,6 +314,14 @@ bool Camera::stop() {
   lcam->stop();
   lcam->requestCompleted.disconnect(this);
 
+  // Drop the published frame so a streamer that subscribes after the stop
+  // (an observer waiting for the next start_cameras, say) never receives a
+  // stale pre-stop frame. The sequence number is left alone on purpose.
+  {
+    std::lock_guard<std::mutex> lock(latest_frame_mutex);
+    latest_frame_.reset();
+  }
+
   state = CameraState::CONFIGURED;
   LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " stopped");
   return true;
@@ -479,12 +487,16 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     // populated by the time the streamer sees `latest_frame`.
     if (onFrameCaptured) onFrameCaptured(frame);
     {
+      // Move into a shared, immutable frame: `frame` is not touched again
+      // below, and at 4608x2592 a copy here is 17.9 MB of memcpy on the
+      // completion thread — the thread that must requeue this request before
+      // libcamera's dequeue watchdog fires. Every streamer then shares this
+      // one allocation instead of taking its own copy.
+      std::shared_ptr<const FrameData> published =
+          std::make_shared<FrameData>(std::move(frame));
       std::lock_guard<std::mutex> lock(latest_frame_mutex);
-      // Move: `frame` is not touched again below, and at 4608x2592 a copy here
-      // is 17.9 MB of memcpy on the completion thread — the thread that must
-      // requeue this request before libcamera's dequeue watchdog fires.
-      latest_frame = std::move(frame);
-      has_new_frame = true;
+      latest_frame_ = std::move(published);
+      ++latest_seq_;
     }
     new_frame_cv.notify_one();
     if (onFrameAvailable) onFrameAvailable();
@@ -613,39 +625,22 @@ LensPositionLimits Camera::getLensPositionLimitsHw() const {
   return {info.min().get<float>(), info.max().get<float>(), def};
 }
 
-bool Camera::getFrameForStreaming(FrameData& frame) {
-  {
-    std::lock_guard<std::mutex> stream_lock(streaming_frame_mutex);
-    if (streaming_frame_in_use) return false;
-  }
-
-  std::lock_guard<std::mutex> latest_lock(latest_frame_mutex);
-  if (!has_new_frame) return false;
-
-  {
-    std::lock_guard<std::mutex> stream_lock(streaming_frame_mutex);
-    streaming_frame_in_use = true;
-  }
-  // Move rather than copy: `has_new_frame` goes false in the same critical
-  // section, so the moved-from `latest_frame` is never read before the
-  // completion thread republishes into it.
-  frame = std::move(latest_frame);
-  has_new_frame = false;
+bool Camera::getFrameForStreaming(uint64_t& last_seen_seq,
+                                  std::shared_ptr<const FrameData>& frame) {
+  std::lock_guard<std::mutex> lock(latest_frame_mutex);
+  if (!latest_frame_ || latest_seq_ <= last_seen_seq) return false;
+  frame = latest_frame_;
+  last_seen_seq = latest_seq_;
   return true;
 }
 
-bool Camera::waitForNewFrame(std::chrono::milliseconds timeout) {
+bool Camera::waitForNewFrame(uint64_t last_seen_seq,
+                             std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(latest_frame_mutex);
-  return new_frame_cv.wait_for(
-      lock, timeout,
-      [this] { return has_new_frame || should_stop.load(); });
-}
-
-void Camera::releaseStreamingFrame() {
-  std::lock_guard<std::mutex> lock(streaming_frame_mutex);
-  streaming_frame_in_use = false;
-  LOG_DEBUG("Camera", "Camera " + std::to_string(camera_id) +
-                          " streaming frame released");
+  return new_frame_cv.wait_for(lock, timeout, [this, last_seen_seq] {
+    return (latest_frame_ && latest_seq_ > last_seen_seq) ||
+           should_stop.load();
+  });
 }
 
 void Camera::setFrameAvailableCallback(std::function<void()> callback) {

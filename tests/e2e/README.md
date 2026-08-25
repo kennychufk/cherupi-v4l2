@@ -1,14 +1,22 @@
 # End-to-End Tests
 
-Black-box pytest suite that drives a running `camera_ws_server` through the v2
+Black-box pytest suite that drives a running `camera_ws_server` through the v6
 WebSocket protocol. Covers:
 
 - Full lifecycle (discover → configure → start → stream → stop)
 - State-machine gates and error responses
-- Single-client enforcement (second connection gets 503)
-- CHUN/CHNK binary frame format (header fields, chunk reassembly, frame_uuid uniqueness)
+- Client-slot enforcement (a second commander or a second observer gets 503)
+- Commander/observer roles (`test_observer.py`): observer permission gate,
+  pushed `state` messages, persistent observer subscriptions across camera
+  restarts, per-connection header-only, `subsample` / `max_fps` stream options
+- CHUN/CHNK binary frame format (header fields, detection block, chunk
+  reassembly, frame_uuid uniqueness)
 - Header-only mode
-- Save modes: NONE / BUFFER / BATCH / CHECKERBOARD / CHECKERBOARD2X2
+- Process modes: NONE / BUFFER / BATCH / TRIGGER / CHECKERBOARD / CHECKERBOARD2X2
+
+`client.py` is the harness: `CherupiClient(url, role="commander"|"observer")`
+connects to the role's path, replies to commands synchronously, queues frames
+(`next_frame`) and unsolicited messages (`wait_for_state`, `wait_for_message`).
 
 All tests require **live IMX519 hardware** connected to the Pi 5. There is no
 fake-camera backend in the server (by design).
@@ -25,6 +33,8 @@ Easiest — let pytest spawn the server:
 
 ```bash
 pytest tests/e2e/ --server-binary=build/camera_ws_server -v
+# e.g. on a Camera Module 3 rig:
+pytest tests/e2e/ --server-binary=build/camera_ws_server --sensor imx708 --width 1536 --height 864 -v
 ```
 
 Or start the server yourself and point the tests at it:
@@ -59,15 +69,18 @@ The ctest entry passes `--server-binary=build/camera_ws_server` automatically.
 | Option | Default | Purpose |
 |---|---|---|
 | `--server-binary=PATH` | *(none)* | If set, pytest spawns it and tears down. |
+| `--server-log=PATH` | `.e2e-server.log` (env `CHERUPI_SERVER_LOG`) | Where the spawned server's output goes. |
 | `--server-url=URL` | `ws://localhost:9001` | Where to connect. |
 | `--server-startup-timeout=SECS` | `10` | Seconds to wait for the port to open. |
+| `--save-dir=PATH` | `.e2e-save` (env `CHERUPI_SAVE_DIR`) | Where save-mode tests point the server's `output_dir`. Must be a real filesystem on the server's host (BATCH uses O_DIRECT; `/tmp` is tmpfs on the Pi). Each test's subdirectory is removed on teardown. |
+| `--sensor=MODEL` | `imx519` (env `CHERUPI_SENSOR`) | Sensor model substring every `discover` sends. Set it to the attached module (e.g. `imx708`) or every camera-dependent test skips with "No cameras discovered". |
+| `--width=W --height=H` | `2328` / `1748` (env `CHERUPI_WIDTH` / `CHERUPI_HEIGHT`) | Capture geometry the suite configures. The server pins the sensor mode, so this must be a native mode of the attached module (`1536x864` on an imx708, for example) or every `configure` fails with "Failed to configure cameras". |
 
 ## Notes
 
-- BATCH mode uses O_DIRECT; pytest's default `--basetemp` is under
-  `.pytest_cache` which usually sits on a real filesystem. If you override
-  `--basetemp` to tmpfs, BATCH tests may fail.
-- `/tmp` is tmpfs on the Pi — avoid it for save-mode output dirs.
+- BATCH mode uses O_DIRECT, which tmpfs rejects, and `/tmp` is tmpfs on the
+  Pi — so the save-mode tests never use pytest's `tmp_path`; they write under
+  `--save-dir` (default `./.e2e-save`) and clean up after themselves.
 - Tests share a single server instance across the session (fast) and reset
   state (stop_cameras, set_process_mode=none, set_header_only=false) between tests.
 

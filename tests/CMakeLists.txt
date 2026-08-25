@@ -9,6 +9,8 @@ set(UNIT_SOURCES
     unit/capacity_test.cpp
     unit/frame_processor_modes_test.cpp
     unit/stream_chunking_test.cpp
+    unit/stream_priority_test.cpp
+    unit/frame_subsample_test.cpp
     unit/checkerboard_detector_test.cpp
     unit/aruco_detector_test.cpp
 )
@@ -23,6 +25,7 @@ set(UNIT_SOURCES
 add_executable(unit_tests
     ${UNIT_SOURCES}
     ../src/stream_manager.cpp
+    ../src/frame_subsample.cpp
     ../src/rate_controller.cpp
     ../src/frame_processor.cpp
     ../src/frame_processor_helpers.cpp

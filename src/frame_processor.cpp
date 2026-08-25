@@ -143,7 +143,11 @@ void FrameProcessor::start() {
                (config.backlog_max_bytes > 0 ? " (configured)"
                                              : " (derived from MemAvailable)"));
 
-  // Reset per-camera counters
+  // Reset the session totals along with the per-camera counters: the
+  // frames_saved / bytes_written reported by stop_cameras describe this
+  // capture session, not the life of the process.
+  frames_saved = 0;
+  bytes_written = 0;
   frames_saved_per_camera.clear();
 
   // Drop a trigger left armed by a previous session (its client is long gone).
@@ -228,6 +232,14 @@ void FrameProcessor::stop() {
     }
     pending_cv.notify_all();
     if (detection_thread.joinable()) detection_thread.join();
+    // Drop the streamer-facing slots, as Camera::stop() does for its own: a
+    // streamer that subscribes after the stop (an observer waiting for the
+    // next start_cameras) must not be handed a stale pre-stop frame. The
+    // sequence counter is left alone so existing cursors stay valid.
+    {
+      std::lock_guard<std::mutex> lock(detected_mutex);
+      detected_for_stream.clear();
+    }
   }
 
   if (usesWriterPool(config.mode) && config.save_frames) {
@@ -520,12 +532,14 @@ void FrameProcessor::processDetection(FrameData frame) {
   // actually ran on — are ever eligible to stream. Latest-wins per camera:
   // an earlier processed frame the streamer never picked up is overwritten.
   const uint32_t camera_id = frame.camera_id;
+  std::shared_ptr<const FrameData> published =
+      std::make_shared<FrameData>(std::move(frame));
   {
     std::lock_guard<std::mutex> lock(detected_mutex);
     DetectedFrame& df = detected_for_stream[camera_id];
-    df.frame = std::move(frame);
+    df.frame = std::move(published);
     df.sets = std::move(sets);
-    df.fresh = true;
+    df.seq = ++detected_seq_counter_;
   }
 }
 

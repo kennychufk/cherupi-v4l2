@@ -73,7 +73,41 @@ std::optional<ProcessMode> parseProcessMode(const std::string& mode) {
   return std::nullopt;
 }
 
-bool isCommandAllowed(CommandKind kind, CameraState current) {
+ClientRole roleForPath(std::string_view path) {
+  // Drop any query string, then a single trailing slash.
+  const size_t q = path.find('?');
+  if (q != std::string_view::npos) path = path.substr(0, q);
+  if (path.size() > 1 && path.back() == '/') path.remove_suffix(1);
+  return path == "/observer" ? ClientRole::OBSERVER : ClientRole::COMMANDER;
+}
+
+bool isCommandPermitted(CommandKind kind, ClientRole role) {
+  if (role == ClientRole::COMMANDER) return true;
+  switch (kind) {
+    case CommandKind::Discover:
+    case CommandKind::GetState:
+    case CommandKind::StartStream:
+    case CommandKind::StopStream:
+    case CommandKind::SetHeaderOnly:
+    case CommandKind::GetFrameDurationLimits:
+    case CommandKind::GetLensPositionLimits:
+      return true;
+    case CommandKind::Configure:
+    case CommandKind::Unconfigure:
+    case CommandKind::SetProcessMode:
+    case CommandKind::TriggerCapture:
+    case CommandKind::StartCameras:
+    case CommandKind::StopCameras:
+    case CommandKind::ResetFrameCounts:
+    case CommandKind::SetLensPosition:
+    case CommandKind::SetExposureTime:
+    case CommandKind::SetFrameDuration:
+      return false;
+  }
+  return false;
+}
+
+bool isCommandAllowed(CommandKind kind, CameraState current, ClientRole role) {
   switch (kind) {
     case CommandKind::Discover:
     case CommandKind::GetState:
@@ -89,6 +123,9 @@ bool isCommandAllowed(CommandKind kind, CameraState current) {
       return current == CameraState::CONFIGURED;
     case CommandKind::StartStream:
     case CommandKind::StopStream:
+      // An observer subscribes once and keeps the subscription across camera
+      // stop/start cycles, so it may do so whatever the current state.
+      return role == ClientRole::OBSERVER || current == CameraState::RUNNING;
     case CommandKind::StopCameras:
     case CommandKind::TriggerCapture:
       return current == CameraState::RUNNING;
@@ -115,6 +152,44 @@ std::string buildSensorFilter(const json& params) {
     return params["sensor"].get<std::string>();
   }
   return "imx519";
+}
+
+std::variant<StreamRequest, std::string> buildStreamRequest(
+    const json& message) {
+  if (!message.contains("camera_id") ||
+      !message["camera_id"].is_number_integer()) {
+    return std::string("Missing or non-integer 'camera_id' field");
+  }
+  const int64_t requested = message["camera_id"].get<int64_t>();
+  if (requested < 0) return std::string("camera_id must be non-negative");
+
+  StreamRequest req;
+  req.camera_id = static_cast<uint32_t>(requested);
+
+  if (message.contains("max_fps")) {
+    const json& v = message["max_fps"];
+    if (!v.is_number()) return std::string("max_fps must be a number");
+    const double fps = v.get<double>();
+    if (!(fps >= 0.0) || fps > 1000.0) {
+      return std::string("max_fps out of range (expected 0 for uncapped, or (0, 1000])");
+    }
+    req.options.max_fps = fps;
+  }
+
+  if (message.contains("subsample")) {
+    const json& v = message["subsample"];
+    if (!v.is_number_integer() || v.get<int64_t>() < 1 ||
+        v.get<int64_t>() > 8) {
+      return std::string("subsample must be 1, 2, 4 or 8");
+    }
+    const uint32_t factor = static_cast<uint32_t>(v.get<int64_t>());
+    if (factor != 1 && factor != 2 && factor != 4 && factor != 8) {
+      return std::string("subsample must be 1, 2, 4 or 8");
+    }
+    req.options.subsample = factor;
+  }
+
+  return req;
 }
 
 std::optional<ProcessConfig> buildProcessConfig(const json& message) {

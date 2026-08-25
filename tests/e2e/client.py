@@ -1,8 +1,15 @@
 """WebSocket client for the cherupi-v4l2 camera server.
 
-Speaks the v2 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
+Speaks the v6 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
 Designed for use from pytest end-to-end tests but has no test-framework
 dependency and can be driven from a plain script.
+
+A client connects in one of two **roles** (see protocol §1):
+
+* ``commander`` (default) — read-write; owns the camera lifecycle. Connects to
+  the bare URL (path ``/``).
+* ``observer`` — read-only; may only subscribe to frames. Connects to
+  ``<url>/observer``.
 
 Typical usage:
 
@@ -14,11 +21,16 @@ Typical usage:
         frame = c.next_frame(timeout=5.0)
         assert frame.pixel_format == FOURCC_YU12
         c.stop_cameras()
+
+    with CherupiClient("ws://localhost:9001", role="observer") as o:
+        o.start_stream(0)          # allowed in any state; persistent
+        frame = o.next_frame(timeout=30.0)
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import struct
@@ -46,12 +58,25 @@ import websocket  # pip install websocket-client  # noqa: E402
 
 CHUN_MAGIC = 0x4348554E  # 'CHUN'
 CHNK_MAGIC = 0x43484E4B  # 'CHNK'
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 6
 
-# ChunkStartMarker (8 bytes) + ChunkHeader (40 bytes)
+# ChunkStartMarker (8 bytes) + ChunkHeader (68 bytes)
 START_STRUCT = struct.Struct("<II")  # magic, version
-HEADER_STRUCT = struct.Struct("<IIIIIIIIII")  # 10 × uint32
-START_PLUS_HEADER_SIZE = START_STRUCT.size + HEADER_STRUCT.size  # 48
+# frame_uuid, frame_id, camera_id, total_chunks, total_size, bytes_per_line,
+# width, height, pixel_format, frames_saved, timestamp_us (u64),
+# frame_duration_us, corner_block_size, num_corner_sets (u16), reserved (u16),
+# lens_position (f32), af_state (u8), detection_kind (u8), reserved2 (u8[2])
+HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBB2s")
+START_PLUS_HEADER_SIZE = START_STRUCT.size + HEADER_STRUCT.size  # 76
+
+# Detection block records (§5.4)
+CORNER_SET_HEADER = struct.Struct("<BBH")  # set_id, flags, num_corners
+MARKER_SET_HEADER = struct.Struct("<iBBH")  # marker_id, quadrant, flags, num_corners
+CORNER_STRUCT = struct.Struct("<ff")
+
+DETECTION_NONE = 0
+DETECTION_CHECKERBOARD = 1
+DETECTION_ARUCO = 2
 
 # ChunkData (16-byte header)
 CHUNK_STRUCT = struct.Struct("<IIII")  # magic, frame_uuid, chunk_index, chunk_size
@@ -62,8 +87,37 @@ MAX_CHUNK_PAYLOAD = 32 * 1024
 # FourCC for YUV420 (V4L2_PIX_FMT_YUV420 = 'YU12')
 FOURCC_YU12 = 0x32315559
 
+ROLE_COMMANDER = "commander"
+ROLE_OBSERVER = "observer"
+
+# Sensor model substring sent with `discover` when a call does not name one.
+# The server's own default is "imx519"; the conftest overrides this from
+# `--sensor` / `CHERUPI_SENSOR` so the suite can run against another module.
+DEFAULT_SENSOR: Optional[str] = None
+
+
+def role_url(base_url: str, role: str) -> str:
+    """Return the URL a client of `role` connects to (protocol §1)."""
+    base = base_url.rstrip("/")
+    if role == ROLE_OBSERVER:
+        return base + "/observer"
+    if role == ROLE_COMMANDER:
+        return base + "/"
+    raise ValueError(f"Unknown role {role!r}")
+
 
 # --- Result types -------------------------------------------------------------
+
+
+@dataclass
+class CornerSet:
+    """One record of the detection block: a checkerboard (marker_id is None) or
+    an ArUco marker (marker_id set)."""
+
+    set_id: int  # quadrant for 2x2 modes, else 0
+    flags: int
+    corners: List[tuple]  # [(x, y), ...] in the streamed frame's pixel space
+    marker_id: Optional[int] = None
 
 
 @dataclass
@@ -81,6 +135,12 @@ class Frame:
     pixel_format: int
     frames_saved: int
     data: bytes  # empty in header-only mode
+    timestamp_us: int = 0
+    frame_duration_us: int = 0
+    lens_position: float = math.nan
+    af_state: int = 0xFF
+    detection_kind: int = DETECTION_NONE
+    corner_sets: List[CornerSet] = field(default_factory=list)
 
     @property
     def is_header_only(self) -> bool:
@@ -111,20 +171,30 @@ class CommandError(RuntimeError):
         super().__init__(message)
         self.response = response
 
+    @property
+    def code(self) -> Optional[str]:
+        return self.response.get("code")
+
 
 # --- Client -------------------------------------------------------------------
 
 
 class CherupiClient:
-    """Single-client WebSocket harness for camera_ws_server.
+    """WebSocket harness for camera_ws_server, in either client role.
 
     Command methods block until the server sends a matching `status` / `error`
-    (or `discovery` for `discover`). Binary frames arrive asynchronously and
-    are exposed through `next_frame()` / `drain_frames()`.
+    (or `discovery` for `discover`, `state` for `get_state`). Binary frames
+    arrive asynchronously and are exposed through `next_frame()` /
+    `drain_frames()`. Unsolicited text messages (state pushes, capture_timeout
+    errors, trigger_result) are queued too; `next_message()` /
+    `wait_for_message()` read them.
     """
 
-    def __init__(self, url: str, open_timeout: float = 5.0):
-        self.url = url
+    def __init__(self, url: str, open_timeout: float = 5.0,
+                 role: str = ROLE_COMMANDER):
+        self.role = role
+        self.base_url = url
+        self.url = role_url(url, role)
         self._ws: Optional[websocket.WebSocket] = None
         self._rx_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -144,7 +214,7 @@ class CherupiClient:
         )
         self._stop.clear()
         self._rx_thread = threading.Thread(
-            target=self._rx_loop, name="cherupi-client-rx", daemon=True
+            target=self._rx_loop, name=f"cherupi-{self.role}-rx", daemon=True
         )
         self._rx_thread.start()
 
@@ -226,10 +296,10 @@ class CherupiClient:
             raise ProtocolError(f"Unknown binary magic 0x{magic:08X}")
 
     def _handle_chunk_start(self, data: bytes) -> None:
-        if len(data) != START_PLUS_HEADER_SIZE:
+        if len(data) < START_PLUS_HEADER_SIZE:
             raise ProtocolError(
-                f"CHUN packet wrong size: got {len(data)}, "
-                f"expected {START_PLUS_HEADER_SIZE}"
+                f"CHUN packet too short: got {len(data)}, "
+                f"expected at least {START_PLUS_HEADER_SIZE}"
             )
         magic, version = START_STRUCT.unpack_from(data, 0)
         if magic != CHUN_MAGIC:
@@ -248,7 +318,26 @@ class CherupiClient:
             height,
             pixel_format,
             frames_saved,
+            timestamp_us,
+            frame_duration_us,
+            corner_block_size,
+            num_corner_sets,
+            _reserved,
+            lens_position,
+            af_state,
+            detection_kind,
+            _reserved2,
         ) = HEADER_STRUCT.unpack_from(data, START_STRUCT.size)
+
+        if len(data) != START_PLUS_HEADER_SIZE + corner_block_size:
+            raise ProtocolError(
+                f"CHUN packet wrong size: got {len(data)}, expected "
+                f"{START_PLUS_HEADER_SIZE} + corner_block_size {corner_block_size}"
+            )
+        corner_sets = self._parse_detection_block(
+            data, START_PLUS_HEADER_SIZE, corner_block_size, num_corner_sets,
+            detection_kind,
+        )
 
         header = Frame(
             frame_uuid=frame_uuid,
@@ -262,6 +351,12 @@ class CherupiClient:
             pixel_format=pixel_format,
             frames_saved=frames_saved,
             data=b"",
+            timestamp_us=timestamp_us,
+            frame_duration_us=frame_duration_us,
+            lens_position=lens_position,
+            af_state=af_state,
+            detection_kind=detection_kind,
+            corner_sets=corner_sets,
         )
 
         if total_chunks == 0:
@@ -269,6 +364,41 @@ class CherupiClient:
             self._frames.put(header)
         else:
             self._partials[frame_uuid] = _PartialFrame(header=header)
+
+    @staticmethod
+    def _parse_detection_block(
+        data: bytes, offset: int, size: int, count: int, kind: int
+    ) -> List[CornerSet]:
+        end = offset + size
+        sets: List[CornerSet] = []
+        pos = offset
+        for _ in range(count):
+            if kind == DETECTION_ARUCO:
+                if pos + MARKER_SET_HEADER.size > end:
+                    raise ProtocolError("MarkerSetHeader overruns detection block")
+                marker_id, quadrant, flags, num_corners = MARKER_SET_HEADER.unpack_from(data, pos)
+                pos += MARKER_SET_HEADER.size
+                set_id = quadrant
+            else:
+                if pos + CORNER_SET_HEADER.size > end:
+                    raise ProtocolError("CornerSetHeader overruns detection block")
+                set_id, flags, num_corners = CORNER_SET_HEADER.unpack_from(data, pos)
+                pos += CORNER_SET_HEADER.size
+                marker_id = None
+            if pos + num_corners * CORNER_STRUCT.size > end:
+                raise ProtocolError("corner list overruns detection block")
+            corners = [
+                CORNER_STRUCT.unpack_from(data, pos + i * CORNER_STRUCT.size)
+                for i in range(num_corners)
+            ]
+            pos += num_corners * CORNER_STRUCT.size
+            sets.append(CornerSet(set_id=set_id, flags=flags, corners=corners,
+                                  marker_id=marker_id))
+        if pos != end:
+            raise ProtocolError(
+                f"detection block has {end - pos} trailing byte(s)"
+            )
+        return sets
 
     def _handle_chunk_data(self, data: bytes) -> None:
         magic, frame_uuid, chunk_index, chunk_size = CHUNK_STRUCT.unpack_from(data, 0)
@@ -316,11 +446,17 @@ class CherupiClient:
                 )
             msg_type = msg.get("type")
             if msg_type == "error":
+                # Unsolicited errors (capture_timeout) are not replies; skip
+                # them here and let wait_for_message() pick them up.
+                if msg.get("code") == "capture_timeout":
+                    continue
                 raise CommandError(msg.get("message", "<no message>"), msg)
             if msg_type in expected_types:
+                # A pushed `state` is not the reply to get_state.
+                if msg_type == "state" and msg.get("cause") not in (None, "query"):
+                    continue
                 return msg
-            # Ignore unrelated messages (shouldn't happen — server always
-            # responds to a command with status/error/discovery).
+            # Ignore unrelated messages (state pushes, trigger_result, ...).
 
     def command(
         self,
@@ -336,9 +472,18 @@ class CherupiClient:
     # unusual command payloads (e.g. missing fields) by calling `command()`
     # directly.
 
-    def discover(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
-        resp = self.command({"cmd": "discover"}, expect=("discovery",), timeout=timeout)
+    def discover(self, sensor: Optional[str] = None,
+                 timeout: float = 5.0) -> List[Dict[str, Any]]:
+        body: Dict[str, Any] = {"cmd": "discover"}
+        sensor = sensor if sensor is not None else DEFAULT_SENSOR
+        if sensor:
+            body["params"] = {"sensor": sensor}
+        resp = self.command(body, expect=("discovery",), timeout=timeout)
         return resp.get("cameras", [])
+
+    def get_state(self, timeout: float = 5.0) -> Dict[str, Any]:
+        """Return the full `state` reply (state, role, *_connected, cause)."""
+        return self.command({"cmd": "get_state"}, expect=("state",), timeout=timeout)
 
     def configure(self, **params: Any) -> Dict[str, Any]:
         return self.command({"cmd": "configure", "params": params})
@@ -377,8 +522,18 @@ class CherupiClient:
     def stop_cameras(self, timeout: float = 15.0) -> Dict[str, Any]:
         return self.command({"cmd": "stop_cameras"}, timeout=timeout)
 
-    def start_stream(self, camera_id: int) -> Dict[str, Any]:
-        return self.command({"cmd": "start_stream", "camera_id": camera_id})
+    def start_stream(
+        self,
+        camera_id: int,
+        max_fps: Optional[float] = None,
+        subsample: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"cmd": "start_stream", "camera_id": camera_id}
+        if max_fps is not None:
+            body["max_fps"] = max_fps
+        if subsample is not None:
+            body["subsample"] = subsample
+        return self.command(body)
 
     def stop_stream(self, camera_id: int) -> Dict[str, Any]:
         return self.command({"cmd": "stop_stream", "camera_id": camera_id})
@@ -402,6 +557,41 @@ class CherupiClient:
         while True:
             try:
                 out.append(self._frames.get_nowait())
+            except queue.Empty:
+                return out
+
+    # -- unsolicited message API ---------------------------------------------
+
+    def next_message(self, timeout: float = 5.0) -> Dict[str, Any]:
+        """Pop the next queued text message of any type."""
+        try:
+            return self._responses.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"No message received within {timeout}s")
+
+    def wait_for_message(self, predicate, timeout: float = 5.0) -> Dict[str, Any]:
+        """Pop messages until `predicate(msg)` is true; drops the others."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"No matching message within {timeout}s")
+            msg = self.next_message(timeout=remaining)
+            if predicate(msg):
+                return msg
+
+    def wait_for_state(self, state: str, timeout: float = 5.0) -> Dict[str, Any]:
+        """Wait for a pushed `state` message reporting `state`."""
+        return self.wait_for_message(
+            lambda m: m.get("type") == "state" and m.get("state") == state,
+            timeout=timeout,
+        )
+
+    def drain_messages(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        while True:
+            try:
+                out.append(self._responses.get_nowait())
             except queue.Empty:
                 return out
 
