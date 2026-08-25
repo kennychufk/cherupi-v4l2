@@ -287,9 +287,20 @@ struct ProcessConfig {
   // `aruco_num_threads` bounds the aruco2x2 quadrant parallelism ([1, 4]).
   // `aruco_corner_refine` false ⇒ CORNER_REFINE_NONE (fastest, real-time),
   // true ⇒ CORNER_REFINE_SUBPIX (more precise corners, slower).
+  // `aruco_edge_refine` (default ON) re-derives each marker's corners from
+  // its edges in linear light after OpenCV's detection: OpenCV's corners —
+  // NONE and SUBPIX alike — are taken AT the corner of a blurred square on
+  // gamma-encoded luma, and sit ~1 px inside the true corner on a Camera
+  // Module 3 Wide at 4608 px (every ~95 px tag read 2 % small). The fit
+  // samples the middle of each edge instead, decodes the luma through
+  // `aruco_edge_gamma` (2.2 = the ISP's output, as measured; 1.0 = none),
+  // fits four lines and intersects them; a marker it cannot fit keeps
+  // OpenCV's corners. See ArucoDetector.
   bool aruco_full_res_detection = false;
   int aruco_num_threads = 4;
   bool aruco_corner_refine = false;
+  bool aruco_edge_refine = true;
+  float aruco_edge_gamma = 2.2f;
 
   // Upper bound, in bytes, on the RAM held by the in-flight frame backlog:
   // BUFFER's `buffered_frames` plus the writer pool's `write_queue` and

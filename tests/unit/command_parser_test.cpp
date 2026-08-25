@@ -186,7 +186,9 @@ TEST(CommandParserTest, BuildProcessConfigAppliesArucoParams) {
     "params":{
       "aruco_full_res_detection":true,
       "aruco_num_threads":2,
-      "aruco_corner_refine":true
+      "aruco_corner_refine":true,
+      "aruco_edge_refine":false,
+      "aruco_edge_gamma":1.8
     }
   })");
   auto cfg = command_parser::buildProcessConfig(msg);
@@ -195,6 +197,17 @@ TEST(CommandParserTest, BuildProcessConfigAppliesArucoParams) {
   EXPECT_TRUE(cfg->aruco_full_res_detection);
   EXPECT_EQ(cfg->aruco_num_threads, 2);
   EXPECT_TRUE(cfg->aruco_corner_refine);
+  EXPECT_FALSE(cfg->aruco_edge_refine);
+  EXPECT_FLOAT_EQ(cfg->aruco_edge_gamma, 1.8f);
+}
+
+TEST(CommandParserTest, BuildProcessConfigArucoEdgeGammaNonPositiveMeansNone) {
+  auto msg = nlohmann::json::parse(
+      R"({"mode":"aruco","params":{"aruco_edge_gamma":0}})");
+  auto cfg = command_parser::buildProcessConfig(msg);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_TRUE(cfg->aruco_edge_refine);
+  EXPECT_FLOAT_EQ(cfg->aruco_edge_gamma, 1.0f);
 }
 
 TEST(CommandParserTest, BuildProcessConfigArucoDefaults) {
@@ -206,6 +219,9 @@ TEST(CommandParserTest, BuildProcessConfigArucoDefaults) {
   EXPECT_FALSE(cfg->aruco_full_res_detection);
   EXPECT_EQ(cfg->aruco_num_threads, 4);
   EXPECT_FALSE(cfg->aruco_corner_refine);
+  // The edge refinement is on unless a client turns it off.
+  EXPECT_TRUE(cfg->aruco_edge_refine);
+  EXPECT_FLOAT_EQ(cfg->aruco_edge_gamma, 2.2f);
 }
 
 TEST(CommandParserTest, BuildProcessConfigRejectsUnknownMode) {

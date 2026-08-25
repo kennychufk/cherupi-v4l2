@@ -47,8 +47,9 @@ void FrameProcessor::configure(const ProcessConfig& cfg) {
 
   // Initialize aruco detector if needed
   if (config.mode == ProcessMode::ARUCO || config.mode == ProcessMode::ARUCO2X2) {
-    aruco_detector =
-        std::make_unique<ArucoDetector>(config.aruco_corner_refine);
+    aruco_detector = std::make_unique<ArucoDetector>(
+        config.aruco_corner_refine, config.aruco_edge_refine,
+        config.aruco_edge_gamma);
   }
 }
 

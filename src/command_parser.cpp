@@ -152,6 +152,14 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
       config.aruco_num_threads = params["aruco_num_threads"];
     if (params.contains("aruco_corner_refine"))
       config.aruco_corner_refine = params["aruco_corner_refine"];
+    if (params.contains("aruco_edge_refine"))
+      config.aruco_edge_refine = params["aruco_edge_refine"];
+    if (params.contains("aruco_edge_gamma") &&
+        params["aruco_edge_gamma"].is_number()) {
+      // A non-positive exponent cannot decode anything; treat it as "none".
+      const double g = params["aruco_edge_gamma"].get<double>();
+      config.aruco_edge_gamma = g > 0.0 ? static_cast<float>(g) : 1.0f;
+    }
     if (params.contains("trigger_skip_frames") &&
         params["trigger_skip_frames"].is_number_integer())
       config.trigger_skip_frames =

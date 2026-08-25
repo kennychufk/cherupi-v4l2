@@ -157,6 +157,8 @@ Configure the optional on-device frame-processing pipeline (detection and/or sav
   "aruco_full_res_detection": false,
   "aruco_num_threads": 4,
   "aruco_corner_refine": false,
+  "aruco_edge_refine": true,
+  "aruco_edge_gamma": 2.2,
   "backlog_max_bytes": 0,
   "disk_write_bytes_per_sec": 0,
   "allow_overcommit": false
@@ -181,6 +183,8 @@ The mode names **what is done to each captured frame**. Whether processed frames
 `save_frames` (default `true`): when `false`, disk writing is disabled while detection still runs and still streams its side-products (corners/markers). In a detector mode this is the **optimized detection-only pipeline** — the writer pool is never started and the per-detection full-frame copy into the write queue is skipped, so `frames_saved` stays `0`. For `buffer`/`batch` (which have no side-product) `false` simply produces no output.
 
 `checkerboard_*` fields apply to `checkerboard` / `checkerboard2x2`; `aruco_*` fields apply to `aruco` / `aruco2x2`; `trigger_skip_frames` applies to `trigger`. `aruco_corner_refine` selects OpenCV's corner-refinement method: `false` ⇒ `CORNER_REFINE_NONE` (fastest, raw quad corners; the real-time default), `true` ⇒ `CORNER_REFINE_SUBPIX` (sub-pixel corners, slower). If `prepend_timestamp_to_dir` is true, a timestamp is prepended to `output_dir`. `output_dir`, `prepend_timestamp_to_dir`, `batch_size`, and `writer_threads` are ignored when `save_frames` is `false`.
+
+`aruco_edge_refine` (default `true`) re-derives each reported marker's corners from its **edges** after OpenCV has detected and identified it. Every corner OpenCV offers — the thresholded contour's quad, `cornerSubPix` — is estimated *at* the corner, where a blurred L-corner is rounded, and on the luma the ISP delivers, which is gamma-encoded, so the half-level crossing of a soft edge falls on the dark side of the true edge; both pull every corner inward. Measured on a Camera Module 3 Wide at 4608 px (10–90 % edge width 4–6 px): ~1 px per corner, every ~95 px tag reading ~2 % small and a five-tag pose solve left with a 2–3 px systematic residual. The edge fit samples the luma across the middle 60 % of each edge (away from the corners, where a symmetric blur leaves the half-level crossing unbiased), decoded to linear light through `aruco_edge_gamma` (`luma_linear = 255·(Y/255)^gamma`; `2.2` is what that camera's output measured as, restoring the tags to size within 0.04 %; `1.0` fits the encoded luma as-is), fits a line per edge and intersects adjacent lines. A marker whose fit does not hold (too little contrast, too few edge points, a corner moving more than max(3 px, 10 % of the side)) keeps OpenCV's corners unchanged, and the reported corner order and count are unaffected. Costs microseconds per marker.
 
 All four detector modes (`checkerboard`, `checkerboard2x2`, `aruco`, `aruco2x2`) run detection **best-effort** on a worker thread off the capture path: because detection is CPU-bound (tens–hundreds of ms per frame) it cannot keep up with a high capture rate, so frames that arrive while the detector is busy are skipped (latest-frame-wins into the detector). Streaming is gated on the detector — **only frames the detector actually processed are streamed to the client**, each carrying its detection result (this is independent of `save_frames`). See §5.4 and §5.7.
 
