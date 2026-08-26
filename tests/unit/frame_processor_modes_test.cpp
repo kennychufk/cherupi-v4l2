@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -614,15 +615,16 @@ TEST_F(FrameProcessorTempDir, DetectorModeWithSaveFramesOffStreamsButWritesNothi
   saver.saveFrame(frame);
 
   // The detector still publishes the processed frame + corners for streaming.
-  FrameData got;
+  std::shared_ptr<const FrameData> got;
   std::vector<CornerSet> sets;
+  uint64_t cursor = 0;
   bool ready = false;
   for (int i = 0; i < 400 && !ready; ++i) {
-    ready = saver.takeDetectedFrameForStreaming(0, got, sets);
+    ready = saver.getDetectedFrameForStreaming(0, cursor, got, sets);
     if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   ASSERT_TRUE(ready);
-  EXPECT_EQ(got.frame_id, 77u);
+  EXPECT_EQ(got->frame_id, 77u);
   ASSERT_EQ(sets.size(), 1u);
   EXPECT_EQ(sets[0].corners.size(), 11u * 8u);
 
@@ -687,15 +689,16 @@ TEST_F(FrameProcessorTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) 
 
   // Detection is async/best-effort: wait for the worker to publish the
   // processed frame into the streamer-facing slot.
-  FrameData got;
+  std::shared_ptr<const FrameData> got;
   std::vector<CornerSet> sets;
+  uint64_t cursor = 0;
   bool ready = false;
   for (int i = 0; i < 400 && !ready; ++i) {
-    ready = saver.takeDetectedFrameForStreaming(2, got, sets);
+    ready = saver.getDetectedFrameForStreaming(2, cursor, got, sets);
     if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   ASSERT_TRUE(ready);
-  EXPECT_EQ(got.frame_id, 55u);
+  EXPECT_EQ(got->frame_id, 55u);
   ASSERT_EQ(sets.size(), 1u);
   EXPECT_EQ(sets[0].set_id, 0u);  // top-left quadrant
   EXPECT_EQ(sets[0].corners.size(), 11u * 8u);
@@ -708,13 +711,23 @@ TEST_F(FrameProcessorTempDir, Checkerboard2x2PublishesDetectedFrameForStreamer) 
     EXPECT_LT(p.y, static_cast<float>(frame.height) / 2.0f);
   }
 
-  // Consume-once: taking again without a new detection yields nothing, so the
-  // same processed frame is never streamed twice.
-  FrameData again;
+  // Per-consumer once-only: the same cursor yields nothing until a new
+  // detection lands, so one streamer never sends a processed frame twice —
+  // but a second consumer (a fresh cursor: the other client role) still gets
+  // it, shared rather than copied.
+  std::shared_ptr<const FrameData> again;
   std::vector<CornerSet> again_sets;
-  EXPECT_FALSE(saver.takeDetectedFrameForStreaming(2, again, again_sets));
+  EXPECT_FALSE(saver.getDetectedFrameForStreaming(2, cursor, again, again_sets));
+  uint64_t other_cursor = 0;
+  ASSERT_TRUE(saver.getDetectedFrameForStreaming(2, other_cursor, again,
+                                                 again_sets));
+  EXPECT_EQ(again.get(), got.get());
+  EXPECT_EQ(other_cursor, cursor);
+  ASSERT_EQ(again_sets.size(), 1u);
   // A camera that never produced a detected frame yields nothing.
-  EXPECT_FALSE(saver.takeDetectedFrameForStreaming(3, again, again_sets));
+  uint64_t none_cursor = 0;
+  EXPECT_FALSE(saver.getDetectedFrameForStreaming(3, none_cursor, again,
+                                                  again_sets));
 
   saver.stop();
 }
@@ -787,15 +800,16 @@ TEST_F(FrameProcessorTempDir, Aruco2x2SavesAndPublishesMarker) {
 
   // Detection is async/best-effort: wait for the worker to publish the
   // processed frame + its markers into the streamer-facing slot.
-  FrameData got;
+  std::shared_ptr<const FrameData> got;
   std::vector<CornerSet> sets;
+  uint64_t cursor = 0;
   bool ready = false;
   for (int i = 0; i < 400 && !ready; ++i) {
-    ready = saver.takeDetectedFrameForStreaming(1, got, sets);
+    ready = saver.getDetectedFrameForStreaming(1, cursor, got, sets);
     if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   ASSERT_TRUE(ready);
-  EXPECT_EQ(got.frame_id, 88u);
+  EXPECT_EQ(got->frame_id, 88u);
   ASSERT_EQ(sets.size(), 1u);
   EXPECT_EQ(sets[0].set_id, 0u);       // top-left quadrant
   EXPECT_EQ(sets[0].marker_id, kId);   // reported dictionary id

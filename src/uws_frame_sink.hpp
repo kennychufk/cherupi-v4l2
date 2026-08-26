@@ -7,6 +7,16 @@
 #include <uWS/App.h>
 
 #include "frame_sink.hpp"
+#include "types.hpp"
+
+// Per-connection data uWS keeps alongside each socket (its `UserData`).
+struct UwsSocketData {
+  // Fixed at upgrade time from the URL path (see command_parser::roleForPath).
+  ClientRole role = ClientRole::COMMANDER;
+  // Drain-handler backpressure hysteresis state. Per connection: the commander
+  // and the observer have independent sockets and independent congestion.
+  bool in_backpressure = false;
+};
 
 // FrameSink adapter over a uWS::WebSocket. Header-only so the template
 // instantiation stays next to the rest of the uWS code and does not leak into
@@ -29,7 +39,7 @@
 class UwsFrameSink : public FrameSink,
                      public std::enable_shared_from_this<UwsFrameSink> {
  public:
-  using Socket = uWS::WebSocket<false, true, int>;
+  using Socket = uWS::WebSocket<false, true, UwsSocketData>;
 
   // Must be constructed on the loop thread (e.g. in the WebSocket .open
   // handler) so `uWS::Loop::get()` resolves to the right loop.

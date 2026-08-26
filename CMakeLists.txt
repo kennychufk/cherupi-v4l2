@@ -128,6 +128,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/frame_processor_helpers.cpp
         src/capacity.cpp
         src/stream_manager.cpp
+        src/frame_subsample.cpp
         src/rate_controller.cpp
         src/command_parser.cpp
         src/checkerboard_detector.cpp
@@ -143,6 +144,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/frame_processor.hpp
         src/frame_processor_helpers.hpp
         src/stream_manager.hpp
+        src/stream_priority.hpp
+        src/frame_subsample.hpp
         src/rate_controller.hpp
         src/command_parser.hpp
         src/frame_sink.hpp

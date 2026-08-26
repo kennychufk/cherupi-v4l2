@@ -256,6 +256,30 @@ inline bool usesWriterPool(ProcessMode mode) {
 // Camera state
 enum class CameraState { IDLE, CONFIGURED, RUNNING, ERROR };
 
+// The two client roles a WebSocket connection can hold. The **commander** (the
+// read-write client: the robot's vision component) owns the camera lifecycle
+// and attributes; the **observer** (a read-only, CCTV-style telemetry view)
+// can only receive frames. The server holds at most one connection of each.
+enum class ClientRole { COMMANDER, OBSERVER };
+
+inline const char* clientRoleName(ClientRole role) {
+  return role == ClientRole::OBSERVER ? "observer" : "commander";
+}
+
+// Per-camera streaming options carried by `start_stream`. The defaults
+// reproduce the pre-role behaviour: every eligible frame, full resolution.
+struct StreamOptions {
+  // Upper bound on the frames per second delivered for this camera; 0 means
+  // uncapped. Enforced latest-wins: when the cap next allows a send, the
+  // newest available frame is taken, so a capped stream never lags capture.
+  double max_fps = 0.0;
+  // Decimation factor (1, 2, 4 or 8) applied to the streamed YUV420 payload.
+  // Each output pixel is the box average of a factor x factor block, so 2 cuts
+  // the payload to a quarter. The frame header and any detection block are
+  // expressed in the decimated frame's pixel space.
+  uint32_t subsample = 1;
+};
+
 // Per-frame processing configuration.
 struct ProcessConfig {
   ProcessMode mode = ProcessMode::NONE;
@@ -368,6 +392,11 @@ constexpr const char* TYPE_ERROR = "error";
 constexpr const char* TYPE_TRIGGER_RESULT = "trigger_result";
 constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
 constexpr const char* TYPE_LENS_POSITION_LIMITS = "lens_position_limits";
+
+// `code` values carried by `error` responses that clients may want to branch
+// on. Every other error is a plain message with no code.
+constexpr const char* ERR_CODE_FORBIDDEN = "forbidden";
+constexpr const char* ERR_CODE_CAPTURE_TIMEOUT = "capture_timeout";
 }  // namespace Protocol
 
 // Hardware LensPosition range from libcamera's ControlInfoMap, in dioptres

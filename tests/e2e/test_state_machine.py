@@ -13,6 +13,7 @@ from typing import Callable
 import pytest
 
 from .client import CherupiClient, CommandError, Frame
+from .conftest import TEST_CONFIG
 
 
 # --- IDLE-state rejections --------------------------------------------------
@@ -29,7 +30,7 @@ def test_start_stream_requires_running(client: CherupiClient) -> None:
     cams = client.discover()
     if not cams:
         pytest.skip("No cameras")
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     with pytest.raises(CommandError):
         client.start_stream(cams[0]["id"])
 
@@ -40,7 +41,7 @@ def test_stop_cameras_requires_running(client: CherupiClient) -> None:
         client.stop_cameras()
 
     client.discover()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     with pytest.raises(CommandError):
         client.stop_cameras()
 
@@ -55,7 +56,7 @@ def test_reset_frame_counts_allowed_any_state(client: CherupiClient) -> None:
     cams = client.discover()
     if not cams:
         pytest.skip("No cameras")
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     # CONFIGURED
     client.reset_frame_counts()
     client.start_cameras()
@@ -91,7 +92,7 @@ def test_unknown_camera_id_returns_error(
     client: CherupiClient, discovered_cameras: list[dict]
 ) -> None:
     """start_stream with a bogus camera id must error (tested in RUNNING)."""
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         bad_id = max(c["id"] for c in discovered_cameras) + 999
@@ -115,7 +116,7 @@ def test_stop_stream_in_configured_rejected(client: CherupiClient) -> None:
     cams = client.discover()
     if not cams:
         pytest.skip("No cameras")
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     with pytest.raises(CommandError):
         client.stop_stream(cams[0]["id"])
 
@@ -124,7 +125,7 @@ def test_stop_stream_unknown_camera_returns_error(
     client: CherupiClient, discovered_cameras: list[dict]
 ) -> None:
     """stop_stream of a camera that wasn't streaming must error."""
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         cam_id = discovered_cameras[0]["id"]
@@ -149,7 +150,7 @@ def test_start_stream_idempotent_for_same_camera(
     second).
     """
     cam_id = discovered_cameras[0]["id"]
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         client.start_stream(cam_id)
@@ -205,7 +206,7 @@ def test_set_header_only_toggle_mid_stream(
     with no `CHNK` packets; toggling back must resume full data frames.
     """
     cam_id = discovered_cameras[0]["id"]
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         client.start_stream(cam_id)
@@ -237,7 +238,7 @@ def test_reset_frame_counts_mid_stream_does_not_disrupt(
 ) -> None:
     """reset_frame_counts mid-stream rolls frame_id back without a stall."""
     cam_id = discovered_cameras[0]["id"]
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         client.start_stream(cam_id)
@@ -268,7 +269,7 @@ def test_discover_allowed_during_running(
     client: CherupiClient, discovered_cameras: list[dict]
 ) -> None:
     """`discover` is documented as allowed in any state."""
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         cams = client.discover()
@@ -285,7 +286,7 @@ def test_many_configure_unconfigure_cycles(client: CherupiClient) -> None:
     client.discover()
     cycles = 5
     for i in range(cycles):
-        client.configure(width=1456, height=1088)
+        client.configure(**TEST_CONFIG)
         # Even cycles also visit RUNNING to exercise the full pipeline.
         if i % 2 == 0:
             client.start_cameras()

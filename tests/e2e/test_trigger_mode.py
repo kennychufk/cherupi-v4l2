@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from .client import CherupiClient, CommandError
+from .conftest import TEST_CONFIG
 
 
 def _yuv_files(path: Path) -> list[Path]:
@@ -31,7 +32,7 @@ def test_trigger_mode_saves_only_on_request(
     out.mkdir()
     cam_id = discovered_cameras[0]["id"]
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("trigger", output_dir=str(out))
     client.start_cameras()
     client.start_stream(cam_id)
@@ -76,7 +77,7 @@ def test_trigger_capture_arms_all_running_cameras(
     out = tmp_output_dir / "trigger_all"
     out.mkdir()
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("trigger", output_dir=str(out))
     client.start_cameras()
     time.sleep(0.5)
@@ -100,7 +101,7 @@ def test_trigger_capture_skip_frames(
     out.mkdir()
     cam_id = discovered_cameras[0]["id"]
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("trigger", output_dir=str(out))
     client.start_cameras()
     client.start_stream(cam_id)
@@ -127,7 +128,7 @@ def test_trigger_capture_rejected_outside_trigger_mode(
     out = tmp_output_dir / "trigger_wrong_mode"
     out.mkdir()
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("none", output_dir=str(out))
     client.start_cameras()
 
@@ -148,7 +149,7 @@ def test_trigger_capture_requires_running_state(
     out = tmp_output_dir / "trigger_not_running"
     out.mkdir()
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("trigger", output_dir=str(out))
 
     with pytest.raises(CommandError, match="RUNNING"):

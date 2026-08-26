@@ -14,6 +14,7 @@ import json
 import pytest
 
 from .client import CherupiClient, CommandError
+from .conftest import TEST_CONFIG
 
 
 # --- malformed messages -----------------------------------------------------
@@ -173,8 +174,7 @@ def test_configure_extra_unknown_fields_ignored(client: CherupiClient) -> None:
     """Unknown fields under `params` must be silently ignored, not rejected."""
     client.discover()
     client.configure(
-        width=1456,
-        height=1088,
+        **TEST_CONFIG,
         # extra fields the server doesn't know about
         future_param=True,
         nested={"a": 1, "b": [2, 3]},

@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from .client import CherupiClient, CommandError, FOURCC_YU12
+from .conftest import TEST_CONFIG
 
 
 def test_full_lifecycle(client: CherupiClient) -> None:
@@ -19,7 +20,7 @@ def test_full_lifecycle(client: CherupiClient) -> None:
 
     # libcamera may adjust the requested size to the nearest supported
     # mode, so don't pin exact width/height — check structural invariants.
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
 
     cam_id = cameras[0]["id"]
@@ -45,7 +46,7 @@ def test_multi_camera_roundrobin(client: CherupiClient) -> None:
     if len(cameras) < 2:
         pytest.skip(f"Test requires 2 cameras, got {len(cameras)}")
 
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     for cam in cameras:
         client.start_stream(cam["id"])
@@ -68,20 +69,20 @@ def test_reconfigure_requires_unconfigure(client: CherupiClient) -> None:
     disconnecting, the client must `unconfigure` first.
     """
     client.discover()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
 
     # Second configure in CONFIGURED state must error.
     with pytest.raises(CommandError):
-        client.configure(width=1456, height=1088)
+        client.configure(**TEST_CONFIG)
 
     # unconfigure returns to IDLE; configure now succeeds again.
     client.unconfigure()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
 
     # And in RUNNING it must also error.
     client.start_cameras()
     with pytest.raises(CommandError):
-        client.configure(width=1456, height=1088)
+        client.configure(**TEST_CONFIG)
     client.stop_cameras()
 
 
@@ -93,7 +94,7 @@ def test_unconfigure_requires_configured(client: CherupiClient) -> None:
 
     # RUNNING
     client.discover()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.start_cameras()
     try:
         with pytest.raises(CommandError):

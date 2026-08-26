@@ -290,3 +290,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.e2e-save/
+.e2e-server.log

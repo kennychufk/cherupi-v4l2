@@ -19,14 +19,22 @@ using json = nlohmann::json;
 WebSocketServer::WebSocketServer() {
   camera_manager = std::make_unique<CameraManager>();
   frame_processor = std::make_unique<FrameProcessor>();
-  stream_manager =
-      std::make_unique<StreamManager>(camera_manager.get(), frame_processor.get());
 
-  // Set up the callback for frame notifications
+  commander_.role = ClientRole::COMMANDER;
+  commander_.stream = std::make_unique<StreamManager>(
+      camera_manager.get(), frame_processor.get(), ClientRole::COMMANDER);
+  observer_.role = ClientRole::OBSERVER;
+  observer_.stream = std::make_unique<StreamManager>(
+      camera_manager.get(), frame_processor.get(), ClientRole::OBSERVER);
+  // Streaming priority: the observer's session only hands bytes to its socket
+  // while the commander's connection is clear (see stream_priority.hpp).
+  observer_.stream->setYieldTo(commander_.stream.get());
+
+  // Set up the callback for frame notifications: both sessions consume the
+  // same publication slots, each with its own cursor.
   camera_manager->setStreamManagerNotify([this]() {
-    if (stream_manager) {
-      stream_manager->notifyFrameAvailable();
-    }
+    if (commander_.stream) commander_.stream->notifyFrameAvailable();
+    if (observer_.stream) observer_.stream->notifyFrameAvailable();
   });
 }
 
@@ -35,13 +43,18 @@ WebSocketServer::~WebSocketServer() {
   stop();
 }
 
+std::shared_ptr<UwsFrameSink> WebSocketServer::sinkOf(ClientSession& s) {
+  std::lock_guard<std::mutex> lock(s.sink_mutex);
+  return s.sink;
+}
+
 void WebSocketServer::run() {
   LOG_INFO("WebSocketServer",
            "Starting WebSocket server on port " + std::to_string(PORT));
 
   app = new uWS::App();
 
-  app->ws<int>(
+  app->ws<UwsSocketData>(
          "/*",
          {// Settings
           .compression = uWS::DISABLED,
@@ -52,32 +65,50 @@ void WebSocketServer::run() {
           // Handlers
           .upgrade =
               [this](auto* res, auto* req, auto* context) {
-                // Block if we already have a client
-                if (has_client.load()) {
-                  LOG_WARN(
-                      "WebSocketServer",
-                      "Rejecting connection - server already has a client");
+                // The path decides the role; each role has exactly one slot.
+                const ClientRole role =
+                    command_parser::roleForPath(req->getUrl());
+                ClientSession& s = session(role);
+                if (s.connected.load()) {
+                  LOG_WARN("WebSocketServer",
+                           std::string("Rejecting connection - server already "
+                                       "has a ") +
+                               clientRoleName(role) + " client");
                   res->writeStatus("503 Service Unavailable");
                   res->writeHeader("Content-Type", "text/plain");
-                  res->end("Server already has an active connection");
+                  res->end(std::string("Server already has a ") +
+                           clientRoleName(role) + " client");
                   return;
                 }
 
-                // Accept the connection
-                res->template upgrade<int>(
-                    {}, req->getHeader("sec-websocket-key"),
+                // Accept the connection, tagging the socket with its role.
+                UwsSocketData data;
+                data.role = role;
+                res->template upgrade<UwsSocketData>(
+                    std::move(data), req->getHeader("sec-websocket-key"),
                     req->getHeader("sec-websocket-protocol"),
                     req->getHeader("sec-websocket-extensions"), context);
               },
 
           .open =
               [this](auto* ws) {
+                const ClientRole role = ws->getUserData()->role;
+                ClientSession& s = session(role);
                 LOG_INFO("WebSocketServer",
-                         "Client connected from " +
+                         std::string(clientRoleName(role)) +
+                             " connected from " +
                              std::string(ws->getRemoteAddressAsText()));
-                has_client = true;
-                active_sink = std::make_shared<UwsFrameSink>(ws);
-                stream_manager->setSink(active_sink.get());
+                s.connected = true;
+                auto sink = std::make_shared<UwsFrameSink>(ws);
+                {
+                  std::lock_guard<std::mutex> lock(s.sink_mutex);
+                  s.sink = sink;
+                }
+                s.stream->setSink(sink.get());
+                // Let the other client know its counterpart arrived.
+                pushStateTo(otherRole(role), role == ClientRole::COMMANDER
+                                                 ? "commander_connected"
+                                                 : "observer_connected");
               },
 
           .message =
@@ -95,9 +126,24 @@ void WebSocketServer::run() {
                   return;
                 }
                 const auto& cmd = std::get<command_parser::ParsedCommand>(parsed);
+                const std::string cmd_name =
+                    cmd.message.value("cmd", std::string());
+                const ClientRole role = ws->getUserData()->role;
                 LOG_DEBUG("WebSocketServer",
-                          "Received command: " +
-                              cmd.message.value("cmd", std::string()));
+                          std::string("Received command from ") +
+                              clientRoleName(role) + ": " + cmd_name);
+
+                // Role gate first: an observer is read-only, and a refused
+                // command must not even be evaluated against the state.
+                if (!command_parser::isCommandPermitted(cmd.kind, role)) {
+                  sendError(ws,
+                            "Command '" + cmd_name +
+                                "' is not permitted for an observer client "
+                                "(read-only); only the commander may issue it",
+                            Protocol::ERR_CODE_FORBIDDEN);
+                  return;
+                }
+
                 try {
                   switch (cmd.kind) {
                     case command_parser::CommandKind::Discover:
@@ -167,73 +213,61 @@ void WebSocketServer::run() {
 
           .drain =
               [this](auto* ws) {
-                // Handle backpressure with hysteresis to prevent oscillation
-                auto bufferedAmount = ws->getBufferedAmount();
+                // Handle backpressure with hysteresis to prevent oscillation.
+                // The state lives in the socket's user data: the commander
+                // and the observer are separate connections with separate
+                // congestion, so each gets its own.
+                UwsSocketData* data = ws->getUserData();
+                ClientSession& s = session(data->role);
+                const size_t bufferedAmount = ws->getBufferedAmount();
 
-                // Use different thresholds for entering and leaving
-                // backpressure This prevents rapid oscillation between states
+                // Different thresholds for entering and leaving backpressure
                 static constexpr size_t BACKPRESSURE_HIGH_WATER =
                     512 * 1024;  // 512KB
                 static constexpr size_t BACKPRESSURE_LOW_WATER =
                     128 * 1024;  // 128KB
 
-                // Track backpressure state per connection (using static for
-                // simplicity) In production, this should be stored per
-                // WebSocket connection
-                static bool wasInBackpressure = false;
-                bool hasPressure = false;
-
-                if (!wasInBackpressure) {
-                  // Not in backpressure - use high water mark to enter
-                  hasPressure = bufferedAmount > BACKPRESSURE_HIGH_WATER;
-                } else {
-                  // Already in backpressure - use low water mark to exit
-                  // (hysteresis)
-                  hasPressure = bufferedAmount > BACKPRESSURE_LOW_WATER;
-                }
+                const bool hasPressure =
+                    data->in_backpressure
+                        ? bufferedAmount > BACKPRESSURE_LOW_WATER
+                        : bufferedAmount > BACKPRESSURE_HIGH_WATER;
 
                 // Only log and notify on state changes
-                if (hasPressure != wasInBackpressure) {
-                  if (hasPressure) {
-                    LOG_DEBUG("WebSocketServer",
-                              "Entering backpressure state: " +
-                                  std::to_string(bufferedAmount) +
-                                  " bytes buffered (threshold: " +
-                                  std::to_string(BACKPRESSURE_HIGH_WATER) +
-                                  ")");
-                  } else {
-                    LOG_DEBUG("WebSocketServer",
-                              "Exiting backpressure state: " +
-                                  std::to_string(bufferedAmount) +
-                                  " bytes buffered (threshold: " +
-                                  std::to_string(BACKPRESSURE_LOW_WATER) + ")");
-                  }
-                  wasInBackpressure = hasPressure;
-
-                  // Notify stream manager of backpressure state change
-                  stream_manager->notifyBackpressure(hasPressure);
+                if (hasPressure != data->in_backpressure) {
+                  LOG_DEBUG("WebSocketServer",
+                            std::string(clientRoleName(data->role)) +
+                                (hasPressure ? ": entering" : ": exiting") +
+                                " backpressure state: " +
+                                std::to_string(bufferedAmount) +
+                                " bytes buffered (threshold: " +
+                                std::to_string(hasPressure
+                                                   ? BACKPRESSURE_HIGH_WATER
+                                                   : BACKPRESSURE_LOW_WATER) +
+                                ")");
+                  data->in_backpressure = hasPressure;
+                  s.stream->notifyBackpressure(hasPressure);
                 }
 
-                // Optional: Log periodic status if buffer is very high
+                // Periodic status if the buffer is very high
                 if (bufferedAmount > 1024 * 1024) {  // 1MB
-                  static auto lastHighBufferLog =
-                      std::chrono::steady_clock::now();
                   auto now = std::chrono::steady_clock::now();
-                  if (now - lastHighBufferLog > std::chrono::seconds(1)) {
+                  if (now - s.last_high_buffer_log > std::chrono::seconds(1)) {
                     LOG_WARN("WebSocketServer",
-                             "High buffer warning: " +
+                             std::string(clientRoleName(data->role)) +
+                                 ": high buffer warning: " +
                                  std::to_string(bufferedAmount / 1024) +
                                  " KB buffered");
-                    lastHighBufferLog = now;
+                    s.last_high_buffer_log = now;
                   }
                 }
               },
 
           .close =
-              [this](auto*, int code, std::string_view message) {
+              [this](auto* ws, int code, std::string_view message) {
+                const ClientRole role = ws->getUserData()->role;
                 LOG_INFO("WebSocketServer",
-                         "Client disconnected with code " +
-                             std::to_string(code) +
+                         std::string(clientRoleName(role)) +
+                             " disconnected with code " + std::to_string(code) +
                              (message.empty()
                                   ? ""
                                   : ", message: " + std::string(message)));
@@ -258,7 +292,10 @@ void WebSocketServer::run() {
                              "Unexpected close code: " + std::to_string(code));
                 }
 
-                cleanupConnection();
+                cleanupConnection(session(role));
+                pushStateTo(otherRole(role), role == ClientRole::COMMANDER
+                                                 ? "commander_disconnected"
+                                                 : "observer_disconnected");
               }})
       .listen(PORT, [this](auto* listen_socket) {
         if (listen_socket) {
@@ -281,8 +318,9 @@ void WebSocketServer::stop() {
   // Join the watchdog before anything it observes is torn down.
   stopCaptureWatchdog();
 
-  // Clean up any active connection
-  cleanupConnection();
+  // Clean up any active connections
+  cleanupConnection(commander_);
+  cleanupConnection(observer_);
 
   if (app) {
     app->close();
@@ -291,8 +329,7 @@ void WebSocketServer::stop() {
   }
 }
 
-void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws,
-                                     const json& params) {
+void WebSocketServer::handleDiscover(Socket* ws, const json& params) {
   std::string sensor = command_parser::buildSensorFilter(params);
   size_t count = camera_manager->discoverCameras(sensor);
 
@@ -312,21 +349,44 @@ void WebSocketServer::handleDiscover(uWS::WebSocket<false, true, int>* ws,
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
-void WebSocketServer::handleGetState(uWS::WebSocket<false, true, int>* ws) {
-  const char* state_str;
-  switch (system_state.load()) {
-    case CameraState::CONFIGURED: state_str = "configured"; break;
-    case CameraState::RUNNING:    state_str = "running";    break;
-    default:                      state_str = "idle";       break;
+const char* WebSocketServer::stateName(CameraState state) {
+  switch (state) {
+    case CameraState::CONFIGURED: return "configured";
+    case CameraState::RUNNING:    return "running";
+    default:                      return "idle";
   }
-  json response;
-  response["type"]  = Protocol::TYPE_STATE;
-  response["state"] = state_str;
-  ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
-void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
-                                      const json& params) {
+json WebSocketServer::stateMessage(ClientRole recipient, const char* cause) {
+  json m;
+  m["type"] = Protocol::TYPE_STATE;
+  m["state"] = stateName(system_state.load());
+  m["cause"] = cause;
+  m["role"] = clientRoleName(recipient);
+  m["commander_connected"] = commander_.connected.load();
+  m["observer_connected"] = observer_.connected.load();
+  return m;
+}
+
+void WebSocketServer::pushStateTo(ClientRole role, const char* cause) {
+  // Goes through the sink so it is safe from any thread and no-ops if that
+  // client is not connected (or is going away).
+  if (auto sink = sinkOf(session(role))) {
+    sink->sendText(stateMessage(role, cause).dump());
+  }
+}
+
+void WebSocketServer::broadcastState(const char* cause) {
+  pushStateTo(ClientRole::COMMANDER, cause);
+  pushStateTo(ClientRole::OBSERVER, cause);
+}
+
+void WebSocketServer::handleGetState(Socket* ws) {
+  ws->send(stateMessage(ws->getUserData()->role, "query").dump(),
+           uWS::OpCode::TEXT);
+}
+
+void WebSocketServer::handleConfigure(Socket* ws, const json& params) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::Configure, system_state)) {
     sendError(ws, "Cameras must be idle to configure");
@@ -343,13 +403,13 @@ void WebSocketServer::handleConfigure(uWS::WebSocket<false, true, int>* ws,
     system_state = CameraState::CONFIGURED;
     sendStatus(ws, "Configured: " + std::to_string(config.width) + "x" +
                        std::to_string(config.height) + " YUV420");
+    broadcastState("configure");
   } else {
     sendError(ws, "Failed to configure cameras");
   }
 }
 
-void WebSocketServer::handleUnconfigure(
-    uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleUnconfigure(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::Unconfigure, system_state)) {
     sendError(ws, "Unconfigure only allowed when CONFIGURED");
@@ -363,10 +423,10 @@ void WebSocketServer::handleUnconfigure(
   }
   system_state = CameraState::IDLE;
   sendStatus(ws, "Unconfigured: returned to IDLE");
+  broadcastState("unconfigure");
 }
 
-void WebSocketServer::handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
-                                           const json& msg) {
+void WebSocketServer::handleSetProcessMode(Socket* ws, const json& msg) {
   auto config = command_parser::buildProcessConfig(msg);
   if (!config) {
     std::string mode = msg.value("mode", std::string("(missing)"));
@@ -380,8 +440,7 @@ void WebSocketServer::handleSetProcessMode(uWS::WebSocket<false, true, int>* ws,
   sendStatus(ws, "Process mode configured: " + mode);
 }
 
-void WebSocketServer::handleTriggerCapture(uWS::WebSocket<false, true, int>* ws,
-                                           const json& msg) {
+void WebSocketServer::handleTriggerCapture(Socket* ws, const json& msg) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::TriggerCapture, system_state)) {
     sendError(ws, "trigger_capture requires RUNNING state");
@@ -430,8 +489,9 @@ void WebSocketServer::handleTriggerCapture(uWS::WebSocket<false, true, int>* ws,
   // The ack is produced on a capture thread, so it must not touch `ws`
   // directly. Capture the sink's shared_ptr here (on the loop thread) and let
   // it marshal the send back onto the loop — it also no-ops safely if the
-  // client disconnects while the trigger is pending.
-  std::shared_ptr<UwsFrameSink> sink = active_sink;
+  // client disconnects while the trigger is pending. Only a commander can get
+  // here (role gate), so this is the commander's sink.
+  std::shared_ptr<UwsFrameSink> sink = sinkOf(sessionFor(ws));
   auto trigger_id = frame_processor->armTrigger(
       camera_ids, skip_frames, [sink](TriggerResult result) {
         json response;
@@ -465,7 +525,7 @@ void WebSocketServer::handleTriggerCapture(uWS::WebSocket<false, true, int>* ws,
                std::to_string(camera_ids.size()) + " camera(s)");
 }
 
-void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleStartCameras(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::StartCameras, system_state)) {
     sendError(ws, "Cameras must be configured before starting");
@@ -499,46 +559,82 @@ void WebSocketServer::handleStartCameras(uWS::WebSocket<false, true, int>* ws) {
     system_state = CameraState::RUNNING;
     startCaptureWatchdog();
     sendStatus(ws, "All cameras started successfully");
+    broadcastState("start_cameras");
   } else {
     frame_processor->stop();
     sendError(ws, "Failed to start cameras");
   }
 }
 
-void WebSocketServer::handleStartStream(uWS::WebSocket<false, true, int>* ws,
-                                        const json& msg) {
+void WebSocketServer::handleStartStream(Socket* ws, const json& msg) {
+  const ClientRole role = ws->getUserData()->role;
   if (!command_parser::isCommandAllowed(
-          command_parser::CommandKind::StartStream, system_state)) {
+          command_parser::CommandKind::StartStream, system_state, role)) {
     sendError(ws, "Cameras must be running to start streaming");
     return;
   }
 
-  uint32_t camera_id = msg["camera_id"];
+  auto parsed = command_parser::buildStreamRequest(msg);
+  if (std::holds_alternative<std::string>(parsed)) {
+    sendError(ws, std::get<std::string>(parsed));
+    return;
+  }
+  const auto& request = std::get<command_parser::StreamRequest>(parsed);
 
-  if (stream_manager->startStreamingCamera(camera_id)) {
-    LOG_INFO("WebSocketServer",
-             "Started streaming camera " + std::to_string(camera_id));
-    sendStatus(ws, "Started streaming camera " + std::to_string(camera_id));
+  const size_t camera_count = camera_manager->getCameraCount();
+  if (request.camera_id >= camera_count) {
+    sendError(ws, "Unknown camera_id " + std::to_string(request.camera_id) +
+                      (camera_count == 0
+                           ? " (no cameras discovered yet; send discover first)"
+                           : " (discovered cameras: 0.." +
+                                 std::to_string(camera_count - 1) + ")"));
+    return;
+  }
+
+  ClientSession& s = sessionFor(ws);
+  if (s.stream->startStreamingCamera(request.camera_id, request.options)) {
+    std::ostringstream text;
+    text << "Started streaming camera " << request.camera_id;
+    if (request.options.subsample > 1) {
+      text << " (subsample " << request.options.subsample << ")";
+    }
+    if (request.options.max_fps > 0.0) {
+      text << " (max " << request.options.max_fps << " fps)";
+    }
+    if (role == ClientRole::OBSERVER &&
+        system_state.load() != CameraState::RUNNING) {
+      text << " - subscribed; frames will flow once the cameras are running";
+    }
+    LOG_INFO("WebSocketServer", std::string(clientRoleName(role)) + ": " +
+                                    text.str());
+    sendStatus(ws, text.str());
   } else {
-    sendError(ws,
-              "Failed to start streaming camera " + std::to_string(camera_id));
+    sendError(ws, "Failed to start streaming camera " +
+                      std::to_string(request.camera_id));
   }
 }
 
-void WebSocketServer::handleStopStream(uWS::WebSocket<false, true, int>* ws,
-                                       const json& msg) {
-  uint32_t camera_id = msg["camera_id"];
+void WebSocketServer::handleStopStream(Socket* ws, const json& msg) {
+  auto parsed = command_parser::buildStreamRequest(msg);
+  if (std::holds_alternative<std::string>(parsed)) {
+    sendError(ws, std::get<std::string>(parsed));
+    return;
+  }
+  const uint32_t camera_id =
+      std::get<command_parser::StreamRequest>(parsed).camera_id;
 
-  if (stream_manager->stopStreamingCamera(camera_id)) {
+  ClientSession& s = sessionFor(ws);
+  if (s.stream->stopStreamingCamera(camera_id)) {
     LOG_INFO("WebSocketServer",
-             "Stopped streaming camera " + std::to_string(camera_id));
+             std::string(clientRoleName(s.role)) +
+                 ": stopped streaming camera " + std::to_string(camera_id));
     sendStatus(ws, "Stopped streaming camera " + std::to_string(camera_id));
   } else {
     sendError(ws, "Camera " + std::to_string(camera_id) + " was not streaming");
   }
 }
 
-void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleStopCameras(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::StopCameras, system_state)) {
     sendError(ws, "Cameras are not running");
@@ -551,8 +647,10 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
   // stalled sensor and fire a spurious capture_timeout.
   stopCaptureWatchdog();
 
-  // Stop streaming first
-  stream_manager->stopAllStreaming();
+  // Stop the commander's streaming first. The observer's subscriptions are
+  // deliberately left alone: they are persistent, and its streamer simply
+  // finds no new frames until the next start_cameras.
+  commander_.stream->stopAllStreaming();
 
   // Stop all cameras
   camera_manager->stopAll();
@@ -587,10 +685,10 @@ void WebSocketServer::handleStopCameras(uWS::WebSocket<false, true, int>* ws) {
   }
 
   ws->send(status.dump(), uWS::OpCode::TEXT);
+  broadcastState("stop_cameras");
 }
 
-void WebSocketServer::handleResetFrameCounts(
-    uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleResetFrameCounts(Socket* ws) {
   LOG_INFO("WebSocketServer", "Resetting frame counts for all cameras");
 
   camera_manager->resetFrameCounts();
@@ -603,24 +701,24 @@ void WebSocketServer::handleResetFrameCounts(
   sendStatus(ws, "Frame counts reset for all cameras");
 }
 
-void WebSocketServer::handleSetHeaderOnly(uWS::WebSocket<false, true, int>* ws,
-                                          const json& msg) {
+void WebSocketServer::handleSetHeaderOnly(Socket* ws, const json& msg) {
   bool enabled = msg.value("enabled", false);
 
+  ClientSession& s = sessionFor(ws);
   LOG_INFO("WebSocketServer",
-           "Setting header only mode to " +
+           std::string(clientRoleName(s.role)) +
+               ": setting header only mode to " +
                std::string(enabled ? "enabled" : "disabled"));
 
-  // Set the header only mode in the stream manager
-  stream_manager->setHeaderOnlyMode(enabled);
+  // Per connection: each role's session has its own flag.
+  s.stream->setHeaderOnlyMode(enabled);
 
   // Send confirmation status
   sendStatus(
       ws, "Header only mode " + std::string(enabled ? "enabled" : "disabled"));
 }
 
-void WebSocketServer::handleSetLensPosition(
-    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+void WebSocketServer::handleSetLensPosition(Socket* ws, const json& msg) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::SetLensPosition, system_state)) {
     sendError(ws, "set_lens_position requires CONFIGURED or RUNNING state");
@@ -645,8 +743,7 @@ void WebSocketServer::handleSetLensPosition(
   }
 }
 
-void WebSocketServer::handleSetExposureTime(
-    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+void WebSocketServer::handleSetExposureTime(Socket* ws, const json& msg) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::SetExposureTime, system_state)) {
     sendError(ws, "set_exposure_time requires CONFIGURED or RUNNING state");
@@ -669,8 +766,7 @@ void WebSocketServer::handleSetExposureTime(
   }
 }
 
-void WebSocketServer::handleSetFrameDuration(
-    uWS::WebSocket<false, true, int>* ws, const json& msg) {
+void WebSocketServer::handleSetFrameDuration(Socket* ws, const json& msg) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::SetFrameDuration, system_state)) {
     sendError(ws, "set_frame_duration requires CONFIGURED or RUNNING state");
@@ -693,8 +789,7 @@ void WebSocketServer::handleSetFrameDuration(
   }
 }
 
-void WebSocketServer::handleGetFrameDurationLimits(
-    uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleGetFrameDurationLimits(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::GetFrameDurationLimits, system_state)) {
     sendError(ws, "get_frame_duration_limits requires CONFIGURED or RUNNING state");
@@ -717,8 +812,7 @@ void WebSocketServer::handleGetFrameDurationLimits(
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
-void WebSocketServer::handleGetLensPositionLimits(
-    uWS::WebSocket<false, true, int>* ws) {
+void WebSocketServer::handleGetLensPositionLimits(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::GetLensPositionLimits, system_state)) {
     sendError(ws, "get_lens_position_limits requires CONFIGURED or RUNNING state");
@@ -786,7 +880,7 @@ void WebSocketServer::reportCaptureStall(
   const size_t dropped = frame_processor->getFramesDroppedForBacklog();
   json response;
   response["type"] = Protocol::TYPE_ERROR;
-  response["code"] = "capture_timeout";
+  response["code"] = Protocol::ERR_CODE_CAPTURE_TIMEOUT;
   response["camera_id"] = stalled.camera_id;
   response["stalled_for_us"] = stalled.stalled_for_us;
   response["message"] = detail.str();
@@ -795,8 +889,11 @@ void WebSocketServer::reportCaptureStall(
   response["frames_dropped_backlog"] = dropped;
 
   // Any send from this thread must be marshalled onto the uWS loop; sendText
-  // does that and no-ops safely if the client has already gone away.
-  if (auto sink = active_sink) sink->sendText(response.dump());
+  // does that and no-ops safely if a client has already gone away. Both roles
+  // get it: the commander must recover, the observer should show the outage.
+  const std::string payload = response.dump();
+  if (auto sink = sinkOf(commander_)) sink->sendText(payload);
+  if (auto sink = sinkOf(observer_)) sink->sendText(payload);
 }
 
 std::string WebSocketServer::checkCaptureFeasibility() {
@@ -848,48 +945,50 @@ std::string WebSocketServer::checkCaptureFeasibility() {
   return {};
 }
 
-void WebSocketServer::sendStatus(uWS::WebSocket<false, true, int>* ws,
-                                 const std::string& message) {
+void WebSocketServer::sendStatus(Socket* ws, const std::string& message) {
   json response;
   response["type"] = Protocol::TYPE_STATUS;
   response["message"] = message;
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
-void WebSocketServer::sendError(uWS::WebSocket<false, true, int>* ws,
-                                const std::string& message) {
+void WebSocketServer::sendError(Socket* ws, const std::string& message,
+                                const char* code) {
   LOG_ERROR("WebSocketServer", "Sending error: " + message);
   json response;
   response["type"] = Protocol::TYPE_ERROR;
   response["message"] = message;
+  if (code) response["code"] = code;
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 
-void WebSocketServer::cleanupConnection() {
-  LOG_INFO("WebSocketServer", "Cleaning up connection");
+void WebSocketServer::cleanupConnection(ClientSession& s) {
+  LOG_INFO("WebSocketServer",
+           std::string("Cleaning up ") + clientRoleName(s.role) + " connection");
 
-  // Stop streaming but keep cameras running
-  stream_manager->clearSink();
+  // Stop this session's streaming (dropping its subscriptions) but keep the
+  // cameras running: the other client may still be watching, and processing
+  // must continue regardless.
+  s.stream->clearSink();
 
   // Disarm the sink so any lambdas already enqueued on the loop (from the
   // streaming thread, before clearSink joined it) skip ws_->send when they
   // run — uWS will free the underlying WebSocket once this close handler
   // returns. The shared_ptr keeps the sink itself alive so those lambdas can
   // still safely decrement the buffered counter.
-  if (active_sink) {
-    active_sink->invalidate();
+  {
+    std::lock_guard<std::mutex> lock(s.sink_mutex);
+    if (s.sink) s.sink->invalidate();
+    s.sink.reset();
   }
-  active_sink.reset();
 
   // Note: We do NOT stop cameras here to allow frame processing to continue
   // Cameras will only be stopped by explicit stop_cameras command
-
-  // Log current state
   if (system_state == CameraState::RUNNING) {
     LOG_INFO("WebSocketServer",
              "Cameras still running for potential frame processing");
   }
 
-  // Reset client flag
-  has_client = false;
+  // Release the slot
+  s.connected = false;
 }

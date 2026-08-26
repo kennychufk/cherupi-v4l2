@@ -13,10 +13,29 @@ from pathlib import Path
 import pytest
 
 from .client import CherupiClient
+from .conftest import TEST_CONFIG
 
 
 def _yuv_files(path: Path) -> list[Path]:
     return sorted(path.glob("cam*-*.yuv"))
+
+
+# start_cameras refuses a mode that provably cannot keep up (§4.6): `buffer`
+# when the backlog budget cannot hold two seconds of capture, `batch` when the
+# measured write rate of output_dir cannot absorb rate x frame size. At a fast
+# sensor mode on a 1 GB Pi writing to an SD card both refusals are legitimate,
+# so the tests that exercise those modes are not about the guard: they lock
+# the frame rate down first (10 fps fits any budget the server would derive),
+# and batch additionally starts with allow_overcommit so an SD card measured a
+# little under 20 MB/s cannot flip the outcome — the writer's own backlog
+# absorbs a few seconds either way and stop_cameras drains it.
+TAME_FRAME_DURATION_US = 100_000  # 10 fps
+BATCH_GUARD_PARAMS = {"allow_overcommit": True}
+
+
+def _lock_frame_rate(client: CherupiClient) -> None:
+    client.command({"cmd": "set_frame_duration",
+                    "frame_duration": TAME_FRAME_DURATION_US})
 
 
 def test_save_mode_buffer(
@@ -27,7 +46,8 @@ def test_save_mode_buffer(
     """BUFFER: frames accumulate in RAM, flushed on stop_cameras."""
     out = tmp_output_dir / "buffer"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
+    _lock_frame_rate(client)
     client.set_process_mode("buffer", output_dir=str(out))
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])
@@ -48,9 +68,11 @@ def test_save_mode_batch(
     """BATCH: multi-threaded writer flushes every batch_size frames."""
     out = tmp_output_dir / "batch"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
+    _lock_frame_rate(client)
     client.set_process_mode(
-        "batch", output_dir=str(out), batch_size=5, writer_threads=2
+        "batch", output_dir=str(out), batch_size=5, writer_threads=2,
+        **BATCH_GUARD_PARAMS,
     )
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])
@@ -83,7 +105,7 @@ def test_save_mode_checkerboard_finds_nothing(
     """
     out = tmp_output_dir / "checkerboard"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode(
         "checkerboard",
         output_dir=str(out),
@@ -110,7 +132,7 @@ def test_save_mode_checkerboard2x2_finds_nothing(
     """
     out = tmp_output_dir / "checkerboard2x2"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode(
         "checkerboard2x2",
         output_dir=str(out),
@@ -139,7 +161,7 @@ def test_save_mode_aruco_finds_nothing(
     """
     out = tmp_output_dir / "aruco"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode(
         "aruco",
         output_dir=str(out),
@@ -165,7 +187,7 @@ def test_save_mode_aruco2x2_finds_nothing(
     """
     out = tmp_output_dir / "aruco2x2"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode(
         "aruco2x2",
         output_dir=str(out),
@@ -193,7 +215,7 @@ def test_save_mode_none(
     """
     out = tmp_output_dir / "none"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("none", output_dir=str(out))
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])
@@ -222,13 +244,15 @@ def test_set_process_mode_accepted_in_any_state(
     """set_process_mode is allowed in any state (IDLE, CONFIGURED, RUNNING)."""
     out = tmp_output_dir / f"anystate_{mode}"
     out.mkdir()
-    client.set_process_mode(mode, output_dir=str(out))  # IDLE
+    params = {"output_dir": str(out), **BATCH_GUARD_PARAMS}
+    client.set_process_mode(mode, **params)  # IDLE
     client.discover()
-    client.configure(width=1456, height=1088)
-    client.set_process_mode(mode, output_dir=str(out))  # CONFIGURED
+    client.configure(**TEST_CONFIG)
+    _lock_frame_rate(client)  # so `buffer` / `batch` pass the start guard
+    client.set_process_mode(mode, **params)  # CONFIGURED
     client.start_cameras()
     try:
-        client.set_process_mode(mode, output_dir=str(out))  # RUNNING
+        client.set_process_mode(mode, **params)  # RUNNING
     finally:
         client.stop_cameras()
 
@@ -246,7 +270,7 @@ def test_process_mode_save_frames_false_writes_nothing(
     tests for the streamed-corners guarantee)."""
     out = tmp_output_dir / "aruco_nosave"
     out.mkdir()
-    client.configure(width=1456, height=1088)
+    client.configure(**TEST_CONFIG)
     client.set_process_mode("aruco", output_dir=str(out), save_frames=False)
     client.start_cameras()
     client.start_stream(discovered_cameras[0]["id"])

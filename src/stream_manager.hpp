@@ -3,20 +3,26 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <set>
+#include <optional>
 #include <thread>
+#include <vector>
 
 #include "camera_manager.hpp"
 #include "frame_processor.hpp"
 #include "frame_sink.hpp"
 #include "rate_controller.hpp"
+#include "stream_priority.hpp"
 #include "types.hpp"
 
 // Chunked transfer state for a single frame
 struct ChunkedTransfer {
-  FrameData frame;
+  // Shared read-only with the camera's / detector's publication slot and,
+  // possibly, the other role's streamer — never copied. A subsampled stream
+  // points at its own decimated frame instead.
+  std::shared_ptr<const FrameData> frame;
   // Detection corners for this frame (empty in non-detector modes, or when
   // detection ran but found nothing). Travels with the frame instead of being
   // looked up: in detector modes the streamer only ever sends frames the
@@ -26,13 +32,19 @@ struct ChunkedTransfer {
   // DetectionKind cast to uint8_t (NONE/CHECKERBOARD/ARUCO). Determines whether
   // each record is a CornerSetHeader or a MarkerSetHeader.
   uint8_t detection_kind = static_cast<uint8_t>(DetectionKind::NONE);
-  uint32_t frame_uuid;
-  size_t total_chunks;
-  size_t current_chunk;
+  uint32_t frame_uuid = 0;
+  size_t total_chunks = 0;
+  size_t current_chunk = 0;
   std::chrono::steady_clock::time_point start_time;
-  bool in_progress;
+  bool in_progress = false;
 };
 
+// One client connection's streaming session: the cameras it subscribed to
+// (with per-camera options), its header-only flag, its rate control, and the
+// thread that pulls frames and chunks them into its FrameSink. The server owns
+// one per client role — they outlive individual connections, which merely
+// attach and detach a sink — and tells the observer's session to yield to the
+// commander's (setYieldTo).
 class StreamManager {
  public:
   static constexpr size_t CHUNK_SIZE = 32768;  // Fixed 32KB chunks
@@ -46,34 +58,56 @@ class StreamManager {
   // 512 KB ≈ ~5 ms drain at 1 Gbps wired LAN, which keeps text replies
   // responsive without choking binary throughput.
   static constexpr size_t SOFT_BUFFER_LIMIT = 512 * 1024;
+  // Longest an in-flight lower-priority frame keeps waiting for the
+  // higher-priority connection to clear before being abandoned. Matches
+  // CHUNK_TIMEOUT and the clients' incomplete-frame garbage collection (5 s).
+  static constexpr auto PRIORITY_WAIT_LIMIT = std::chrono::seconds(5);
 
-  StreamManager(CameraManager* mgr, FrameProcessor* saver);
+  StreamManager(CameraManager* mgr, FrameProcessor* saver,
+                ClientRole role = ClientRole::COMMANDER);
   ~StreamManager();
 
-  // Connect/disconnect a FrameSink (owned by the caller).
+  ClientRole getRole() const { return role_; }
+
+  // Make this session yield to `higher` (see stream_priority.hpp): frames and
+  // chunks are handed to the sink only while `higher` is clear. nullptr (the
+  // default) never yields. `higher` must outlive this object.
+  void setYieldTo(const StreamManager* higher) { yield_to_ = higher; }
+
+  // Connect/disconnect a FrameSink (owned by the caller). clearSink also
+  // drops every subscription: a subscription belongs to a connection.
   void setSink(FrameSink* sink);
   void clearSink();
 
-  // Stream control
-  bool startStreamingCamera(uint32_t camera_id);
+  // Subscribe `camera_id` (must be a discovered camera) with `options`;
+  // re-issuing for an already-subscribed camera updates its options. Whether
+  // frames actually flow depends on the cameras running — a subscription
+  // made while they are stopped simply waits.
+  bool startStreamingCamera(uint32_t camera_id, StreamOptions options = {});
   bool stopStreamingCamera(uint32_t camera_id);
   void stopAllStreaming();
 
   // Header only mode control
   void setHeaderOnlyMode(bool enabled) {
     LOG_INFO("StreamManager",
-             "Setting header only mode to " +
+             std::string(clientRoleName(role_)) + ": setting header only mode to " +
                  std::string(enabled ? "enabled" : "disabled"));
     header_only_mode = enabled;
   }
   bool isHeaderOnlyMode() const { return header_only_mode; }
 
   // Query methods
-  bool isStreamingCamera(uint32_t camera_id);
-  size_t getStreamingCameraCount();
+  bool isStreamingCamera(uint32_t camera_id) const;
+  size_t getStreamingCameraCount() const;
+  std::optional<StreamOptions> getStreamOptions(uint32_t camera_id) const;
 
   // Backpressure notification from the sink owner.
   void notifyBackpressure(bool has_pressure);
+
+  // What a lower-priority session sees of this one, and the verdict it draws
+  // from it (stream_priority::isClear against SOFT_BUFFER_LIMIT).
+  stream_priority::Snapshot prioritySnapshot() const;
+  bool isClearForLowerPriority() const;
 
   // Statistics
   void logStats() const;
@@ -93,12 +127,26 @@ class StreamManager {
  private:
   static constexpr auto CHUNK_TIMEOUT = std::chrono::seconds(5);
 
+  // Per-subscribed-camera state.
+  struct CameraStream {
+    StreamOptions options;
+    // Cursors into the two frame sources (Camera::getFrameForStreaming and
+    // FrameProcessor::getDetectedFrameForStreaming). Per session, so the two
+    // roles consume the shared slots independently.
+    uint64_t camera_cursor = 0;
+    uint64_t detected_cursor = 0;
+    // When this camera's last frame went out, for max_fps pacing.
+    std::chrono::steady_clock::time_point last_sent{};
+  };
+
   CameraManager* camera_manager;
   FrameProcessor* frame_processor;
+  const ClientRole role_;
+  const StreamManager* yield_to_ = nullptr;
 
   // Streaming state
-  std::set<uint32_t> streaming_cameras;
-  std::mutex streaming_mutex;
+  std::map<uint32_t, CameraStream> streaming_cameras;
+  mutable std::mutex streaming_mutex;
 
   std::atomic<bool> header_only_mode{false};
 
@@ -110,9 +158,11 @@ class StreamManager {
   std::mutex frame_wait_mutex;
 
   // Sink (abstract transport)
-  std::mutex sink_mutex;
+  mutable std::mutex sink_mutex;
   FrameSink* sink = nullptr;
   std::atomic<bool> has_backpressure{false};
+  // steady_clock microseconds of the last entry into backpressure; 0 = never.
+  std::atomic<int64_t> last_backpressure_us{0};
   std::atomic<bool> send_in_progress{false};
 
   std::unique_ptr<ChunkedTransfer> current_transfer;
@@ -127,17 +177,26 @@ class StreamManager {
     std::atomic<uint64_t> bytes_sent{0};
     std::atomic<uint64_t> backpressure_pauses{0};
     std::atomic<uint64_t> header_only_frames{0};
+    // Frames abandoned mid-transfer because the higher-priority connection
+    // stayed congested past PRIORITY_WAIT_LIMIT.
+    std::atomic<uint64_t> priority_abandoned{0};
   } stats;
 
+  std::string tag() const;  // log prefix carrying the role
   void streamingLoop();
   // Block the streaming thread until sink->bufferedAmount() drops below
   // SOFT_BUFFER_LIMIT, or `should_stop` fires, or we've waited too long.
   // Returns true if the caller should proceed, false if it should bail.
   bool waitForBufferDrain();
-  bool sendChunkedFrame(const FrameData& frame, uint32_t camera_id,
+  // Lower-priority sessions only: block until the higher-priority connection
+  // is clear. Returns false if `should_stop` fired or `deadline` passed.
+  bool waitForPriorityClear(std::chrono::steady_clock::time_point deadline);
+  bool sendChunkedFrame(std::shared_ptr<const FrameData> frame,
+                        uint32_t camera_id,
                         std::vector<CornerSet> corner_sets,
                         uint8_t detection_kind);
-  bool sendHeaderOnlyFrame(const FrameData& frame, uint32_t camera_id,
+  bool sendHeaderOnlyFrame(std::shared_ptr<const FrameData> frame,
+                           uint32_t camera_id,
                            std::vector<CornerSet> corner_sets,
                            uint8_t detection_kind);
   bool sendChunkHeader(const ChunkedTransfer& transfer, bool header_only);
