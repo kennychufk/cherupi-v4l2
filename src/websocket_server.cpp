@@ -199,6 +199,9 @@ void WebSocketServer::run() {
                     case command_parser::CommandKind::GetLensPositionLimits:
                       handleGetLensPositionLimits(ws);
                       break;
+                    case command_parser::CommandKind::GetFocusFomRegion:
+                      handleGetFocusFomRegion(ws);
+                      break;
                   }
                 } catch (json::exception& e) {
                   LOG_ERROR("WebSocketServer",
@@ -401,8 +404,15 @@ void WebSocketServer::handleConfigure(Socket* ws, const json& params) {
 
   if (camera_manager->configureAll(config)) {
     system_state = CameraState::CONFIGURED;
-    sendStatus(ws, "Configured: " + std::to_string(config.width) + "x" +
-                       std::to_string(config.height) + " YUV420");
+    // The FocusFoM region rides on the configure reply because it is fixed
+    // by the configured sensor mode; observers (and later reconnects) read
+    // it with get_focus_fom_region.
+    json response;
+    response["type"] = Protocol::TYPE_STATUS;
+    response["message"] = "Configured: " + std::to_string(config.width) + "x" +
+                          std::to_string(config.height) + " YUV420";
+    response["focus_fom_region"] = focusFomRegionJson();
+    ws->send(response.dump(), uWS::OpCode::TEXT);
     broadcastState("configure");
   } else {
     sendError(ws, "Failed to configure cameras");
@@ -830,6 +840,41 @@ void WebSocketServer::handleGetLensPositionLimits(Socket* ws) {
   response["max"] = limits.max;
   response["default"] = limits.def;
   response["num_cameras"] = num_cameras;
+  ws->send(response.dump(), uWS::OpCode::TEXT);
+}
+
+json WebSocketServer::focusFomRegionJson() const {
+  const auto region = camera_manager->getFocusFomRegion();
+  if (!region) return nullptr;
+  json j;
+  j["x"] = region->frame.x;
+  j["y"] = region->frame.y;
+  j["width"] = region->frame.width;
+  j["height"] = region->frame.height;
+  j["frame_width"] = region->frame_width;
+  j["frame_height"] = region->frame_height;
+  j["grid"] = {{"size", region->grid_size},
+               {"first_col", region->first_col},
+               {"first_row", region->first_row},
+               {"num_cols", region->num_cols},
+               {"num_rows", region->num_rows}};
+  return j;
+}
+
+void WebSocketServer::handleGetFocusFomRegion(Socket* ws) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::GetFocusFomRegion, system_state)) {
+    sendError(ws, "get_focus_fom_region requires CONFIGURED or RUNNING state");
+    return;
+  }
+  json body = focusFomRegionJson();
+  if (body.is_null()) {
+    sendError(ws, "No cameras configured");
+    return;
+  }
+  json response;
+  response["type"] = Protocol::TYPE_FOCUS_FOM_REGION;
+  response.update(body);
   ws->send(response.dump(), uWS::OpCode::TEXT);
 }
 

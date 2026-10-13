@@ -11,6 +11,7 @@
 
 #include <libcamera/libcamera.h>
 
+#include "focus_region.hpp"
 #include "types.hpp"
 
 class Camera {
@@ -51,6 +52,9 @@ class Camera {
   // FrameDurationLimits, NaN (not 0) is the sentinel because 0 dioptres
   // (infinity) is a valid limit.
   LensPositionLimits getLensPositionLimitsHw() const;
+  // The fixed block of the output frame the IPA averages into the per-frame
+  // FocusFoM metadata (see focus_region.hpp). Meaningful once configured.
+  focus_region::Region getFocusFomRegion() const;
   bool start();
   bool stop();
   // Release all libcamera resources acquired by configure() and transition
@@ -136,6 +140,10 @@ class Camera {
   std::vector<std::vector<MmapRegion>> mmap_regions;
 
   CameraConfig config;
+  // Raw sensor mode the pipeline was pinned to by configure(). Usually equal
+  // to `config` (configure only accepts native mode sizes); kept separately
+  // because the focus statistics are gathered in this space.
+  CameraConfig sensor_mode_;
   std::atomic<CameraState> state{CameraState::IDLE};
   // Tracks whether lcam->acquire() has been called without a matching
   // release(). stop() releases and clears this; unconfigure() must not

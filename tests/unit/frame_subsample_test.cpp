@@ -28,6 +28,7 @@ FrameData makeGradientFrame(uint32_t width, uint32_t height, uint32_t stride) {
   f.frame_duration_us = 33333;
   f.lens_position = 2.5f;
   f.af_state = 2;
+  f.focus_fom = 5678;
 
   const size_t y_size = static_cast<size_t>(stride) * height;
   const size_t uv_size = static_cast<size_t>(stride / 2) * (height / 2);
@@ -107,6 +108,7 @@ TEST(FrameSubsampleTest, FactorTwoBoxAveragesEachPlane) {
   EXPECT_EQ(out.frame_duration_us, 33333u);
   EXPECT_FLOAT_EQ(out.lens_position, 2.5f);
   EXPECT_EQ(out.af_state, 2);
+  EXPECT_EQ(out.focus_fom, 5678);
 }
 
 TEST(FrameSubsampleTest, FactorFourAveragesUniformFrameToItself) {

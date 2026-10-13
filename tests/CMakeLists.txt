@@ -12,6 +12,7 @@ set(UNIT_SOURCES
     unit/stream_priority_test.cpp
     unit/frame_subsample_test.cpp
     unit/sensor_mode_test.cpp
+    unit/focus_region_test.cpp
     unit/checkerboard_detector_test.cpp
     unit/aruco_detector_test.cpp
 )
@@ -28,6 +29,7 @@ add_executable(unit_tests
     ../src/stream_manager.cpp
     ../src/frame_subsample.cpp
     ../src/sensor_mode.cpp
+    ../src/focus_region.cpp
     ../src/rate_controller.cpp
     ../src/frame_processor.cpp
     ../src/frame_processor_helpers.cpp
@@ -69,6 +71,7 @@ add_executable(hw_tests
     hw/camera_frame_capture_test.cpp
     ../src/camera.cpp
     ../src/sensor_mode.cpp
+    ../src/focus_region.cpp
     ../src/camera_manager.cpp
 )
 

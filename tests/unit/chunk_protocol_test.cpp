@@ -14,9 +14,10 @@ TEST(ChunkProtocolTest, StructSizesMatchWireFormat) {
   // corner_block_size uint32 + num_corner_sets uint16 + reserved uint16); to
   // 68 at v5 (added lens_position float + af_state uint8 + reserved2 uint8[3]).
   // v6 keeps ChunkHeader at 68 (one reserved2 byte became detection_kind) and
-  // adds MarkerSetHeader (8 bytes) for the aruco detection block.
+  // adds MarkerSetHeader (8 bytes) for the aruco detection block. v7 grew it
+  // to 72 (added focus_fom int32).
   EXPECT_EQ(sizeof(ChunkStartMarker), 8u);
-  EXPECT_EQ(sizeof(ChunkHeader), 68u);
+  EXPECT_EQ(sizeof(ChunkHeader), 72u);
   EXPECT_EQ(sizeof(ChunkData), 16u);
   EXPECT_EQ(sizeof(CornerSetHeader), 4u);
   EXPECT_EQ(sizeof(MarkerSetHeader), 8u);
@@ -24,9 +25,9 @@ TEST(ChunkProtocolTest, StructSizesMatchWireFormat) {
 
 TEST(ChunkProtocolTest, StartMarkerByteLayout) {
   ChunkStartMarker marker{};
-  // 'CHUN' little-endian = 4E 55 48 43, version 6 = 06 00 00 00
+  // 'CHUN' little-endian = 4E 55 48 43, version 7 = 07 00 00 00
   const uint8_t expected[8] = {0x4E, 0x55, 0x48, 0x43,
-                               0x06, 0x00, 0x00, 0x00};
+                               0x07, 0x00, 0x00, 0x00};
   EXPECT_EQ(0, std::memcmp(&marker, expected, sizeof(expected)));
 }
 
@@ -88,6 +89,8 @@ TEST(ChunkProtocolTest, ChunkHeaderFieldOffsetsAreStable) {
   // remaining reserved padding shifted to offset 66.
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.detection_kind) - base, 65);
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.reserved2) - base, 66);
+  // v7 addition
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.focus_fom) - base, 68);
 }
 
 TEST(ChunkProtocolTest, CornerSetHeaderFieldOffsetsAreStable) {

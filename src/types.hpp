@@ -73,7 +73,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 6;
+  uint32_t version = 7;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -128,6 +128,13 @@ struct ChunkHeader {
   // 68 bytes.
   uint8_t detection_kind;
   uint8_t reserved2[2];
+  // v7 addition: libcamera `FocusFoM` metadata for this frame — the Raspberry
+  // Pi IPA's contrast figure of merit, averaged over a fixed central block of
+  // its focus-statistics grid (see focus_region.hpp; the block is reported by
+  // `configure` and `get_focus_fom_region`). Larger is sharper; only
+  // comparable between frames of the same camera and scene. -1 when libcamera
+  // reported no FocusFoM for the frame.
+  int32_t focus_fom;
 } __attribute__((packed));
 
 // Classifies the detection block appended to a ChunkHeader (its `detection_kind`
@@ -190,6 +197,7 @@ struct FrameData {
   // NaN / 0xFF mean "not reported for this frame".
   float lens_position = std::numeric_limits<float>::quiet_NaN();  // dioptres
   uint8_t af_state = 0xFF;  // libcamera AfState enum, 0xFF = unavailable
+  int32_t focus_fom = -1;   // libcamera FocusFoM (ChunkHeader v7), -1 = unavailable
 
   // Rule of zero, deliberately. This used to hand-roll a copy constructor and
   // copy assignment that were byte-for-byte what the compiler generates — but
@@ -382,6 +390,7 @@ constexpr const char* CMD_SET_EXPOSURE_TIME = "set_exposure_time";
 constexpr const char* CMD_SET_FRAME_DURATION = "set_frame_duration";
 constexpr const char* CMD_GET_FRAME_DURATION_LIMITS = "get_frame_duration_limits";
 constexpr const char* CMD_GET_LENS_POSITION_LIMITS = "get_lens_position_limits";
+constexpr const char* CMD_GET_FOCUS_FOM_REGION = "get_focus_fom_region";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
@@ -392,6 +401,7 @@ constexpr const char* TYPE_ERROR = "error";
 constexpr const char* TYPE_TRIGGER_RESULT = "trigger_result";
 constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
 constexpr const char* TYPE_LENS_POSITION_LIMITS = "lens_position_limits";
+constexpr const char* TYPE_FOCUS_FOM_REGION = "focus_fom_region";
 
 // `code` values carried by `error` responses that clients may want to branch
 // on. Every other error is a plain message with no code.

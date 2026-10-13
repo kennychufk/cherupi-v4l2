@@ -127,6 +127,12 @@ bool Camera::configure(size_t buffer_count) {
     config.width = stream_cfg.size.width;
     config.height = stream_cfg.size.height;
   }
+  if (cam_config->size() > 1) {
+    sensor_mode_.width = cam_config->at(1).size.width;
+    sensor_mode_.height = cam_config->at(1).size.height;
+  } else {
+    sensor_mode_ = config;
+  }
 
   if (lcam->configure(cam_config.get()) < 0) {
     LOG_ERROR("Camera",
@@ -381,6 +387,11 @@ bool Camera::unconfigure() {
   return true;
 }
 
+focus_region::Region Camera::getFocusFomRegion() const {
+  return focus_region::fomRegion(sensor_mode_.width, sensor_mode_.height,
+                                 config.width, config.height);
+}
+
 void Camera::releaseConfiguredResources() {
   for (auto& regions : mmap_regions) {
     for (auto& r : regions) {
@@ -444,6 +455,12 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     auto afs_meta = request->metadata().get(libcamera::controls::AfState);
     if (afs_meta) af_state = static_cast<uint8_t>(*afs_meta);
 
+    // Contrast figure of merit the RPi IPA computes from the frontend's focus
+    // statistics, averaged over a fixed central block (focus_region.hpp).
+    int32_t focus_fom = -1;
+    auto fom_meta = request->metadata().get(libcamera::controls::FocusFoM);
+    if (fom_meta) focus_fom = *fom_meta;
+
     // Feed the capture watchdog: wall-clock arrival time plus an EMA of the
     // interval between arrivals. Done before the (potentially slow) frame copy
     // and callback below so a slow consumer doesn't look like a dead sensor.
@@ -499,6 +516,7 @@ void Camera::onRequestComplete(libcamera::Request* request) {
     frame.frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
     frame.lens_position = lens_position;
     frame.af_state = af_state;
+    frame.focus_fom = focus_fom;
 
     size_t total = 0;
     for (const auto& plane : buf->planes()) total += plane.length;

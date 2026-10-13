@@ -360,6 +360,20 @@ TEST(CommandParserTest, StateGateGetLensPositionLimitsRequiresConfiguredOrRunnin
   EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING));
 }
 
+TEST(CommandParserTest, ValidGetFocusFomRegion) {
+  auto r = command_parser::parseCommand(R"({"cmd":"get_focus_fom_region"})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::GetFocusFomRegion);
+}
+
+TEST(CommandParserTest, StateGateGetFocusFomRegionRequiresConfiguredOrRunning) {
+  // The region depends on the configured sensor mode, so IDLE has none.
+  auto kind = CommandKind::GetFocusFomRegion;
+  EXPECT_FALSE(command_parser::isCommandAllowed(kind, CameraState::IDLE));
+  EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::CONFIGURED));
+  EXPECT_TRUE(command_parser::isCommandAllowed(kind, CameraState::RUNNING));
+}
+
 // --- Client roles ------------------------------------------------------------
 
 TEST(CommandParserTest, RoleForPathSelectsObserverOnlyForObserverPath) {
@@ -387,7 +401,7 @@ TEST(CommandParserTest, CommanderMayIssueEveryCommand) {
         CommandKind::SetHeaderOnly, CommandKind::SetLensPosition,
         CommandKind::SetExposureTime, CommandKind::SetFrameDuration,
         CommandKind::GetFrameDurationLimits,
-        CommandKind::GetLensPositionLimits}) {
+        CommandKind::GetLensPositionLimits, CommandKind::GetFocusFomRegion}) {
     EXPECT_TRUE(command_parser::isCommandPermitted(kind, ClientRole::COMMANDER))
         << static_cast<int>(kind);
   }
@@ -398,7 +412,7 @@ TEST(CommandParserTest, ObserverIsLimitedToReadOnlyCommands) {
        {CommandKind::Discover, CommandKind::GetState, CommandKind::StartStream,
         CommandKind::StopStream, CommandKind::SetHeaderOnly,
         CommandKind::GetFrameDurationLimits,
-        CommandKind::GetLensPositionLimits}) {
+        CommandKind::GetLensPositionLimits, CommandKind::GetFocusFomRegion}) {
     EXPECT_TRUE(command_parser::isCommandPermitted(kind, ClientRole::OBSERVER))
         << static_cast<int>(kind);
   }

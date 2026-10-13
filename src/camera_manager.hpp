@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,10 @@ class CameraManager {
   // first camera (all cameras run the same sensor). Fields are NaN if there
   // are no cameras, they aren't acquired, or the control isn't advertised.
   LensPositionLimits getLensPositionLimitsHw() const;
+  // The block of the output frame averaged into FocusFoM, from the first
+  // camera (all cameras share one CameraConfig). nullopt if there are no
+  // cameras.
+  std::optional<focus_region::Region> getFocusFomRegion() const;
 
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;

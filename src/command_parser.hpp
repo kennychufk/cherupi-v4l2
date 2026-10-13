@@ -31,6 +31,7 @@ enum class CommandKind {
   SetFrameDuration,
   GetFrameDurationLimits,
   GetLensPositionLimits,
+  GetFocusFomRegion,
 };
 
 struct ParsedCommand {
@@ -58,7 +59,8 @@ ClientRole roleForPath(std::string_view path);
 // Role gate: may a client holding `role` issue `kind` at all? A commander may
 // issue anything. An observer is limited to the read-only set — `discover`,
 // `get_state`, `start_stream`, `stop_stream`, `set_header_only`,
-// `get_frame_duration_limits`, `get_lens_position_limits` — and everything
+// `get_frame_duration_limits`, `get_lens_position_limits`,
+// `get_focus_fom_region` — and everything
 // else is refused with an error carrying `code: "forbidden"`.
 bool isCommandPermitted(CommandKind kind, ClientRole role);
 

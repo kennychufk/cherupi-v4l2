@@ -31,7 +31,7 @@ Permitted commands per role:
 
 | Command | commander | observer |
 |---|---|---|
-| `discover`, `get_state`, `get_frame_duration_limits`, `get_lens_position_limits` | ✓ | ✓ |
+| `discover`, `get_state`, `get_frame_duration_limits`, `get_lens_position_limits`, `get_focus_fom_region` | ✓ | ✓ |
 | `start_stream`, `stop_stream`, `set_header_only` | ✓ | ✓ (own stream only; see §4.7) |
 | `configure`, `unconfigure`, `start_cameras`, `stop_cameras`, `set_process_mode`, `trigger_capture`, `reset_frame_counts`, `set_lens_position`, `set_exposure_time`, `set_frame_duration` | ✓ | ✗ → `error` with `code: "forbidden"` (§7) |
 
@@ -154,10 +154,16 @@ All fields under `params` are optional; omitted fields keep server defaults (see
 
 **`width` × `height` must be one of the sensor's native modes** (as listed by `rpicam-hello --list-cameras`). The server pins libcamera to that mode, taking the mode's own raw bit depth from what the sensor advertises — it differs per mode on some sensors (IMX477: `1332x990` is 10-bit, `2028x1080` / `2028x1520` / `4056x3040` are 12-bit). Any other size fails with `error` `"Failed to configure cameras"`, and the server log lists the available modes.
 
-**Response (success)** → `status`:
+**Response (success)** → `status`, carrying the FocusFoM region for the configured mode (§4.18):
 ```json
-{"type": "status", "message": "Configured: 2328x1748 YUV420"}
+{"type": "status", "message": "Configured: 2328x1748 YUV420",
+ "focus_fom_region": {"x": 580, "y": 436, "width": 1160, "height": 872,
+                      "frame_width": 2328, "frame_height": 1748,
+                      "grid": {"size": 8, "first_col": 2, "first_row": 2,
+                               "num_cols": 4, "num_rows": 4}}}
 ```
+`focus_fom_region` has the same fields as the `get_focus_fom_region` reply (§4.18) minus `type`; it is `null` only if no camera was configured.
+
 **Response (failure)** → `error`.
 
 On success the server transitions to **CONFIGURED**.
@@ -378,7 +384,7 @@ The setting is **global** — every discovered camera receives the same value.
 
 In **CONFIGURED** the value is stashed and applied at the next `start_cameras` (via libcamera's initial `ControlList`). In **RUNNING** it is attached to the next requeued capture request and takes effect within ~1 frame. The setting persists across `stop_cameras` / `start_cameras` cycles within the same session.
 
-This command only *requests* a focus state. To read back the focus the IPA actually applied to each delivered frame — including the per-frame position chosen by continuous/auto AF — use the `lens_position` and `af_state` fields in the binary frame header (§5.3).
+This command only *requests* a focus state. To read back the focus the IPA actually applied to each delivered frame — including the per-frame position chosen by continuous/auto AF — use the `lens_position` and `af_state` fields in the binary frame header (§5.3). Its `focus_fom` field reports how sharp each frame came out (§4.18).
 
 **libcamera prerequisite:** the deployed libcamera tuning JSON for the attached sensor must include the `rpi.af` algorithm block (the apt-installed Pi tuning ships with it for IMX519). Without it, libcamera silently ignores `AfMode` / `LensPosition`. On IMX519, the PDAF parsing patch is optional — without it, continuous AF still works via CDAF, just with slower hunt.
 
@@ -521,15 +527,44 @@ Only **one trigger may be outstanding at a time** — a second `trigger_capture`
 
 Errors: not RUNNING, process mode isn't `trigger`, named camera not running, no running cameras, or a trigger already pending. As with every mode, `set_process_mode` must be sent **before** `start_cameras` — switching into `trigger` on an already-running pipeline leaves the processor in the mode it started with, and `trigger_capture` then errors with a message saying so.
 
-### 4.18 Server response types (summary)
+### 4.18 `get_focus_fom_region`
+Query the image region averaged into the per-frame `focus_fom` (libcamera `FocusFoM`) carried in every binary frame header (§5.3). Required state: **CONFIGURED** or **RUNNING** (the region depends on the configured sensor mode). Allowed for observers. The `configure` reply carries the same object (§4.3), so a commander does not need to ask; an observer, or a client that connects after `configure`, does.
+
+**Request**
+```json
+{"cmd": "get_focus_fom_region"}
+```
+
+**Response**
+```json
+{
+  "type": "focus_fom_region",
+  "x": 580, "y": 436, "width": 1160, "height": 872,
+  "frame_width": 2328, "frame_height": 1748,
+  "grid": {"size": 8, "first_col": 2, "first_row": 2, "num_cols": 4, "num_rows": 4}
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `x`, `y`, `width`, `height` | integer | The averaged rectangle, in **full-resolution** output-frame pixels (`frame_width` x `frame_height`). On a subsampled stream (§4.7) divide by the stream's factor, as the frame geometry is. |
+| `frame_width`, `frame_height` | integer | The configured output frame size the rectangle is expressed in. |
+| `grid` | object | The statistics grid cells the IPA averages: columns `[first_col, first_col + num_cols)` and rows `[first_row, first_row + num_rows)` of a `size` x `size` grid. |
+
+**Where the region comes from.** `FocusFoM` is computed by libcamera's Raspberry Pi IPA, not by this server. The Pi 5 (PiSP) frontend measures contrast on the raw sensor image over an **8 x 8 grid** whose cells are `max(2, (dimension / 8) & ~1)` pixels — truncated to even, so the grid starts at the top-left corner and falls a few pixels short of the right and bottom edges. The IPA then averages rows `[rows/3, rows - rows/3)` and columns `[cols/4, cols - cols/4)`, which on the 8 x 8 grid is cells **2-5 on both axes: the middle half of the frame, horizontally and vertically**. Nothing can move it — `AfWindows` / `AfMetering` steer only the autofocus algorithm, not this metric — so it is fixed for a configured mode and reported once rather than per frame. The server derives it from that geometry (`focus_region.hpp`); it is not read back from libcamera.
+
+Errors: not CONFIGURED/RUNNING.
+
+### 4.19 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
 | `state` | `state` (`"idle"` \| `"configured"` \| `"running"`), `cause`, `role`, `commander_connected`, `observer_connected` | Reply to `get_state` (`cause: "query"`); **also unsolicited** on every state transition and when the other role connects/disconnects (§3.1) |
-| `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` | Successful command, state change |
+| `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` (`stop_cameras`), `focus_fom_region` (`configure`) | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
+| `focus_fom_region` | `x`, `y`, `width`, `height`, `frame_width`, `frame_height`, `grid` | Reply to `get_focus_fom_region` (the same object rides on the `configure` status as `focus_fom_region`) |
 | `trigger_result` | `trigger_id`, `cancelled`, `captures[]` | Asynchronous ack for `trigger_capture` — sent when every armed camera has delivered its frame (or the trigger was cancelled by `stop_cameras`) |
 | `error` | `message`, optionally `code` and code-specific fields | Bad JSON, unknown command, wrong state, invalid arg, handler exception, infeasible mode (§4.6) |
 | `error` (`code: "forbidden"`) | `code`, `message` | An observer sent a command reserved for the commander (§1.1). Nothing changed. |
@@ -557,9 +592,9 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | Offset | Field | Type | Value |
 |---|---|---|---|
 | 0 | `magic` | `uint32` | `0x4348554E` (`'CHUN'`) |
-| 4 | `version` | `uint32` | `6` |
+| 4 | `version` | `uint32` | `7` |
 
-### 5.3 `ChunkHeader` (68 bytes, follows the start marker in the same message)
+### 5.3 `ChunkHeader` (72 bytes, follows the start marker in the same message)
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -582,6 +617,7 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 64 | `af_state` | `uint8` | libcamera `AfState` for this frame: `0`=Idle, `1`=Scanning, `2`=Focused, `3`=Failed. **`0xFF`** when no `AfState` was reported. Use to tell whether continuous/auto AF had settled (`2`) when `lens_position` was sampled. |
 | 65 | `detection_kind` | `uint8` | Classifies the detection block that follows this header (and how to parse each of its `num_corner_sets` records): `0`=none (no detector ran; no block), `1`=checkerboard (records are `CornerSetHeader`, §5.4.1), `2`=aruco (records are `MarkerSetHeader`, §5.4.2). Was part of `reserved2` (always `0`) before v6, so `0` still means "no detection block". |
 | 66 | `reserved2` | `uint8[2]` | Padding; always `0`. |
+| 68 | `focus_fom` | `int32` | libcamera `FocusFoM` for this frame: the IPA's contrast figure of merit averaged over a fixed central block of the image (§4.18). Larger is sharper. It is a relative score with no unit or fixed scale — compare it between frames of the **same camera** looking at the **same scene** (e.g. across a focus sweep), not across cameras or scenes. Independent of the AF mode. **`-1`** when libcamera reported no `FocusFoM` for the frame. Header-only and subsampled frames carry it too. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
 
@@ -684,7 +720,7 @@ client → {"cmd":"discover"}
 server → {"type":"discovery","cameras":[{"id":0,"type":"imx519"},{"id":1,"type":"imx519"}]}
 
 client → {"cmd":"configure","params":{"width":2328,"height":1748}}
-server → {"type":"status","message":"Configured: 2328x1748 YUV420"}
+server → {"type":"status","message":"Configured: 2328x1748 YUV420","focus_fom_region":{"x":580,"y":436,"width":1160,"height":872,...}}
 
 client → {"cmd":"set_process_mode","mode":"batch","params":{"output_dir":"/data/run1","batch_size":20}}
 server → {"type":"status","message":"Process mode configured: batch"}
@@ -804,7 +840,7 @@ at the sensor or its cable.
 
 ## 8. Versioning
 
-The binary protocol version is carried in `ChunkStartMarker.version` (currently `6`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
+The binary protocol version is carried in `ChunkStartMarker.version` (currently `7`). Clients should reject frames whose `magic` or `version` they don't recognize. There is no explicit version field for the JSON control protocol — backward-incompatible changes will bump the binary version and be documented here.
 
 ### Version history
 
@@ -819,3 +855,4 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `6` (control-protocol only) | Resource guards added. `set_process_mode` gains `backlog_max_bytes`, `disk_write_bytes_per_sec` and `allow_overcommit` (§4.5.1); `start_cameras` may now refuse an infeasible mode (§4.6); the `stop_cameras` status gains `frames_dropped_backlog` (§4.9); and a new **unsolicited** `error` with `code: "capture_timeout"` reports a camera that has stopped delivering frames (§7.1) — the first server-initiated message that is not a reply or a binary frame. Text-only; `version` stays `6`. |
 | `6` (control-protocol only) | **Client roles.** The single client slot became one **commander** (read-write, path `/`) plus one **observer** (read-only, path `/observer`) slot (§1.1); observer write commands fail with `code: "forbidden"`. `state` replies gained `cause`, `role`, `commander_connected`, `observer_connected`, and `state` is now also **pushed** on every transition and on the other role's connect/disconnect (§3.1). `start_stream` gained per-camera `max_fps` and `subsample` options (§4.7) and, for observers, works in any state with a subscription that persists across `stop_cameras`/`start_cameras`; `set_header_only` and backpressure became per connection. Commander-over-observer streaming priority defined (§5.8). On a subsampled stream the header geometry and detection coordinates describe the decimated frame. Binary layout unchanged, so `version` stays `6`. |
 | `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |
+| `7` | `ChunkHeader` extended to 72 bytes: added `focus_fom` (int32, offset 68), the per-frame libcamera `FocusFoM` (`-1` if unavailable). New command `get_focus_fom_region` / `focus_fom_region` response (§4.18), observer-allowed, reports the fixed image region the IPA averages into it; the `configure` status carries the same object as `focus_fom_region` (§4.3). |

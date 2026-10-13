@@ -130,6 +130,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/stream_manager.cpp
         src/frame_subsample.cpp
         src/sensor_mode.cpp
+        src/focus_region.cpp
         src/rate_controller.cpp
         src/command_parser.cpp
         src/checkerboard_detector.cpp
@@ -148,6 +149,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/stream_priority.hpp
         src/frame_subsample.hpp
         src/sensor_mode.hpp
+        src/focus_region.hpp
         src/rate_controller.hpp
         src/command_parser.hpp
         src/frame_sink.hpp

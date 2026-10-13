@@ -53,6 +53,7 @@ FrameData subsampleYuv420(const FrameData& src, uint32_t factor) {
   out.frame_duration_us = src.frame_duration_us;
   out.lens_position = src.lens_position;
   out.af_state = src.af_state;
+  out.focus_fom = src.focus_fom;
 
   // Source layout (see docs/websocket-protocol.md §5.5): Y is bytes_per_line
   // x height, then U and V each (bytes_per_line / 2) x (height / 2).

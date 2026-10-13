@@ -206,6 +206,11 @@ std::pair<int64_t, int64_t> CameraManager::getFrameDurationLimitsHw() const {
   return cameras.front()->getFrameDurationLimitsHw();
 }
 
+std::optional<focus_region::Region> CameraManager::getFocusFomRegion() const {
+  if (cameras.empty()) return std::nullopt;
+  return cameras.front()->getFocusFomRegion();
+}
+
 LensPositionLimits CameraManager::getLensPositionLimitsHw() const {
   const float nan = std::numeric_limits<float>::quiet_NaN();
   if (cameras.empty()) return {nan, nan, nan};

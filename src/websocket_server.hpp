@@ -84,6 +84,10 @@ class WebSocketServer {
   void handleSetFrameDuration(Socket* ws, const nlohmann::json& msg);
   void handleGetFrameDurationLimits(Socket* ws);
   void handleGetLensPositionLimits(Socket* ws);
+  void handleGetFocusFomRegion(Socket* ws);
+  // The configured FocusFoM region as JSON (the body of `focus_fom_region`),
+  // or null when there is no camera to describe.
+  nlohmann::json focusFomRegionJson() const;
 
   void sendStatus(Socket* ws, const std::string& message);
   // `code` (optional) is the machine-readable `code` field of the error.

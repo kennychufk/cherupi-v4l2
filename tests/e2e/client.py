@@ -1,6 +1,6 @@
 """WebSocket client for the cherupi-v4l2 camera server.
 
-Speaks the v6 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
+Speaks the v7 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
 Designed for use from pytest end-to-end tests but has no test-framework
 dependency and can be driven from a plain script.
 
@@ -58,16 +58,17 @@ import websocket  # pip install websocket-client  # noqa: E402
 
 CHUN_MAGIC = 0x4348554E  # 'CHUN'
 CHNK_MAGIC = 0x43484E4B  # 'CHNK'
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
-# ChunkStartMarker (8 bytes) + ChunkHeader (68 bytes)
+# ChunkStartMarker (8 bytes) + ChunkHeader (72 bytes)
 START_STRUCT = struct.Struct("<II")  # magic, version
 # frame_uuid, frame_id, camera_id, total_chunks, total_size, bytes_per_line,
 # width, height, pixel_format, frames_saved, timestamp_us (u64),
 # frame_duration_us, corner_block_size, num_corner_sets (u16), reserved (u16),
-# lens_position (f32), af_state (u8), detection_kind (u8), reserved2 (u8[2])
-HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBB2s")
-START_PLUS_HEADER_SIZE = START_STRUCT.size + HEADER_STRUCT.size  # 76
+# lens_position (f32), af_state (u8), detection_kind (u8), reserved2 (u8[2]),
+# focus_fom (i32)
+HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBB2si")
+START_PLUS_HEADER_SIZE = START_STRUCT.size + HEADER_STRUCT.size  # 80
 
 # Detection block records (§5.4)
 CORNER_SET_HEADER = struct.Struct("<BBH")  # set_id, flags, num_corners
@@ -140,6 +141,7 @@ class Frame:
     lens_position: float = math.nan
     af_state: int = 0xFF
     detection_kind: int = DETECTION_NONE
+    focus_fom: int = -1  # libcamera FocusFoM; -1 if unavailable
     corner_sets: List[CornerSet] = field(default_factory=list)
 
     @property
@@ -327,6 +329,7 @@ class CherupiClient:
             af_state,
             detection_kind,
             _reserved2,
+            focus_fom,
         ) = HEADER_STRUCT.unpack_from(data, START_STRUCT.size)
 
         if len(data) != START_PLUS_HEADER_SIZE + corner_block_size:
@@ -356,6 +359,7 @@ class CherupiClient:
             lens_position=lens_position,
             af_state=af_state,
             detection_kind=detection_kind,
+            focus_fom=focus_fom,
             corner_sets=corner_sets,
         )
 

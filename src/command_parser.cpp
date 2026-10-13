@@ -54,6 +54,8 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
     kind = CommandKind::GetFrameDurationLimits;
   } else if (cmd == Protocol::CMD_GET_LENS_POSITION_LIMITS) {
     kind = CommandKind::GetLensPositionLimits;
+  } else if (cmd == Protocol::CMD_GET_FOCUS_FOM_REGION) {
+    kind = CommandKind::GetFocusFomRegion;
   } else {
     return "Unknown command: " + cmd;
   }
@@ -91,6 +93,7 @@ bool isCommandPermitted(CommandKind kind, ClientRole role) {
     case CommandKind::SetHeaderOnly:
     case CommandKind::GetFrameDurationLimits:
     case CommandKind::GetLensPositionLimits:
+    case CommandKind::GetFocusFomRegion:
       return true;
     case CommandKind::Configure:
     case CommandKind::Unconfigure:
@@ -134,6 +137,7 @@ bool isCommandAllowed(CommandKind kind, CameraState current, ClientRole role) {
     case CommandKind::SetFrameDuration:
     case CommandKind::GetFrameDurationLimits:
     case CommandKind::GetLensPositionLimits:
+    case CommandKind::GetFocusFomRegion:
       return current == CameraState::CONFIGURED ||
              current == CameraState::RUNNING;
   }

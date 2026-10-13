@@ -1,6 +1,6 @@
 # End-to-End Tests
 
-Black-box pytest suite that drives a running `camera_ws_server` through the v6
+Black-box pytest suite that drives a running `camera_ws_server` through the v7
 WebSocket protocol. Covers:
 
 - Full lifecycle (discover → configure → start → stream → stop)

@@ -68,6 +68,7 @@ FrameData makeSyntheticFrame(size_t total_bytes, uint32_t cam_id = 0) {
   f.height = 1080;
   f.bytes_per_line = 1920;
   f.pixel_format = 0x32315559;  // 'YU12'
+  f.focus_fom = 1234;
   f.data.resize(total_bytes);
   for (size_t i = 0; i < total_bytes; ++i) {
     f.data[i] = static_cast<uint8_t>(i & 0xFF);
@@ -100,7 +101,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
   EXPECT_EQ(marker.magic, 0x4348554Eu);
-  EXPECT_EQ(marker.version, 6u);
+  EXPECT_EQ(marker.version, 7u);
 
   ChunkHeader header{};
   std::memcpy(&header, sink.messages[0].data() + sizeof(marker),
@@ -111,6 +112,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   EXPECT_EQ(header.height, 1080u);
   EXPECT_EQ(header.corner_block_size, 0u);
   EXPECT_EQ(header.num_corner_sets, 0u);
+  EXPECT_EQ(header.focus_fom, 1234);
 
   // Subsequent messages are ChunkData packets.
   for (size_t i = 0; i < expected_chunks; ++i) {
@@ -301,7 +303,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   // Parse marker + header from message 0.
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
-  EXPECT_EQ(marker.version, 6u);
+  EXPECT_EQ(marker.version, 7u);
 
   ChunkHeader header{};
   std::memcpy(&header,

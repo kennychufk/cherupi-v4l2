@@ -389,6 +389,7 @@ void StreamManager::streamingLoop() {
           meta->frame_duration_us = frame->frame_duration_us;
           meta->lens_position = frame->lens_position;
           meta->af_state = frame->af_state;
+          meta->focus_fom = frame->focus_fom;
           const auto g = frame_subsample::subsampledGeometry(
               frame->width, frame->height, factor);
           meta->width = g.width;
@@ -732,6 +733,7 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.detection_kind = transfer.detection_kind;
   header.reserved2[0] = 0;
   header.reserved2[1] = 0;
+  header.focus_fom = frame.focus_fom;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);
   message.insert(message.end(), header_bytes,
