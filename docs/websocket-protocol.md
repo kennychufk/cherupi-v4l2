@@ -152,6 +152,8 @@ All fields under `params` are optional; omitted fields keep server defaults (see
 
 **Output pixel format:** YUV420 (`V4L2_PIX_FMT_YUV420`), reflected in every binary frame header's `pixel_format` FourCC.
 
+**`width` × `height` must be one of the sensor's native modes** (as listed by `rpicam-hello --list-cameras`). The server pins libcamera to that mode, taking the mode's own raw bit depth from what the sensor advertises — it differs per mode on some sensors (IMX477: `1332x990` is 10-bit, `2028x1080` / `2028x1520` / `4056x3040` are 12-bit). Any other size fails with `error` `"Failed to configure cameras"`, and the server log lists the available modes.
+
 **Response (success)** → `status`:
 ```json
 {"type": "status", "message": "Configured: 2328x1748 YUV420"}

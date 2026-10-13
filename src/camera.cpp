@@ -8,6 +8,8 @@
 #include <limits>
 #include <map>
 
+#include "sensor_mode.hpp"
+
 namespace {
 
 // Monotonic microseconds. Used for the capture watchdog rather than the
@@ -61,16 +63,52 @@ bool Camera::configure(size_t buffer_count) {
   // Raw stream + sensorConfig together force the PiSP backend to select the
   // native sensor mode for this resolution. pixelFormat Bayer order is ignored
   // by the pipeline handler (it substitutes the correct order); bit depth and
-  // packing are what matter for mode selection.
+  // packing are what matter for mode selection. The bit depth is the mode's
+  // own, looked up in the Raw stream's advertised formats: it varies per mode
+  // (IMX477: 1332x990 is 10-bit, 2028x1080 and up are 12-bit), and a
+  // bitDepth/outputSize pair that is not a mode is rejected as invalid.
   if (cam_config->size() > 1) {
     libcamera::StreamConfiguration& raw_cfg = cam_config->at(1);
+
+    std::vector<sensor_mode::RawFormat> raw_formats;
+    const libcamera::StreamFormats& advertised = raw_cfg.formats();
+    for (const libcamera::PixelFormat& pf : advertised.pixelformats()) {
+      sensor_mode::RawFormat fmt{pf.toString(), {}};
+      for (const libcamera::Size& s : advertised.sizes(pf)) {
+        fmt.sizes.push_back({s.width, s.height});
+      }
+      raw_formats.push_back(std::move(fmt));
+    }
+
+    libcamera::PixelFormat raw_format = libcamera::formats::SBGGR10_CSI2P;
+    unsigned bit_depth = 10;
+    if (!raw_formats.empty()) {
+      auto mode = sensor_mode::selectRawMode(raw_formats, config.width,
+                                             config.height);
+      if (!mode) {
+        LOG_ERROR("Camera", "Camera " + std::to_string(camera_id) + ": " +
+                                std::to_string(config.width) + "x" +
+                                std::to_string(config.height) +
+                                " is not a native sensor mode (available: " +
+                                sensor_mode::describe(raw_formats) + ")");
+        releaseConfiguredResources();
+        return false;
+      }
+      raw_format = libcamera::PixelFormat::fromString(mode->format);
+      bit_depth = mode->bit_depth;
+      LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
+                             " sensor mode: " + std::to_string(config.width) +
+                             "x" + std::to_string(config.height) + " " +
+                             mode->format);
+    }
+
     raw_cfg.size = libcamera::Size(config.width, config.height);
-    raw_cfg.pixelFormat = libcamera::formats::SBGGR10_CSI2P;
+    raw_cfg.pixelFormat = raw_format;
     raw_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
 
     cam_config->sensorConfig = libcamera::SensorConfiguration();
     cam_config->sensorConfig->outputSize = libcamera::Size(config.width, config.height);
-    cam_config->sensorConfig->bitDepth = 10;
+    cam_config->sensorConfig->bitDepth = bit_depth;
   }
 
   libcamera::CameraConfiguration::Status status = cam_config->validate();

@@ -30,6 +30,7 @@ All paths below are under `src/`.
 - `command_parser.*` — pure JSON command parsing, role-from-path, role permission gate, state-machine gate, `start_stream` option parsing (used by `websocket_server`)
 - `camera_manager.*` — multi-camera lifecycle (configure → start → stop)
 - `camera.*` — per-camera libcamera wrapper: owns `libcamera::Camera`, `CameraConfiguration`, `FrameBufferAllocator`, request queue, mmap of DMA buffers, frame callbacks
+- `sensor_mode.*` — pure choice of the native sensor mode (raw format + bit depth) for the configured size, from the formats libcamera advertises on the Raw stream; bit depth varies per mode (IMX477: 10-bit at 1332x990, 12-bit above)
 - `stream_manager.*` — one streaming session per client role: subscriptions with per-camera `StreamOptions` (`max_fps`, `subsample`), round-robin, backpressure/skipping, chunked transfer (writes to an abstract `FrameSink`). The observer's session yields to the commander's (`setYieldTo`).
 - `stream_priority.hpp` — the pure commander-over-observer yield rule (`isClear`), unit-tested
 - `frame_subsample.*` — pure YUV420 box-average decimation + corner scaling for the `subsample` stream option
