@@ -312,6 +312,12 @@ struct ProcessConfig {
   int checkerboard_cols = 11;
   bool checkerboard_full_res_detection = false;
   int checkerboard_num_threads = 4;
+  // Half-size (full-frame px) of the cv::cornerSubPix window that refines
+  // every detected checkerboard corner on the full-resolution Y plane; 0
+  // disables refinement. Shrunk per board to 40 % of the corner spacing. See
+  // CheckerboardDetector::refine. 15 costs ~4 ms per board on a Pi 5 at
+  // 4056x3040 (40: ~22 ms) against ~400 ms for the detection itself.
+  int checkerboard_subpix_window = 15;
 
   // ArUco detection parameters (aruco / aruco2x2 modes). The dictionary is
   // hard-coded to DICT_APRILTAG_16h5. `aruco_full_res_detection` mirrors the

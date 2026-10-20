@@ -225,6 +225,8 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
           params["checkerboard_full_res_detection"];
     if (params.contains("checkerboard_num_threads"))
       config.checkerboard_num_threads = params["checkerboard_num_threads"];
+    if (params.contains("checkerboard_subpix_window"))
+      config.checkerboard_subpix_window = params["checkerboard_subpix_window"];
     if (params.contains("aruco_full_res_detection"))
       config.aruco_full_res_detection = params["aruco_full_res_detection"];
     if (params.contains("aruco_num_threads"))

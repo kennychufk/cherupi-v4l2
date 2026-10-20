@@ -544,6 +544,32 @@ void FrameProcessor::processDetection(FrameData frame) {
   }
 }
 
+namespace {
+
+int64_t elapsedUs(std::chrono::steady_clock::time_point from,
+                  std::chrono::steady_clock::time_point to) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(to - from)
+      .count();
+}
+
+}  // namespace
+
+int FrameProcessor::refineCheckerboardCorners(const FrameData& frame,
+                                              std::vector<CornerSet>& sets) {
+  // Refine against the full-resolution Y plane — the first plane of the
+  // YUV420 buffer — whatever resolution detection ran at, viewed in place.
+  if (config.checkerboard_subpix_window <= 0 || frame.data.empty()) return 0;
+  int window = 0;
+  for (auto& set : sets) {
+    window = std::max(window, checkerboard_detector->refine(
+                                  frame.data.data(), static_cast<int>(frame.width),
+                                  static_cast<int>(frame.height),
+                                  frame.bytes_per_line, set.corners,
+                                  config.checkerboard_subpix_window));
+  }
+  return window;
+}
+
 bool FrameProcessor::detectCheckerboard(const FrameData& frame,
                                     std::vector<CornerSet>& out_sets) {
   auto start_tp = std::chrono::steady_clock::now();
@@ -577,12 +603,15 @@ bool FrameProcessor::detectCheckerboard(const FrameData& frame,
     out_sets.push_back(std::move(set));
   }
 
+  auto detect_tp = std::chrono::steady_clock::now();
+  const int refine_window = refineCheckerboardCorners(frame, out_sets);
   auto end_tp = std::chrono::steady_clock::now();
-  auto total_time =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
-          .count();
-  LOG_INFO("FrameProcessor", "Checkerboard detected: " + std::to_string(detected) +
-                             " Total: " + std::to_string(total_time) + "ms");
+  LOG_INFO("FrameProcessor",
+           "Checkerboard detected: " + std::to_string(detected) +
+               " Detect: " + std::to_string(elapsedUs(start_tp, detect_tp)) +
+               "us Refine: " + std::to_string(elapsedUs(detect_tp, end_tp)) +
+               "us (window " + std::to_string(refine_window) + ") Total: " +
+               std::to_string(elapsedUs(start_tp, end_tp)) + "us");
   return detected;
 }
 
@@ -663,13 +692,15 @@ bool FrameProcessor::detectCheckerboard2x2(const FrameData& frame,
     out_sets.push_back(std::move(set));
   }
 
+  auto detect_tp = std::chrono::steady_clock::now();
+  const int refine_window = refineCheckerboardCorners(frame, out_sets);
   auto end_tp = std::chrono::steady_clock::now();
-  auto total_time =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end_tp - start_tp)
-          .count();
   LOG_INFO("FrameProcessor",
            "Checkerboard2x2 detected: " + std::to_string(detected) +
-               " Total: " + std::to_string(total_time) + "ms");
+               " Detect: " + std::to_string(elapsedUs(start_tp, detect_tp)) +
+               "us Refine: " + std::to_string(elapsedUs(detect_tp, end_tp)) +
+               "us (window " + std::to_string(refine_window) + ") Total: " +
+               std::to_string(elapsedUs(start_tp, end_tp)) + "us");
   return detected;
 }
 

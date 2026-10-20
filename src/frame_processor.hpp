@@ -190,9 +190,14 @@ class FrameProcessor {
   // value so it can be moved into the streaming slot.
   void processDetection(FrameData frame);
   std::string generateFilename(uint32_t camera_id, uint32_t frame_id);
+  // cornerSubPix-refine every set's corners on the full-res Y plane per
+  // checkerboard_subpix_window. Returns the largest window half-size used.
+  int refineCheckerboardCorners(const FrameData& frame,
+                                std::vector<CornerSet>& sets);
   // Detect on the whole Y plane (extracted per `checkerboard_full_res_detection`).
   // On success, populates `out_sets` with one CornerSet (set_id=0) whose
-  // coordinates are translated to full-frame Y-plane pixel space.
+  // coordinates are translated to full-frame Y-plane pixel space, then
+  // refined by refineCheckerboardCorners.
   bool detectCheckerboard(const FrameData& frame,
                           std::vector<CornerSet>& out_sets);
   // CHECKERBOARD2X2: split the (already full-res or subsampled per
