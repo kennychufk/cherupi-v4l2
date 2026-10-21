@@ -90,6 +90,12 @@ class ArucoDetector {
   static bool refineCornersFromEdges(const cv::Mat& gray,
                                      const std::array<float, 256>& lut,
                                      std::vector<cv::Point2f>& corners);
+  // The same fit on an image that is already linear light (CV_32FC1), such
+  // as a stacked raw image, with no 8-bit quantisation in the way. Its
+  // contrast floor assumes the 0..255 scale the decode table produces, so
+  // scale the image to put white near 255 first.
+  static bool refineCornersFromEdgesLinear(const cv::Mat& linear,
+                                           std::vector<cv::Point2f>& corners);
 
  private:
   bool edge_refine_;

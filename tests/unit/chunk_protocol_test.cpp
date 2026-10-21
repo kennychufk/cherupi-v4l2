@@ -88,7 +88,9 @@ TEST(ChunkProtocolTest, ChunkHeaderFieldOffsetsAreStable) {
   // v6: detection_kind took over the first reserved2 byte (offset 65); the
   // remaining reserved padding shifted to offset 66.
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.detection_kind) - base, 65);
-  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.reserved2) - base, 66);
+  // Stacking: frame_kind took over the first remaining reserved byte.
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.frame_kind) - base, 66);
+  EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.reserved2) - base, 67);
   // v7 addition
   EXPECT_EQ(reinterpret_cast<const uint8_t*>(&h.focus_fom) - base, 68);
 }

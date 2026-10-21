@@ -135,6 +135,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/command_parser.cpp
         src/checkerboard_detector.cpp
         src/aruco_detector.cpp
+        src/raw_stack.cpp
+        src/raw_stacker.cpp
     )
 
     # Header files
@@ -156,6 +158,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/uws_frame_sink.hpp
         src/checkerboard_detector.h
         src/aruco_detector.h
+        src/raw_stack.hpp
+        src/raw_stacker.hpp
     )
 
     # Create executable

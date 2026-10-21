@@ -33,11 +33,11 @@ Permitted commands per role:
 |---|---|---|
 | `discover`, `get_state`, `get_frame_duration_limits`, `get_lens_position_limits`, `get_focus_fom_region` | ✓ | ✓ |
 | `start_stream`, `stop_stream`, `set_header_only` | ✓ | ✓ (own stream only; see §4.7) |
-| `configure`, `unconfigure`, `start_cameras`, `stop_cameras`, `set_process_mode`, `trigger_capture`, `reset_frame_counts`, `set_lens_position`, `set_exposure_time`, `set_frame_duration` | ✓ | ✗ → `error` with `code: "forbidden"` (§7) |
+| `configure`, `unconfigure`, `start_cameras`, `stop_cameras`, `set_process_mode`, `trigger_capture`, `stack_capture`, `reset_frame_counts`, `set_lens_position`, `set_exposure_time`, `set_frame_duration` | ✓ | ✗ → `error` with `code: "forbidden"` (§7) |
 
 The two streams are **independent**: each role has its own subscription set, its own header-only flag and its own rate control, so the commander can have streaming off while the observer watches, and vice versa. When both stream at once the commander has **priority** (§5.8). The observer's subscription is **persistent** across camera stop/start cycles, and the server **pushes `state` messages** to both clients so an observer can wait indefinitely for a commander to start the cameras without polling (§3.1).
 
-Unsolicited messages by role: the `state` push (§3.1) and the `capture_timeout` error (§7.1) go to both clients; `trigger_result` (§4.17) goes to the commander only.
+Unsolicited messages by role: the `state` push (§3.1) and the `capture_timeout` error (§7.1) go to both clients; `trigger_result` (§4.17) and `stack_result` (§4.19) go to the commander only.
 
 ### Close codes observed/logged
 `1000` normal, `1001` going away, `1006` abnormal (no close frame), `1009` message too big, any other treated as unexpected.
@@ -61,7 +61,7 @@ IDLE ─────────────────────────
 
 - **IDLE** — discovery done, no camera pipeline allocated. Accepts `configure`.
 - **CONFIGURED** — camera pipeline configured (libcamera acquired, buffers allocated); not yet capturing. Accepts `start_cameras` (→ RUNNING) or `unconfigure` (→ IDLE, releases pipeline resources).
-- **RUNNING** — cameras capturing. `start_stream` / `stop_stream` enable per-camera delivery; `trigger_capture` (in the `trigger` process mode) saves a frame on demand. `stop_cameras` returns to CONFIGURED.
+- **RUNNING** — cameras capturing. `start_stream` / `stop_stream` enable per-camera delivery; `trigger_capture` (in the `trigger` process mode) saves a frame on demand; `stack_capture` (when configured with `raw`) stacks raw frames on demand. `stop_cameras` returns to CONFIGURED.
 
 To re-configure with a different `CameraConfig`: `unconfigure` (if CONFIGURED) or `stop_cameras` then `unconfigure` (if RUNNING), then `configure`.
 
@@ -144,11 +144,14 @@ Apply identical configuration to all cameras. Required state: **IDLE**.
 ```json
 {"cmd": "configure", "params": {
   "width": 2328,
-  "height": 1748
+  "height": 1748,
+  "raw": false
 }}
 ```
 
 All fields under `params` are optional; omitted fields keep server defaults (see `CameraConfig` in `types.hpp`).
+
+**`raw`** (default `false`): also capture each frame's raw Bayer image, unpacked to 16 bits per sample, for `stack_capture` (§4.19). The YUV420 stream is unchanged. Without it the Pi 5 frontend stores the raw image with PISP_COMP1, a lossy compression whose error a stack would accumulate; unpacked, each raw buffer is `width × height × 2` bytes (24.7 MB at 4056×3040), so it costs memory and bus bandwidth even while nothing is being stacked. `stack_capture` and the `stack` process mode refuse to run without it.
 
 **Output pixel format:** YUV420 (`V4L2_PIX_FMT_YUV420`), reflected in every binary frame header's `pixel_format` FourCC.
 
@@ -163,6 +166,8 @@ All fields under `params` are optional; omitted fields keep server defaults (see
                                "num_cols": 4, "num_rows": 4}}}
 ```
 `focus_fom_region` has the same fields as the `get_focus_fom_region` reply (§4.18) minus `type`; it is `null` only if no camera was configured.
+
+The reply also carries `raw`: `null` unless configured with `raw: true`, else the raw stream as libcamera set it up — `{"format": "SBGGR16", "width": 4056, "height": 3040, "stride": 8112, "bit_depth": 12}`. `bit_depth` is the sensor mode's; samples are left-justified in 16 bits (a 12-bit value `v` reads as `v << 4`).
 
 **Response (failure)** → `error`.
 
@@ -191,13 +196,14 @@ Configure the optional on-device frame-processing pipeline (detection and/or sav
 
 **Request**
 ```json
-{"cmd": "set_process_mode", "mode": "none|buffer|batch|trigger|checkerboard|checkerboard2x2|aruco|aruco2x2", "params": {
+{"cmd": "set_process_mode", "mode": "none|buffer|batch|trigger|checkerboard|checkerboard2x2|aruco|aruco2x2|stack", "params": {
   "save_frames": true,
   "output_dir": ".",
   "prepend_timestamp_to_dir": false,
   "batch_size": 10,
   "writer_threads": 4,
   "trigger_skip_frames": 0,
+  "stack_detect": "checkerboard",
   "checkerboard_rows": 8,
   "checkerboard_cols": 11,
   "checkerboard_full_res_detection": false,
@@ -227,6 +233,7 @@ The mode names **what is done to each captured frame**. Whether processed frames
 | `checkerboard` | Detect an OpenCV checkerboard; report its corners to the streaming client (§5.4.1). When `save_frames`, also save frames in which a checkerboard is detected |
 | `checkerboard2x2` | Split each frame's Y plane into 4 equal quadrants and detect a checkerboard in each; report the corners of every detecting quadrant. When `save_frames`, save the whole frame if **any** quadrant detects. The Y plane is built the same way as `checkerboard` (full-res or 2x2-subsampled per `checkerboard_full_res_detection`) and then split, so each sub-frame is half-width × half-height of that buffer. The 4 detections run in parallel, batched by `checkerboard_num_threads` (clamped to `[1, 4]`). |
 | `aruco` | Detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) on the Y plane (full-res or 2x2-subsampled per `aruco_full_res_detection`); report each marker's **id** and **4 corners** to the streaming client (§5.4.2). When `save_frames`, also save frames in which at least one marker is detected. |
+| `stack` | Stream **stacked raw images only** (§4.19): live frames are no longer streamed, and each subscribed camera's stream carries one frame per completed `stack_capture` instead — the stacked image (§5.5) with the detection made on it in the usual detection block (§5.4). Nothing is detected or saved per captured frame, and the server does not even copy out the YUV frames (a full frame of memory and bandwidth each), which matters at full resolution on a 1 GB Pi with the raw stream on. Needs `configure` with `raw: true` (`start_cameras` refuses otherwise). `stack_detect` (default `"checkerboard"`; also `"none"`, `"checkerboard2x2"`, `"aruco"`, `"aruco2x2"`) is what a `stack_capture` that names no `detect` runs; the `checkerboard_*` / `aruco_*` params configure it. |
 | `aruco2x2` | Split each frame's Y plane into 4 equal quadrants (same construction as `aruco`) and detect markers in each; report every detected marker. When `save_frames`, save the whole frame if **any** quadrant detects. The 4 detections run in parallel, batched by `aruco_num_threads` (clamped to `[1, 4]`). A marker straddling a quadrant boundary may be reported by more than one quadrant, or missed if it lands in no single quadrant intact. |
 
 `save_frames` (default `true`): when `false`, disk writing is disabled while detection still runs and still streams its side-products (corners/markers). In a detector mode this is the **optimized detection-only pipeline** — the writer pool is never started and the per-detection full-frame copy into the write queue is skipped, so `frames_saved` stays `0`. For `buffer`/`batch` (which have no side-product) `false` simply produces no output.
@@ -267,7 +274,7 @@ counts silently; the total is reported as `frames_dropped_backlog` in the
 count means the recording has a gap.
 
 ### 4.6 `start_cameras`
-Required state: **CONFIGURED**. Starts frame processing (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success.
+Required state: **CONFIGURED**. Starts frame processing (if non-`none`) and all capture pipelines; transitions to **RUNNING** on success. Refused with an `error` in the `stack` process mode unless configured with `raw: true`.
 
 ```json
 {"cmd": "start_cameras"}
@@ -325,7 +332,7 @@ Stop binary delivery for one camera on the calling connection. Cameras keep capt
 Response: `status` or `error` (if camera wasn't streaming).
 
 ### 4.9 `stop_cameras`
-Required state: **RUNNING**. Stops the commander's streaming, stops capture, flushes pending saves, returns to **CONFIGURED**. The observer's subscriptions are kept (§4.7); it resumes on the next `start_cameras`.
+Required state: **RUNNING**. Stops the commander's streaming, cancels a `stack_capture` still collecting frames (its `stack_result` arrives with `cancelled: true`, §4.19), stops capture, flushes pending saves, returns to **CONFIGURED**. The observer's subscriptions are kept (§4.7); it resumes on the next `start_cameras`.
 
 ```json
 {"cmd": "stop_cameras"}
@@ -558,16 +565,87 @@ Query the image region averaged into the per-frame `focus_fom` (libcamera `Focus
 
 Errors: not CONFIGURED/RUNNING.
 
-### 4.19 Server response types (summary)
+### 4.19 `stack_capture`
+Required state: **RUNNING**, with the cameras configured with `raw: true` (§4.3). Allowed in **any** process mode; in the `stack` mode its image is also streamed (§4.5). Commander only.
+
+Averages `num_frames` consecutive raw Bayer frames per camera into one image and detects on it. On a still rig a corner's frame-to-frame scatter is photon noise, so it falls as 1/√N — but only if the frames' noise is independent, which the ISP's YUV output is not (its temporal denoise correlates consecutive frames, so stacking YUV gains ~1.5× over 32 frames). Raw frames are taken before the ISP. Measured on an IMX477 at 4056×3040 with an 11×8 board, gain 1, 50 ms: **0.0154 px** for one frame, **0.0029 px** for 32.
+
+**Request**
+```json
+{"cmd": "stack_capture", "camera_id": 0, "num_frames": 32,
+ "exposure_time": 50000, "analogue_gain": 1.0, "skip_frames": 0,
+ "detect": "checkerboard", "subpix_window": 40,
+ "save_image": false, "output_dir": "stacks"}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `camera_id` | integer | *(absent)* | Stack only this camera. Omitted ⇒ every running camera, each its own stack; the result comes when all are done. |
+| `num_frames` | integer 1..1024 | `16` | Frames summed per camera. |
+| `exposure_time` | integer µs, 1..10 000 000 | *(absent)* | Pin the exposure for the stack. Rejected if longer than a locked frame duration (`set_frame_duration`), which would clamp it. |
+| `analogue_gain` | number 1..64 | `1.0` with `exposure_time`, else *(absent)* | Pin the analogue gain for the stack. Defaults to 1 when only an exposure is given: left to the AGC, the gain would come back down to undo the longer exposure. |
+| `skip_frames` | integer 0..100 | `0` | Frames to discard after the pinned settings have arrived, before summing. |
+| `detect` | string | the process mode's detector; in `stack` mode `stack_detect`; else `"none"` | `"none"`, `"checkerboard"`, `"checkerboard2x2"`, `"aruco"` or `"aruco2x2"`, configured by the `checkerboard_*` / `aruco_*` params of `set_process_mode`. |
+| `subpix_window` | integer 0..100 | `40` | `cornerSubPix` half-window for the board modes, in full-resolution pixels (halved on the binned stack, and capped at 40 % of the corner spacing as in §4.5). `0` reports the detector's unrefined corners. |
+| `save_image` | boolean | `false` | Write the stacked image to `<output_dir>/stack<stack_id>-cam<camera_id>.npy` (NumPy, float32, the image of §5.5) plus a `.json` sidecar holding that camera's `captures[]` entry. |
+| `output_dir` | string | `set_process_mode`'s `output_dir` | Where `save_image` writes; created if missing. |
+
+**What happens, per camera.**
+1. If `exposure_time` / `analogue_gain` are set, they replace the preview settings on the camera's next request (live frames, if streamed, show them too).
+2. Raw frames are ignored until one whose metadata reports the pinned settings arrives (exposure within max(2 %, 100 µs), gain within 2 % + 0.01). This takes a few frames, because the requests already queued go first. Then `skip_frames` more are discarded. If the settings have not arrived after 30 frames, the camera fails with an `error` naming what it reports instead.
+3. The next `num_frames` raw frames are summed per 2×2 Bayer quad (R+G+G+B: linear in radiance for a neutral target, no demosaic), on the capture thread (~30 ms per 12 MP frame on a Pi 5). All summed frames must share one exposure/gain: if a frame's differs from the first summed one (under auto exposure the AGC may still be moving), the sum restarts from that frame and the frames thrown away count in `frames_rejected`. The camera fails once more than max(`num_frames`, 30) have been thrown away — pin `exposure_time` to stack reliably.
+4. The camera gets its preview settings back. Once every armed camera is done, a worker thread forms the image, detects on it (a gamma-2.2 8-bit rendering for `findChessboardCornersSB` / `detectMarkers`; `cornerSubPix` or the ArUco edge fit on the float image, so the stack's precision survives), saves it if asked, and replies.
+
+**Response** → `stack_result`, sent **asynchronously** when every armed camera has finished (or failed). There is no synchronous acknowledgement; a refused request gets an immediate `error`.
+
+```json
+{"type": "stack_result", "stack_id": 3, "cancelled": false,
+ "captures": [{
+   "camera_id": 0, "frames_stacked": 32, "frames_rejected": 0, "settle_frames": 4,
+   "first_frame_id": 812, "last_frame_id": 843,
+   "first_timestamp_us": 1203400112, "last_timestamp_us": 1206500431,
+   "exposure_time": 49987, "analogue_gain": 1.0, "black_level": 4096.0, "bit_depth": 12,
+   "white_fraction": 0.55, "peak_fraction": 0.71, "clipped_fraction": 0.0,
+   "width": 2028, "height": 1520,
+   "detect": "checkerboard",
+   "sets": [{"set_id": 0, "corners": [[812.31, 604.87], ...]}],
+   "accumulate_ms": 14.2, "detect_ms": 512.0, "filename": ""}]}
+```
+
+| Field | Meaning |
+|---|---|
+| `stack_id` | Monotonic per capture session, from `1`, reset by `start_cameras`. In the `stack` mode it is also the streamed image's `frame_id`. |
+| `cancelled` | `true` when `stop_cameras` arrived while frames were still being collected; every camera then carries `error: "cancelled"` and only the counters. |
+| `captures[]` | One per armed camera, in `camera_id` order. |
+| `error` | Present only when that camera failed (settings did not settle, too many rejected frames, could not save). Its other fields are then partial. |
+| `frames_stacked`, `frames_rejected`, `settle_frames` | Frames summed; summed frames thrown away because the settings changed mid-stack; frames waited out before the pinned settings arrived. |
+| `first_/last_frame_id`, `first_/last_timestamp_us` | The summed span, in the same `frame_id` / timestamp space as the live stream. |
+| `exposure_time`, `analogue_gain` | As libcamera reported them for the summed frames. |
+| `black_level`, `bit_depth` | Subtracted black level (libcamera `SensorBlackLevels`, 16-bit scale) and the sensor mode's bit depth. |
+| `white_fraction` | 99.5th percentile of the stacked image as a fraction of the range above black — how bright the board's white is. Lengthen the exposure while this is well below ~0.8. |
+| `peak_fraction`, `clipped_fraction` | Brightest single sample (same scale); largest fraction of samples at full scale in any one frame. A non-zero `clipped_fraction` near the board means the exposure is too long. |
+| `width`, `height` | The stacked image: half the sensor resolution (one sample per Bayer quad). |
+| `detect`, `sets` | The detector that ran and what it found — the same records as the detection block (§5.4) as JSON: `set_id` (quadrant for the 2x2 modes), `marker_id` (ArUco only), `corners` as `[x, y]`. **Coordinates are full-resolution sensor pixels** (stack pixel `b` ↦ `2b + 0.5`), directly comparable with corners from the live detector modes. |
+| `accumulate_ms`, `detect_ms` | Mean summing time per frame (on the capture thread), and detection time. |
+| `filename` | The `.npy` written, or empty. |
+
+Only **one stack may be outstanding at a time**, from the request until its `stack_result` has been sent; another `stack_capture` meanwhile gets `error` `"A stack capture is already pending"`.
+
+Errors in `stack_result` (per camera): `exposure/gain did not settle …`, `exposure/gain kept changing …`, `failed to write …`.
+
+Errors (immediate): not RUNNING, not configured with `raw`, an invalid field, named camera not running, no running cameras, `exposure_time` above a locked frame duration, a stack already pending.
+
+### 4.20 Server response types (summary)
 
 | `type` | Fields | When |
 |---|---|---|
 | `discovery` | `cameras[]` | Reply to `discover` |
 | `state` | `state` (`"idle"` \| `"configured"` \| `"running"`), `cause`, `role`, `commander_connected`, `observer_connected` | Reply to `get_state` (`cause: "query"`); **also unsolicited** on every state transition and when the other role connects/disconnects (§3.1) |
-| `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` (`stop_cameras`), `focus_fom_region` (`configure`) | Successful command, state change |
+| `status` | `message`, optionally `frames_saved`, `bytes_written`, `frames_dropped_backlog` (`stop_cameras`), `focus_fom_region` and `raw` (`configure`) | Successful command, state change |
 | `frame_duration_limits` | `min`, `max`, `current` (`{min, max}` \| `null`) | Reply to `get_frame_duration_limits` |
 | `lens_position_limits` | `min`, `max`, `default` (number \| `null`), `num_cameras` | Reply to `get_lens_position_limits` |
 | `focus_fom_region` | `x`, `y`, `width`, `height`, `frame_width`, `frame_height`, `grid` | Reply to `get_focus_fom_region` (the same object rides on the `configure` status as `focus_fom_region`) |
+| `stack_result` | `stack_id`, `cancelled`, `captures[]` | Asynchronous result of `stack_capture` (§4.19) — sent when every armed camera has finished, failed, or been cancelled by `stop_cameras` |
 | `trigger_result` | `trigger_id`, `cancelled`, `captures[]` | Asynchronous ack for `trigger_capture` — sent when every armed camera has delivered its frame (or the trigger was cancelled by `stop_cameras`) |
 | `error` | `message`, optionally `code` and code-specific fields | Bad JSON, unknown command, wrong state, invalid arg, handler exception, infeasible mode (§4.6) |
 | `error` (`code: "forbidden"`) | `code`, `message` | An observer sent a command reserved for the commander (§1.1). Nothing changed. |
@@ -609,7 +687,7 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 20 | `bytes_per_line` | `uint32` | Stride of Y plane. Equals `width` on a subsampled stream (tightly packed). |
 | 24 | `width` | `uint32` | Pixels — of the **streamed** frame, i.e. the decimated size when the subscription uses `subsample > 1` (§4.7) |
 | 28 | `height` | `uint32` | Pixels — likewise |
-| 32 | `pixel_format` | `uint32` | V4L2 FourCC (currently `V4L2_PIX_FMT_YUV420` = `'YU12'` = `0x32315559`) |
+| 32 | `pixel_format` | `uint32` | FourCC: `V4L2_PIX_FMT_YUV420` = `'YU12'` = `0x32315559` for live frames; `'SF32'` = `0x32334653` for a stacked image (`frame_kind = 1`, §5.5) |
 | 36 | `frames_saved` | `uint32` | Saver's count for this camera at send time |
 | 40 | `timestamp_us` | `uint64` | Monotonic hardware capture timestamp in µs (from libcamera `FrameMetadata::timestamp / 1000`). Diff consecutive values for the same `camera_id` to compute actual inter-frame interval (real fps). `0` if unavailable. |
 | 48 | `frame_duration_us` | `uint32` | Actual frame duration in µs as reported by the IPA/ISP in libcamera `FrameDuration` metadata. Reflects real per-frame cadence including any multi-camera ISP scheduling overhead. `0` if the metadata was not present. |
@@ -619,7 +697,8 @@ A chunked transfer that stalls longer than `CHUNK_TIMEOUT` (5 s) is cleaned up s
 | 60 | `lens_position` | `float` | Focus distance the libcamera IPA actually applied to this frame, in dioptres (reciprocal metres; `0.0` = infinity). Reported per-frame in manual, auto and continuous AF — the EXIF-style focus record. **`NaN`** when libcamera reported no `LensPosition` for the frame (e.g. a sensor module with no focuser). Check with `isnan` before using; do not treat `0.0` as "unavailable". |
 | 64 | `af_state` | `uint8` | libcamera `AfState` for this frame: `0`=Idle, `1`=Scanning, `2`=Focused, `3`=Failed. **`0xFF`** when no `AfState` was reported. Use to tell whether continuous/auto AF had settled (`2`) when `lens_position` was sampled. |
 | 65 | `detection_kind` | `uint8` | Classifies the detection block that follows this header (and how to parse each of its `num_corner_sets` records): `0`=none (no detector ran; no block), `1`=checkerboard (records are `CornerSetHeader`, §5.4.1), `2`=aruco (records are `MarkerSetHeader`, §5.4.2). Was part of `reserved2` (always `0`) before v6, so `0` still means "no detection block". |
-| 66 | `reserved2` | `uint8[2]` | Padding; always `0`. |
+| 66 | `frame_kind` | `uint8` | What the payload is: `0` = a live camera frame, `1` = a stacked raw image (process mode `stack`, §4.19). For a stacked image `frame_id` is the `stack_id`, `timestamp_us` / `frame_duration_us` / focus fields are those of the last summed frame, and `bytes_per_line` is `width × 4`. Was the first `reserved2` byte (always `0`), so pre-stacking clients read every frame as live. |
+| 67 | `reserved2` | `uint8` | Padding; always `0`. |
 | 68 | `focus_fom` | `int32` | libcamera `FocusFoM` for this frame: the IPA's contrast figure of merit averaged over a fixed central block of the image (§4.18). Larger is sharper. It is a relative score with no unit or fixed scale — compare it between frames of the **same camera** looking at the **same scene** (e.g. across a focus sweep), not across cameras or scenes. Independent of the AF mode. **`-1`** when libcamera reported no `FocusFoM` for the frame. Header-only and subsampled frames carry it too. |
 
 Clients should key reassembly on `frame_uuid` (unique per frame) rather than `frame_id` (per-camera, resets on `reset_frame_counts`).
@@ -630,6 +709,8 @@ Immediately follows `ChunkHeader` in the same WebSocket message. Carries the res
 
 - `detection_kind = 1` (checkerboard, §5.4.1) — records are `CornerSetHeader`.
 - `detection_kind = 2` (aruco, §5.4.2) — records are `MarkerSetHeader`.
+
+On a **stacked image** (`frame_kind = 1`) the block holds the detection made on that stack, and its coordinates are in the stacked image's own pixels, like any streamed frame's — map to full-resolution sensor pixels with `2b + 0.5` (the `stack_result` JSON already gives them that way). `flags` bit 0 is still set.
 
 In every case the block is `num_corner_sets` records packed back-to-back, each record being a fixed header followed by `num_corners × { float x, float y }` corner coordinates. Corner coordinates are little-endian IEEE-754, `8` bytes each, in the **streamed frame's Y-plane pixel space** regardless of the saver's `*_full_res_detection` setting or 2x2 quadrant split — clients can overlay them directly on the streamed frame. For a full-resolution stream that is full-frame pixel space; on a subsampled stream (§4.7) the coordinates are divided by the factor along with the frame.
 
@@ -691,6 +772,7 @@ The 4 corners follow the header in the dictionary's canonical order (clockwise f
 Concatenating the payloads in `chunk_index` order reproduces the raw frame buffer. Format layout:
 
 - **YUV420 (I420)** planar: `Y` plane (`bytes_per_line × height`), then `U` (`width/2 × height/2`), then `V` (`width/2 × height/2`). Total ≈ `width × height × 3 / 2`.
+- **`'SF32'` (stacked image, `frame_kind = 1`)**: `width × height` little-endian float32, row-major, `bytes_per_line = width × 4` (12.3 MB at 2028×1520). One sample per 2×2 Bayer quad of the sensor: the mean of the quad's four samples over the stacked frames, minus the black level, in the sensor's left-justified 16-bit DN — linear light, black = 0, full scale = `(2^bit_depth − 1) · 2^(16 − bit_depth) − black_level`. Stack pixel `(u, v)` is centred on full-resolution pixel `(2u + 0.5, 2v + 0.5)`. Sent whole regardless of the subscription's `subsample`.
 
 ### 5.6 Multi-camera multiplexing
 
@@ -701,6 +783,8 @@ With multiple cameras streaming, the server uses round-robin scheduling. One fra
 The server monitors `ws.getBufferedAmount()` with hysteresis (enter at 512 KiB, exit at 128 KiB) and throttles the per-chunk send rate via an adaptive controller. Under sustained pressure the server drops older frames rather than queueing — only the latest frame per camera is retained for transmission. `frame_id` therefore may jump; gaps are expected and not an error.
 
 Header-only mode bypasses the payload path entirely and is unaffected by data backpressure.
+
+**`stack` mode.** The stream is fed only by completed stacks: each subscribed camera gets its newest stacked image once, latest-wins like any frame (a client that falls more than a whole stack behind skips to the newest). In header-only mode only the header and its detection block go out, i.e. the corners without the 12 MB of pixels.
 
 Backpressure is tracked **per connection**: the commander's and the observer's sockets have separate buffers, separate hysteresis and separate rate controllers, so a slow observer link never throttles the commander.
 
@@ -777,6 +861,9 @@ server   → {"type":"error","code":"forbidden","message":"Command 'configure' i
 | Invalid `process_mode` value | `error` |
 | `trigger_capture` outside the `trigger` process mode | `error` (`"trigger_capture requires the 'trigger' process mode"`), nothing saved |
 | `trigger_capture` while one is already pending | `error` (`"A trigger capture is already pending"`) |
+| `stack_capture` without `configure` `raw: true` | `error`, nothing armed |
+| `stack_capture` while one is already pending | `error` (`"A stack capture is already pending"`) |
+| A stack's pinned exposure/gain never shows in the metadata | that camera's `stack_result` entry carries `error` (§4.19) |
 | Binary frame sent by client | `error` (`"Only text messages are accepted for commands"`) |
 | Observer sends a commander-only command (§1.1) | `error` with `code: "forbidden"`, state unchanged |
 | Invalid `start_stream` option (`subsample` not 1/2/4/8, `max_fps` < 0) | `error` |
@@ -858,4 +945,5 @@ The binary protocol version is carried in `ChunkStartMarker.version` (currently 
 | `6` (control-protocol only) | Resource guards added. `set_process_mode` gains `backlog_max_bytes`, `disk_write_bytes_per_sec` and `allow_overcommit` (§4.5.1); `start_cameras` may now refuse an infeasible mode (§4.6); the `stop_cameras` status gains `frames_dropped_backlog` (§4.9); and a new **unsolicited** `error` with `code: "capture_timeout"` reports a camera that has stopped delivering frames (§7.1) — the first server-initiated message that is not a reply or a binary frame. Text-only; `version` stays `6`. |
 | `6` (control-protocol only) | **Client roles.** The single client slot became one **commander** (read-write, path `/`) plus one **observer** (read-only, path `/observer`) slot (§1.1); observer write commands fail with `code: "forbidden"`. `state` replies gained `cause`, `role`, `commander_connected`, `observer_connected`, and `state` is now also **pushed** on every transition and on the other role's connect/disconnect (§3.1). `start_stream` gained per-camera `max_fps` and `subsample` options (§4.7) and, for observers, works in any state with a subscription that persists across `stop_cameras`/`start_cameras`; `set_header_only` and backpressure became per connection. Commander-over-observer streaming priority defined (§5.8). On a subsampled stream the header geometry and detection coordinates describe the decimated frame. Binary layout unchanged, so `version` stays `6`. |
 | `6` (control-protocol only) | Command `set_save_mode` renamed to `set_process_mode`; status text is now `"Process mode configured: <mode>"` and the invalid-mode error is `Invalid process_mode value` (§4.5). New optional `save_frames` param (default `true`): setting it `false` runs the detector and streams its side-products while writing no frames to disk. `mode` values, the binary `ChunkHeader` (incl. its `frames_saved` field), and the detection block format are all unchanged, so `version` stays `6`. |
+| `7` (stacking) | **Raw frame stacking.** `configure` gains `raw` and its reply a `raw` object (§4.3); new `stack_capture` command and asynchronous `stack_result` (§4.19); new `stack` process mode and its `stack_detect` param (§4.5), in which streams carry stacked images; `ChunkHeader` byte 66 (formerly `reserved2[0]`, always `0`) became `frame_kind` (`1` = stacked image) and a stacked image uses pixel format `'SF32'` (§5.5). Layout and size unchanged and a client sees `frame_kind = 1` only in the `stack` mode it asked for, so `version` stays `7`. |
 | `7` | `ChunkHeader` extended to 72 bytes: added `focus_fom` (int32, offset 68), the per-frame libcamera `FocusFoM` (`-1` if unavailable). New command `get_focus_fom_region` / `focus_fom_region` response (§4.18), observer-allowed, reports the fixed image region the IPA averages into it; the `configure` status carries the same object as `focus_fom_region` (§4.3). |

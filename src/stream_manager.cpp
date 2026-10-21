@@ -344,15 +344,21 @@ void StreamManager::streamingLoop() {
       // corners); otherwise we pull the latest captured frame from the camera.
       // Either way the frame is shared, not copied, and the session's own
       // cursor decides what counts as new.
+      // In STACK mode the only streamable frames are stacked images, each
+      // carrying the detection made on it.
       const ProcessMode mode = frame_processor ? frame_processor->getMode() : ProcessMode::NONE;
       const bool detector_gated = isDetectorMode(mode);
-      const uint8_t detection_kind =
+      uint8_t detection_kind =
           static_cast<uint8_t>(detectionKindForMode(mode));
 
       std::shared_ptr<const FrameData> frame;
       std::vector<CornerSet> corner_sets;
       bool got_frame = false;
-      if (detector_gated) {
+      if (mode == ProcessMode::STACK) {
+        got_frame = stacker_ && stacker_->getStackedFrameForStreaming(
+                                    camera_id, cs.stack_cursor, frame,
+                                    corner_sets, detection_kind);
+      } else if (detector_gated) {
         got_frame = frame_processor->getDetectedFrameForStreaming(
             camera_id, cs.detected_cursor, frame, corner_sets);
       } else {
@@ -368,6 +374,7 @@ void StreamManager::streamingLoop() {
         if (it != streaming_cameras.end()) {
           it->second.camera_cursor = cs.camera_cursor;
           it->second.detected_cursor = cs.detected_cursor;
+          it->second.stack_cursor = cs.stack_cursor;
         }
       }
 
@@ -377,7 +384,10 @@ void StreamManager::streamingLoop() {
 
       // Subsampled streams get their own decimated frame; the header and any
       // detection block then describe that frame's pixel space.
-      const uint32_t factor = cs.options.subsample;
+      // A stacked image is float32, which the YUV420 decimation cannot read;
+      // it always goes out whole.
+      const uint32_t factor =
+          frame->frame_kind == FrameKind::STACK ? 1 : cs.options.subsample;
       if (factor > 1) {
         if (header_only_mode) {
           // Geometry only — no point decimating pixels nobody will receive.
@@ -731,8 +741,8 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.lens_position = frame.lens_position;
   header.af_state = frame.af_state;
   header.detection_kind = transfer.detection_kind;
-  header.reserved2[0] = 0;
-  header.reserved2[1] = 0;
+  header.frame_kind = static_cast<uint8_t>(frame.frame_kind);
+  header.reserved2 = 0;
   header.focus_fom = frame.focus_fom;
 
   const uint8_t* header_bytes = reinterpret_cast<const uint8_t*>(&header);

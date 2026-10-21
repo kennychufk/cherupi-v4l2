@@ -1,3 +1,5 @@
+#include <malloc.h>
+
 #include <csignal>
 #include <cstring>
 #include <iostream>
@@ -42,6 +44,15 @@ int main(int argc, char* argv[]) {
       return 1;
     }
   }
+
+  // Serve every allocation of 1 MiB or more with its own mmap, and give it
+  // back to the kernel when freed. glibc's default threshold adapts upward
+  // after the first large free, after which multi-MB frame buffers (YUV
+  // frames, stacked images) come from per-thread heaps that rarely shrink:
+  // measured on a 1 GB Pi 5, the server sat at 516 MB resident while idle,
+  // with half a gigabyte in swap — the swap thrash that ends in libcamera's
+  // frontend watchdog (see CLAUDE.md, Resource Guards).
+  mallopt(M_MMAP_THRESHOLD, 1 << 20);
 
   // Register signal handlers
   signal(SIGINT, signalHandler);

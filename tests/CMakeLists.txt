@@ -15,6 +15,8 @@ set(UNIT_SOURCES
     unit/focus_region_test.cpp
     unit/checkerboard_detector_test.cpp
     unit/aruco_detector_test.cpp
+    unit/raw_stack_test.cpp
+    unit/raw_stacker_test.cpp
 )
 
 # Production sources included in the unit binary. StreamManager currently
@@ -37,6 +39,8 @@ add_executable(unit_tests
     ../src/command_parser.cpp
     ../src/checkerboard_detector.cpp
     ../src/aruco_detector.cpp
+    ../src/raw_stack.cpp
+    ../src/raw_stacker.cpp
     ../src/camera.cpp
     ../src/camera_manager.cpp
 )

@@ -9,6 +9,7 @@
 
 #include "camera_manager.hpp"
 #include "frame_processor.hpp"
+#include "raw_stacker.hpp"
 #include "stream_manager.hpp"
 #include "types.hpp"
 #include "uws_frame_sink.hpp"
@@ -44,6 +45,9 @@ class WebSocketServer {
 
   std::unique_ptr<CameraManager> camera_manager;
   std::unique_ptr<FrameProcessor> frame_processor;
+  // Declared after camera_manager (its callbacks reach the cameras) and
+  // before the sessions (their streamers read its stacked images).
+  std::unique_ptr<RawStacker> raw_stacker;
   ClientSession commander_;
   ClientSession observer_;
 
@@ -73,6 +77,9 @@ class WebSocketServer {
   void handleUnconfigure(Socket* ws);
   void handleSetProcessMode(Socket* ws, const nlohmann::json& params);
   void handleTriggerCapture(Socket* ws, const nlohmann::json& msg);
+  void handleStackCapture(Socket* ws, const nlohmann::json& msg);
+  // Whether the configured cameras capture the raw stream stacking needs.
+  bool rawConfigured();
   void handleStartCameras(Socket* ws);
   void handleStartStream(Socket* ws, const nlohmann::json& msg);
   void handleStopStream(Socket* ws, const nlohmann::json& msg);

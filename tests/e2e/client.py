@@ -65,9 +65,9 @@ START_STRUCT = struct.Struct("<II")  # magic, version
 # frame_uuid, frame_id, camera_id, total_chunks, total_size, bytes_per_line,
 # width, height, pixel_format, frames_saved, timestamp_us (u64),
 # frame_duration_us, corner_block_size, num_corner_sets (u16), reserved (u16),
-# lens_position (f32), af_state (u8), detection_kind (u8), reserved2 (u8[2]),
-# focus_fom (i32)
-HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBB2si")
+# lens_position (f32), af_state (u8), detection_kind (u8), frame_kind (u8),
+# reserved2 (u8), focus_fom (i32)
+HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBBBBi")
 START_PLUS_HEADER_SIZE = START_STRUCT.size + HEADER_STRUCT.size  # 80
 
 # Detection block records (§5.4)
@@ -87,6 +87,12 @@ MAX_CHUNK_PAYLOAD = 32 * 1024
 
 # FourCC for YUV420 (V4L2_PIX_FMT_YUV420 = 'YU12')
 FOURCC_YU12 = 0x32315559
+# FourCC of a stacked raw image ('SF32': float32, half resolution, §5.5)
+FOURCC_SF32 = 0x32334653
+
+# ChunkHeader.frame_kind
+FRAME_KIND_LIVE = 0
+FRAME_KIND_STACK = 1
 
 ROLE_COMMANDER = "commander"
 ROLE_OBSERVER = "observer"
@@ -142,6 +148,7 @@ class Frame:
     af_state: int = 0xFF
     detection_kind: int = DETECTION_NONE
     focus_fom: int = -1  # libcamera FocusFoM; -1 if unavailable
+    frame_kind: int = FRAME_KIND_LIVE
     corner_sets: List[CornerSet] = field(default_factory=list)
 
     @property
@@ -328,6 +335,7 @@ class CherupiClient:
             lens_position,
             af_state,
             detection_kind,
+            frame_kind,
             _reserved2,
             focus_fom,
         ) = HEADER_STRUCT.unpack_from(data, START_STRUCT.size)
@@ -360,6 +368,7 @@ class CherupiClient:
             af_state=af_state,
             detection_kind=detection_kind,
             focus_fom=focus_fom,
+            frame_kind=frame_kind,
             corner_sets=corner_sets,
         )
 
@@ -519,6 +528,15 @@ class CherupiClient:
         if skip_frames is not None:
             body["skip_frames"] = skip_frames
         return self.command(body, expect=("trigger_result",), timeout=timeout)
+
+    def stack_capture(self, timeout: float = 30.0, **fields: Any) -> Dict[str, Any]:
+        """Run a `stack_capture` and wait for its asynchronous `stack_result`.
+
+        `fields` are the request's (camera_id, num_frames, exposure_time, ...).
+        The timeout must cover settling plus num_frames frame intervals.
+        """
+        body: Dict[str, Any] = {"cmd": "stack_capture", **fields}
+        return self.command(body, expect=("stack_result",), timeout=timeout)
 
     def start_cameras(self) -> Dict[str, Any]:
         return self.command({"cmd": "start_cameras"})

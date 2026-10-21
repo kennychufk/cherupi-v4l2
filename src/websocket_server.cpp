@@ -30,6 +30,25 @@ WebSocketServer::WebSocketServer() {
   // while the commander's connection is clear (see stream_priority.hpp).
   observer_.stream->setYieldTo(commander_.stream.get());
 
+  // Stacking pins a camera's exposure/gain through the camera itself; the
+  // cameras are discovered later, so look them up per call.
+  raw_stacker = std::make_unique<RawStacker>(
+      [this](uint32_t id, std::optional<int32_t> exposure,
+             std::optional<float> gain) {
+        if (Camera* camera = camera_manager->getCamera(id))
+          camera->setCaptureOverride(exposure, gain);
+      },
+      [this](uint32_t id) {
+        if (Camera* camera = camera_manager->getCamera(id))
+          camera->clearCaptureOverride();
+      });
+  raw_stacker->setPublishedCallback([this]() {
+    if (commander_.stream) commander_.stream->notifyFrameAvailable();
+    if (observer_.stream) observer_.stream->notifyFrameAvailable();
+  });
+  commander_.stream->setStackSource(raw_stacker.get());
+  observer_.stream->setStackSource(raw_stacker.get());
+
   // Set up the callback for frame notifications: both sessions consume the
   // same publication slots, each with its own cursor.
   camera_manager->setStreamManagerNotify([this]() {
@@ -41,6 +60,10 @@ WebSocketServer::WebSocketServer() {
 WebSocketServer::~WebSocketServer() {
   LOG_INFO("WebSocketServer", "Shutting down server");
   stop();
+  // The cameras' completion callbacks reach into the stacker and the frame
+  // processor, which are destroyed before the camera manager: stop capture
+  // first so none can fire into a destroyed object.
+  if (camera_manager && camera_manager->areAnyRunning()) camera_manager->stopAll();
 }
 
 std::shared_ptr<UwsFrameSink> WebSocketServer::sinkOf(ClientSession& s) {
@@ -165,6 +188,9 @@ void WebSocketServer::run() {
                       break;
                     case command_parser::CommandKind::TriggerCapture:
                       handleTriggerCapture(ws, cmd.message);
+                      break;
+                    case command_parser::CommandKind::StackCapture:
+                      handleStackCapture(ws, cmd.message);
                       break;
                     case command_parser::CommandKind::StartCameras:
                       handleStartCameras(ws);
@@ -412,6 +438,18 @@ void WebSocketServer::handleConfigure(Socket* ws, const json& params) {
     response["message"] = "Configured: " + std::to_string(config.width) + "x" +
                           std::to_string(config.height) + " YUV420";
     response["focus_fom_region"] = focusFomRegionJson();
+    // The raw stream stack_capture reads, when asked for; null otherwise.
+    response["raw"] = nullptr;
+    if (Camera* camera = camera_manager->getCamera(0)) {
+      const Camera::RawStreamInfo& raw = camera->getRawStreamInfo();
+      if (raw.enabled) {
+        response["raw"] = {{"format", raw.format},
+                           {"width", raw.width},
+                           {"height", raw.height},
+                           {"stride", raw.stride},
+                           {"bit_depth", raw.bit_depth}};
+      }
+    }
     ws->send(response.dump(), uWS::OpCode::TEXT);
     broadcastState("configure");
   } else {
@@ -535,10 +573,110 @@ void WebSocketServer::handleTriggerCapture(Socket* ws, const json& msg) {
                std::to_string(camera_ids.size()) + " camera(s)");
 }
 
+bool WebSocketServer::rawConfigured() {
+  Camera* camera = camera_manager->getCamera(0);
+  return camera && camera->getRawStreamInfo().enabled;
+}
+
+void WebSocketServer::handleStackCapture(Socket* ws, const json& msg) {
+  if (!command_parser::isCommandAllowed(
+          command_parser::CommandKind::StackCapture, system_state)) {
+    sendError(ws, "stack_capture requires RUNNING state");
+    return;
+  }
+  if (!rawConfigured()) {
+    sendError(ws, "stack_capture needs the raw stream: configure with "
+                  "\"raw\": true");
+    return;
+  }
+  auto parsed = command_parser::buildStackRequest(msg);
+  if (std::holds_alternative<std::string>(parsed)) {
+    sendError(ws, std::get<std::string>(parsed));
+    return;
+  }
+  const StackRequest& req = std::get<StackRequest>(parsed);
+
+  StackPlan plan;
+  if (req.camera_id) {
+    Camera* camera = camera_manager->getCamera(*req.camera_id);
+    if (!camera || camera->getState() != CameraState::RUNNING) {
+      sendError(ws, "Camera " + std::to_string(*req.camera_id) + " is not running");
+      return;
+    }
+    plan.camera_ids.push_back(*req.camera_id);
+  } else {
+    for (Camera* camera : camera_manager->getAllCameras())
+      if (camera->getState() == CameraState::RUNNING)
+        plan.camera_ids.push_back(camera->getId());
+    if (plan.camera_ids.empty()) {
+      sendError(ws, "No running cameras to stack");
+      return;
+    }
+  }
+
+  // An exposure longer than a locked frame duration would be clamped and
+  // never settle; say so now rather than after 30 frames.
+  if (req.exposure_time_us) {
+    const int64_t locked = camera_manager->getCurrentFrameDuration();
+    if (locked > 0 && *req.exposure_time_us > locked) {
+      sendError(ws, "exposure_time " + std::to_string(*req.exposure_time_us) +
+                        " us exceeds the locked frame duration of " +
+                        std::to_string(locked) +
+                        " us; unlock it with set_frame_duration 0 first");
+      return;
+    }
+  }
+
+  const ProcessConfig& pc = frame_processor->getConfig();
+  plan.num_frames = req.num_frames;
+  plan.exposure_time_us = req.exposure_time_us;
+  plan.analogue_gain = req.analogue_gain;
+  plan.skip_frames = req.skip_frames;
+  plan.detect.kind = req.detect ? *req.detect
+                     : isDetectorMode(pc.mode)   ? pc.mode
+                     : pc.mode == ProcessMode::STACK ? pc.stack_detect
+                                                     : ProcessMode::NONE;
+  plan.detect.rows = pc.checkerboard_rows;
+  plan.detect.cols = pc.checkerboard_cols;
+  // The window is asked for in full-res pixels; the stack is 2x2-binned.
+  plan.detect.subpix_half_window = req.subpix_window / 2;
+  const bool aruco = plan.detect.kind == ProcessMode::ARUCO ||
+                     plan.detect.kind == ProcessMode::ARUCO2X2;
+  plan.detect.num_threads = aruco ? pc.aruco_num_threads : pc.checkerboard_num_threads;
+  plan.detect.aruco_corner_refine = pc.aruco_corner_refine;
+  plan.detect.aruco_edge_refine = pc.aruco_edge_refine;
+  plan.save_image = req.save_image;
+  plan.output_dir = req.output_dir.value_or(pc.output_dir);
+  plan.publish = frame_processor->getMode() == ProcessMode::STACK;
+
+  // The result is produced on the stacker's worker thread; like the trigger
+  // ack it goes out through the commander's sink, which marshals onto the
+  // loop and no-ops if the client has gone.
+  std::shared_ptr<UwsFrameSink> sink = sinkOf(sessionFor(ws));
+  const size_t num_cameras = plan.camera_ids.size();
+  auto stack_id = raw_stacker->arm(std::move(plan), [sink](StackResult result) {
+    if (sink) sink->sendText(stackResultJson(result).dump());
+  });
+  if (!stack_id) {
+    sendError(ws, "A stack capture is already pending");
+    return;
+  }
+  LOG_INFO("WebSocketServer",
+           "Stack capture " + std::to_string(*stack_id) + " armed for " +
+               std::to_string(num_cameras) + " camera(s), " +
+               std::to_string(req.num_frames) + " frames");
+}
+
 void WebSocketServer::handleStartCameras(Socket* ws) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::StartCameras, system_state)) {
     sendError(ws, "Cameras must be configured before starting");
+    return;
+  }
+
+  if (frame_processor->getConfig().mode == ProcessMode::STACK && !rawConfigured()) {
+    sendError(ws, "Process mode 'stack' needs the raw stream: configure with "
+                  "\"raw\": true");
     return;
   }
 
@@ -563,6 +701,16 @@ void WebSocketServer::handleStartCameras(Socket* ws) {
     LOG_INFO("WebSocketServer", "Frame processing disabled, no callback set");
     camera_manager->setFrameCallback(nullptr);
   }
+
+  // Raw frames feed the stacker, which ignores them until a stack is armed.
+  if (rawConfigured()) {
+    camera_manager->setRawFrameCallback(
+        [this](const RawFrame& frame) { raw_stacker->onRawFrame(frame); });
+  } else {
+    camera_manager->setRawFrameCallback(nullptr);
+  }
+  raw_stacker->reset();
+  camera_manager->setLiveFrames(frame_processor->getMode() != ProcessMode::STACK);
 
   // Start all cameras
   if (camera_manager->startAll()) {
@@ -661,6 +809,10 @@ void WebSocketServer::handleStopCameras(Socket* ws) {
   // deliberately left alone: they are persistent, and its streamer simply
   // finds no new frames until the next start_cameras.
   commander_.stream->stopAllStreaming();
+
+  // A stack still capturing can never finish now: hand its cameras back
+  // their preview settings and tell the client it was cancelled.
+  raw_stacker->cancel();
 
   // Stop all cameras
   camera_manager->stopAll();

@@ -488,4 +488,77 @@ TEST(CommandParserTest, BuildStreamRequestRejectsBadInput) {
   EXPECT_FALSE(bad(R"({"cmd":"start_stream","camera_id":0,"max_fps":0,"subsample":8})"));
 }
 
+TEST(CommandParserTest, StackCaptureIsCommanderOnlyAndNeedsRunning) {
+  auto r = command_parser::parseCommand(R"({"cmd":"stack_capture"})");
+  ASSERT_TRUE(std::holds_alternative<ParsedCommand>(r));
+  EXPECT_EQ(std::get<ParsedCommand>(r).kind, CommandKind::StackCapture);
+  EXPECT_TRUE(command_parser::isCommandPermitted(CommandKind::StackCapture, ClientRole::COMMANDER));
+  EXPECT_FALSE(command_parser::isCommandPermitted(CommandKind::StackCapture, ClientRole::OBSERVER));
+  EXPECT_TRUE(command_parser::isCommandAllowed(CommandKind::StackCapture, CameraState::RUNNING));
+  EXPECT_FALSE(command_parser::isCommandAllowed(CommandKind::StackCapture, CameraState::CONFIGURED));
+}
+
+TEST(CommandParserTest, BuildStackRequestDefaults) {
+  auto r = command_parser::buildStackRequest(nlohmann::json::parse(R"({"cmd":"stack_capture"})"));
+  ASSERT_TRUE(std::holds_alternative<StackRequest>(r));
+  const auto& req = std::get<StackRequest>(r);
+  EXPECT_FALSE(req.camera_id);
+  EXPECT_EQ(req.num_frames, 16u);
+  EXPECT_FALSE(req.exposure_time_us);
+  EXPECT_FALSE(req.analogue_gain);  // nothing pinned
+  EXPECT_FALSE(req.detect);
+  EXPECT_EQ(req.subpix_window, 40);
+  EXPECT_FALSE(req.save_image);
+}
+
+TEST(CommandParserTest, BuildStackRequestParsesFieldsAndDefaultsGainToOne) {
+  auto r = command_parser::buildStackRequest(nlohmann::json::parse(
+      R"({"cmd":"stack_capture","camera_id":1,"num_frames":32,
+          "exposure_time":50000,"skip_frames":2,"detect":"aruco2x2",
+          "subpix_window":30,"save_image":true,"output_dir":"stacks"})"));
+  ASSERT_TRUE(std::holds_alternative<StackRequest>(r));
+  const auto& req = std::get<StackRequest>(r);
+  EXPECT_EQ(req.camera_id, 1u);
+  EXPECT_EQ(req.num_frames, 32u);
+  EXPECT_EQ(req.exposure_time_us, 50000);
+  ASSERT_TRUE(req.analogue_gain);
+  EXPECT_FLOAT_EQ(*req.analogue_gain, 1.0f);
+  EXPECT_EQ(req.skip_frames, 2);
+  EXPECT_EQ(req.detect, ProcessMode::ARUCO2X2);
+  EXPECT_EQ(req.subpix_window, 30);
+  EXPECT_TRUE(req.save_image);
+  EXPECT_EQ(req.output_dir, "stacks");
+
+  auto g = command_parser::buildStackRequest(nlohmann::json::parse(
+      R"({"exposure_time":50000,"analogue_gain":2.5,"detect":"none"})"));
+  ASSERT_TRUE(std::holds_alternative<StackRequest>(g));
+  EXPECT_FLOAT_EQ(*std::get<StackRequest>(g).analogue_gain, 2.5f);
+  EXPECT_EQ(std::get<StackRequest>(g).detect, ProcessMode::NONE);
+}
+
+TEST(CommandParserTest, BuildStackRequestRejectsBadInput) {
+  for (const char* bad : {
+           R"({"num_frames":0})", R"({"num_frames":1025})", R"({"num_frames":2.5})",
+           R"({"exposure_time":0})", R"({"analogue_gain":0.5})",
+           R"({"skip_frames":-1})", R"({"detect":"trigger"})", R"({"detect":3})",
+           R"({"subpix_window":101})", R"({"save_image":"yes"})",
+           R"({"output_dir":""})", R"({"camera_id":-1})"}) {
+    EXPECT_TRUE(std::holds_alternative<std::string>(
+        command_parser::buildStackRequest(nlohmann::json::parse(bad))))
+        << bad;
+  }
+}
+
+TEST(CommandParserTest, RawConfigAndStackModeParse) {
+  EXPECT_TRUE(command_parser::buildCameraConfig(nlohmann::json::parse(R"({"raw":true})")).raw);
+  EXPECT_FALSE(command_parser::buildCameraConfig(nlohmann::json::parse(R"({})")).raw);
+  EXPECT_EQ(command_parser::parseProcessMode("stack"), ProcessMode::STACK);
+  auto cfg = command_parser::buildProcessConfig(nlohmann::json::parse(
+      R"({"mode":"stack","params":{"stack_detect":"checkerboard2x2"}})"));
+  ASSERT_TRUE(cfg);
+  EXPECT_EQ(cfg->stack_detect, ProcessMode::CHECKERBOARD2X2);
+  auto dflt = command_parser::buildProcessConfig(nlohmann::json::parse(R"({"mode":"stack"})"));
+  EXPECT_EQ(dflt->stack_detect, ProcessMode::CHECKERBOARD);
+}
+
 }  // namespace

@@ -37,6 +37,14 @@ int CheckerboardDetector::refine(const uint8_t* image_data, int width,
                                  int height, size_t stride,
                                  std::vector<cv::Point2f>& corners,
                                  int max_half_window) const {
+  cv::Mat img(height, width, CV_8UC1, const_cast<uint8_t*>(image_data),
+              stride > 0 ? stride : static_cast<size_t>(cv::Mat::AUTO_STEP));
+  return refine(img, corners, max_half_window);
+}
+
+int CheckerboardDetector::refine(const cv::Mat& img,
+                                 std::vector<cv::Point2f>& corners,
+                                 int max_half_window) const {
   const int cols = pattern_size.width;
   if (max_half_window <= 0 || corners.empty() || cols <= 0 ||
       corners.size() % static_cast<size_t>(cols) != 0) {
@@ -60,8 +68,6 @@ int CheckerboardDetector::refine(const uint8_t* image_data, int width,
                             static_cast<int>(std::floor(0.4f * min_spacing)));
   if (half < 2) return 0;
 
-  cv::Mat img(height, width, CV_8UC1, const_cast<uint8_t*>(image_data),
-              stride > 0 ? stride : static_cast<size_t>(cv::Mat::AUTO_STEP));
   cv::cornerSubPix(
       img, corners, cv::Size(half, half), cv::Size(-1, -1),
       cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30,

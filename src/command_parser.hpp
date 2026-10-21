@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "raw_stacker.hpp"
 #include "types.hpp"
 
 // Pure parsing/validation for the WebSocket command protocol. No socket I/O;
@@ -32,6 +33,7 @@ enum class CommandKind {
   GetFrameDurationLimits,
   GetLensPositionLimits,
   GetFocusFomRegion,
+  StackCapture,
 };
 
 struct ParsedCommand {
@@ -87,6 +89,19 @@ struct StreamRequest {
 // input. Pure: camera existence is checked by the server.
 std::variant<StreamRequest, std::string> buildStreamRequest(
     const nlohmann::json& message);
+
+// Parse a stack_capture message: `camera_id` (optional), `num_frames`
+// (1..1024, default 16), `exposure_time` (us, 1..10 000 000), `analogue_gain`
+// (>= 1, <= 64; defaults to 1.0 when `exposure_time` is given), `skip_frames`
+// (0..100), `detect` ("none" or a detector mode name), `subpix_window`
+// (full-res px, 0..100; 0 = no refinement), `save_image`, `output_dir`.
+// Returns an error string suitable for the client on invalid input.
+std::variant<StackRequest, std::string> buildStackRequest(
+    const nlohmann::json& message);
+
+// Map a `detect` / `stack_detect` value: "none" or one of the four detector
+// mode names. std::nullopt for anything else.
+std::optional<ProcessMode> parseDetectKind(const std::string& name);
 
 // Convert a successful CameraConfig build. Pure: no camera, no transport.
 // The function does not reject unknown fields — it silently ignores them

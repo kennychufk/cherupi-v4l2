@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <sys/mman.h>
 #include <vector>
@@ -37,6 +38,18 @@ class Camera {
   // while RUNNING the camera's HW max range is applied so any previous lock
   // is released. Thread-safe; same generation-counter pattern.
   void setFrameDuration(int64_t frame_duration_us);
+  // Pin exposure and/or analogue gain for a raw stack, overriding the preview
+  // settings (an absent value is left as the preview has it), and release
+  // the pin again. While pinned, setExposureTime is remembered and applied on
+  // release. Thread-safe; takes effect on the next queued request.
+  void setCaptureOverride(std::optional<int32_t> exposure_time_us,
+                          std::optional<float> analogue_gain);
+  void clearCaptureOverride();
+  // Whether each captured YUV frame is copied out and published for the
+  // streamers and onFrameCaptured (default). Off when nothing consumes live
+  // frames — process mode STACK — which saves a full-frame copy per capture.
+  // Raw frames and the capture watchdog are unaffected.
+  void setLiveFrames(bool enabled) { live_frames_.store(enabled); }
   // Returns the currently-configured frame duration in microseconds, or 0 if
   // unset (no fixed FrameDurationLimits applied).
   int64_t getCurrentFrameDuration() const {
@@ -100,6 +113,21 @@ class Camera {
   bool markCaptureFailed();
 
   std::function<void(const FrameData&)> onFrameCaptured;
+  // Called on the libcamera completion thread with each frame's raw twin,
+  // when configured with CameraConfig::raw. The data is valid only for the
+  // duration of the call.
+  std::function<void(const RawFrame&)> onRawFrame;
+
+  // The raw stream as configured (enabled only with CameraConfig::raw).
+  struct RawStreamInfo {
+    bool enabled = false;
+    std::string format;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t stride = 0;
+    unsigned bit_depth = 0;
+  };
+  const RawStreamInfo& getRawStreamInfo() const { return raw_info_; }
   std::function<void()> onFrameAvailable;
   void setFrameAvailableCallback(std::function<void()> callback);
 
@@ -203,6 +231,23 @@ class Camera {
   std::atomic<uint64_t> frame_duration_generation_{0};
   uint64_t              applied_frame_duration_generation_ = 0;  // libcamera-completion thread only
 
+  // CameraConfig::raw: the raw stream's mappings, indexed like mapped_planes,
+  // and the sensor mode's bit depth.
+  std::vector<std::vector<MappedPlane>> raw_mapped_planes_;
+  unsigned raw_bit_depth_ = 10;
+  RawStreamInfo raw_info_;
+
+  // Stack capture override (setCaptureOverride). 0 = that value not pinned.
+  std::atomic<bool>     live_frames_{true};
+  std::atomic<bool>     override_active_{false};
+  std::atomic<int32_t>  override_exposure_us_{0};
+  std::atomic<float>    override_gain_{0.f};
+  std::atomic<uint64_t> override_generation_{0};
+  uint64_t              applied_override_generation_ = 0;  // libcamera-completion thread only
+
+  // mmap every plane of `buf` read-only, appending the mappings to `regions`.
+  bool mapBuffer(libcamera::FrameBuffer* buf, std::vector<MappedPlane>& planes,
+                 std::vector<MmapRegion>& regions);
   void onRequestComplete(libcamera::Request* request);
   // Shared teardown for stop() and unconfigure(): unmap buffers, free
   // allocator, drop requests, release lcam. Idempotent — safe to call even

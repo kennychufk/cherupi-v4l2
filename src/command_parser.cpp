@@ -56,6 +56,8 @@ std::variant<ParsedCommand, std::string> parseCommand(std::string_view raw) {
     kind = CommandKind::GetLensPositionLimits;
   } else if (cmd == Protocol::CMD_GET_FOCUS_FOM_REGION) {
     kind = CommandKind::GetFocusFomRegion;
+  } else if (cmd == Protocol::CMD_STACK_CAPTURE) {
+    kind = CommandKind::StackCapture;
   } else {
     return "Unknown command: " + cmd;
   }
@@ -72,6 +74,7 @@ std::optional<ProcessMode> parseProcessMode(const std::string& mode) {
   if (mode == "checkerboard2x2") return ProcessMode::CHECKERBOARD2X2;
   if (mode == "aruco") return ProcessMode::ARUCO;
   if (mode == "aruco2x2") return ProcessMode::ARUCO2X2;
+  if (mode == "stack") return ProcessMode::STACK;
   return std::nullopt;
 }
 
@@ -105,6 +108,7 @@ bool isCommandPermitted(CommandKind kind, ClientRole role) {
     case CommandKind::SetLensPosition:
     case CommandKind::SetExposureTime:
     case CommandKind::SetFrameDuration:
+    case CommandKind::StackCapture:
       return false;
   }
   return false;
@@ -131,6 +135,7 @@ bool isCommandAllowed(CommandKind kind, CameraState current, ClientRole role) {
       return role == ClientRole::OBSERVER || current == CameraState::RUNNING;
     case CommandKind::StopCameras:
     case CommandKind::TriggerCapture:
+    case CommandKind::StackCapture:
       return current == CameraState::RUNNING;
     case CommandKind::SetLensPosition:
     case CommandKind::SetExposureTime:
@@ -148,6 +153,8 @@ CameraConfig buildCameraConfig(const json& params) {
   CameraConfig config;
   if (params.contains("width")) config.width = params["width"];
   if (params.contains("height")) config.height = params["height"];
+  if (params.contains("raw") && params["raw"].is_boolean())
+    config.raw = params["raw"];
   return config;
 }
 
@@ -258,9 +265,88 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
     if (params.contains("allow_overcommit") &&
         params["allow_overcommit"].is_boolean())
       config.allow_overcommit = params["allow_overcommit"];
+    if (params.contains("stack_detect") && params["stack_detect"].is_string()) {
+      // An unknown name keeps the default rather than failing the whole
+      // mode, as every other param here does.
+      if (auto kind = parseDetectKind(params["stack_detect"].get<std::string>()))
+        config.stack_detect = *kind;
+    }
   }
 
   return config;
+}
+
+std::optional<ProcessMode> parseDetectKind(const std::string& name) {
+  if (name == "none") return ProcessMode::NONE;
+  auto mode = parseProcessMode(name);
+  if (mode && isDetectorMode(*mode)) return mode;
+  return std::nullopt;
+}
+
+std::variant<StackRequest, std::string> buildStackRequest(const json& message) {
+  StackRequest req;
+  auto integer = [&](const char* key, int64_t lo, int64_t hi,
+                     int64_t* out) -> std::optional<std::string> {
+    if (!message.contains(key)) return std::nullopt;
+    const json& v = message[key];
+    if (!v.is_number_integer() || v.get<int64_t>() < lo || v.get<int64_t>() > hi)
+      return std::string(key) + " must be an integer in [" + std::to_string(lo) +
+             ", " + std::to_string(hi) + "]";
+    *out = v.get<int64_t>();
+    return std::nullopt;
+  };
+  int64_t v = 0;
+  if (message.contains("camera_id")) {
+    if (auto err = integer("camera_id", 0, 255, &v)) return *err;
+    req.camera_id = static_cast<uint32_t>(v);
+  }
+  if (message.contains("num_frames")) {
+    if (auto err = integer("num_frames", 1, raw_stack::Accumulator::kMaxFrames, &v))
+      return *err;
+    req.num_frames = static_cast<uint32_t>(v);
+  }
+  if (message.contains("exposure_time")) {
+    if (auto err = integer("exposure_time", 1, 10000000, &v)) return *err;
+    req.exposure_time_us = static_cast<int32_t>(v);
+  }
+  if (message.contains("analogue_gain")) {
+    const json& g = message["analogue_gain"];
+    if (!g.is_number() || !(g.get<double>() >= 1.0) || g.get<double>() > 64.0)
+      return std::string("analogue_gain must be a number in [1, 64]");
+    req.analogue_gain = static_cast<float>(g.get<double>());
+  } else if (req.exposure_time_us) {
+    req.analogue_gain = 1.0f;
+  }
+  if (message.contains("skip_frames")) {
+    if (auto err = integer("skip_frames", 0, 100, &v)) return *err;
+    req.skip_frames = static_cast<int>(v);
+  }
+  if (message.contains("detect")) {
+    const json& d = message["detect"];
+    std::optional<ProcessMode> kind;
+    if (d.is_string()) kind = parseDetectKind(d.get<std::string>());
+    if (!kind)
+      return std::string(
+          "detect must be one of none, checkerboard, checkerboard2x2, aruco, "
+          "aruco2x2");
+    req.detect = *kind;
+  }
+  if (message.contains("subpix_window")) {
+    if (auto err = integer("subpix_window", 0, 100, &v)) return *err;
+    req.subpix_window = static_cast<int>(v);
+  }
+  if (message.contains("save_image")) {
+    if (!message["save_image"].is_boolean())
+      return std::string("save_image must be a boolean");
+    req.save_image = message["save_image"];
+  }
+  if (message.contains("output_dir")) {
+    if (!message["output_dir"].is_string() ||
+        message["output_dir"].get<std::string>().empty())
+      return std::string("output_dir must be a non-empty string");
+    req.output_dir = message["output_dir"].get<std::string>();
+  }
+  return req;
 }
 
 }  // namespace command_parser

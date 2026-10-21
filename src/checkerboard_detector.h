@@ -40,6 +40,10 @@ class CheckerboardDetector {
   // too small for a window of at least 2 px).
   int refine(const uint8_t* image_data, int width, int height, size_t stride,
              std::vector<cv::Point2f>& corners, int max_half_window) const;
+  // The same on any image cornerSubPix accepts — CV_8UC1, or CV_32FC1 such as
+  // a stacked raw image, whose sub-DN precision 8 bits would quantise away.
+  int refine(const cv::Mat& image, std::vector<cv::Point2f>& corners,
+             int max_half_window) const;
 
  private:
   cv::Size pattern_size;

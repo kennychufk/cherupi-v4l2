@@ -13,25 +13,50 @@ constexpr float kAlongHi = 0.8f;       //    rounded corners
 constexpr float kStepPx = 0.25f;       // spacing of the samples across an edge
 constexpr int kMinEdgePoints = 6;      // crossings a line fit needs
 
-// Bilinear sample of `img` at (x, y), each neighbour decoded through `lut`
-// first so the interpolation happens in linear light. False outside the
-// image (the 2x2 quadrant views end at their sub-rectangle).
-inline bool sampleLinear(const cv::Mat& img, const std::array<float, 256>& lut,
-                         float x, float y, float* out) {
-  if (!(x >= 0.f && y >= 0.f && x < static_cast<float>(img.cols - 1) &&
-        y < static_cast<float>(img.rows - 1)))
-    return false;
-  const int x0 = static_cast<int>(x);
-  const int y0 = static_cast<int>(y);
-  const float fx = x - static_cast<float>(x0);
-  const float fy = y - static_cast<float>(y0);
-  const uint8_t* r0 = img.ptr<uint8_t>(y0);
-  const uint8_t* r1 = img.ptr<uint8_t>(y0 + 1);
-  const float top = lut[r0[x0]] * (1.f - fx) + lut[r0[x0 + 1]] * fx;
-  const float bot = lut[r1[x0]] * (1.f - fx) + lut[r1[x0 + 1]] * fx;
-  *out = top * (1.f - fy) + bot * fy;
-  return true;
-}
+// Bilinear samplers for the edge fit, interpolating in linear light. False
+// outside the image (the 2x2 quadrant views end at their sub-rectangle).
+//
+// LutSampler reads 8-bit encoded luma, decoding each neighbour through `lut`
+// before interpolating.
+struct LutSampler {
+  const cv::Mat& img;  // CV_8UC1
+  const std::array<float, 256>& lut;
+  bool operator()(float x, float y, float* out) const {
+    if (!(x >= 0.f && y >= 0.f && x < static_cast<float>(img.cols - 1) &&
+          y < static_cast<float>(img.rows - 1)))
+      return false;
+    const int x0 = static_cast<int>(x);
+    const int y0 = static_cast<int>(y);
+    const float fx = x - static_cast<float>(x0);
+    const float fy = y - static_cast<float>(y0);
+    const uint8_t* r0 = img.ptr<uint8_t>(y0);
+    const uint8_t* r1 = img.ptr<uint8_t>(y0 + 1);
+    const float top = lut[r0[x0]] * (1.f - fx) + lut[r0[x0 + 1]] * fx;
+    const float bot = lut[r1[x0]] * (1.f - fx) + lut[r1[x0 + 1]] * fx;
+    *out = top * (1.f - fy) + bot * fy;
+    return true;
+  }
+};
+
+// FloatSampler reads an image that is already linear (CV_32FC1).
+struct FloatSampler {
+  const cv::Mat& img;  // CV_32FC1
+  bool operator()(float x, float y, float* out) const {
+    if (!(x >= 0.f && y >= 0.f && x < static_cast<float>(img.cols - 1) &&
+          y < static_cast<float>(img.rows - 1)))
+      return false;
+    const int x0 = static_cast<int>(x);
+    const int y0 = static_cast<int>(y);
+    const float fx = x - static_cast<float>(x0);
+    const float fy = y - static_cast<float>(y0);
+    const float* r0 = img.ptr<float>(y0);
+    const float* r1 = img.ptr<float>(y0 + 1);
+    const float top = r0[x0] * (1.f - fx) + r0[x0 + 1] * fx;
+    const float bot = r1[x0] * (1.f - fx) + r1[x0 + 1] * fx;
+    *out = top * (1.f - fy) + bot * fy;
+    return true;
+  }
+};
 
 struct Line {
   cv::Point2f p;  // a point on the line
@@ -81,8 +106,8 @@ inline float cross2(const cv::Point2f& a, const cv::Point2f& b) {
 // ends and the edge point is the first crossing of their mid level. A line is
 // fit through the crossings, trimmed of the odd stray (a bolt, a shadow,
 // the plate's rim) and refit.
-bool fitEdge(const cv::Mat& img, const std::array<float, 256>& lut,
-             const cv::Point2f& a, const cv::Point2f& b,
+template <class Sampler>
+bool fitEdge(const Sampler& sample, const cv::Point2f& a, const cv::Point2f& b,
              const cv::Point2f& ctr, float reach, Line* out) {
   cv::Point2f e = b - a;
   const float len = std::hypot(e.x, e.y);
@@ -104,7 +129,7 @@ bool fitEdge(const cv::Mat& img, const std::array<float, 256>& lut,
     bool ok = true;
     for (int i = 0; i < n_prof && ok; ++i) {
       const float t = static_cast<float>(i - half) * kStepPx;
-      ok = sampleLinear(img, lut, p.x + n.x * t, p.y + n.y * t, &prof[i]);
+      ok = sample(p.x + n.x * t, p.y + n.y * t, &prof[i]);
     }
     if (!ok) continue;
     float blk = 0.f, wht = 0.f;
@@ -166,11 +191,12 @@ std::array<float, 256> ArucoDetector::makeDecodeLut(float gamma) {
   return lut;
 }
 
-bool ArucoDetector::refineCornersFromEdges(const cv::Mat& gray,
-                                           const std::array<float, 256>& lut,
-                                           std::vector<cv::Point2f>& corners) {
-  if (corners.size() != 4 || gray.type() != CV_8UC1 || gray.empty())
-    return false;
+namespace {
+
+// The edge refinement on one quad, reading the image through `sample`.
+template <class Sampler>
+bool refineQuad(const Sampler& sample, std::vector<cv::Point2f>& corners) {
+  if (corners.size() != 4) return false;
   cv::Point2f ctr(0.f, 0.f);
   float side = 0.f;
   for (int k = 0; k < 4; ++k) {
@@ -187,7 +213,7 @@ bool ArucoDetector::refineCornersFromEdges(const cv::Mat& gray,
   const float reach = std::clamp(side / 12.f, 2.f, 10.f);
   Line lines[4];
   for (int k = 0; k < 4; ++k) {
-    if (!fitEdge(gray, lut, corners[static_cast<size_t>(k)],
+    if (!fitEdge(sample, corners[static_cast<size_t>(k)],
                  corners[static_cast<size_t>((k + 1) % 4)], ctr, reach,
                  &lines[k]))
       return false;
@@ -209,6 +235,21 @@ bool ArucoDetector::refineCornersFromEdges(const cv::Mat& gray,
   }
   corners = std::move(out);
   return true;
+}
+
+}  // namespace
+
+bool ArucoDetector::refineCornersFromEdges(const cv::Mat& gray,
+                                           const std::array<float, 256>& lut,
+                                           std::vector<cv::Point2f>& corners) {
+  if (gray.type() != CV_8UC1 || gray.empty()) return false;
+  return refineQuad(LutSampler{gray, lut}, corners);
+}
+
+bool ArucoDetector::refineCornersFromEdgesLinear(
+    const cv::Mat& linear, std::vector<cv::Point2f>& corners) {
+  if (linear.type() != CV_32FC1 || linear.empty()) return false;
+  return refineQuad(FloatSampler{linear}, corners);
 }
 
 #if CHERUPI_ARUCO_NEW_API

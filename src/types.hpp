@@ -127,7 +127,12 @@ struct ChunkHeader {
   // byte that was `reserved2[0]` (always 0) before v6, so ChunkHeader stays
   // 68 bytes.
   uint8_t detection_kind;
-  uint8_t reserved2[2];
+  // What the payload is (see FrameKind): 0 = a live camera frame, 1 = a
+  // stacked raw image from `stack_capture` (process mode `stack`). Was
+  // `reserved2[0]` (always 0) before stacking existed, so every frame a
+  // client saw before keeps reading as live.
+  uint8_t frame_kind;
+  uint8_t reserved2;
   // v7 addition: libcamera `FocusFoM` metadata for this frame — the Raspberry
   // Pi IPA's contrast figure of merit, averaged over a fixed central block of
   // its focus-statistics grid (see focus_region.hpp; the block is reported by
@@ -144,6 +149,20 @@ enum class DetectionKind : uint8_t {
   CHECKERBOARD = 1,  // records are CornerSetHeader
   ARUCO = 2,         // records are MarkerSetHeader
 };
+
+// What a streamed frame's payload is (its ChunkHeader `frame_kind`).
+enum class FrameKind : uint8_t {
+  LIVE = 0,   // a captured frame as the ISP delivered it (YUV420)
+  STACK = 1,  // a stacked raw image (PIXEL_FORMAT_STACK_F32), see raw_stack.hpp
+};
+
+// FourCC of a stacked raw image: 'S','F','3','2' — single-channel float32,
+// linear light, one sample per 2x2 Bayer quad (the quad's mean, black level
+// subtracted, in the sensor's left-justified 16-bit DN), averaged over the
+// stacked frames. No V4L2 format describes it, hence a private code.
+constexpr uint32_t PIXEL_FORMAT_STACK_F32 =
+    static_cast<uint32_t>('S') | (static_cast<uint32_t>('F') << 8) |
+    (static_cast<uint32_t>('3') << 16) | (static_cast<uint32_t>('2') << 24);
 
 // Per corner-set header inside a checkerboard CornerBlock (v4+;
 // detection_kind == CHECKERBOARD). For `checkerboard` mode the single emitted
@@ -198,6 +217,7 @@ struct FrameData {
   float lens_position = std::numeric_limits<float>::quiet_NaN();  // dioptres
   uint8_t af_state = 0xFF;  // libcamera AfState enum, 0xFF = unavailable
   int32_t focus_fom = -1;   // libcamera FocusFoM (ChunkHeader v7), -1 = unavailable
+  FrameKind frame_kind = FrameKind::LIVE;
 
   // Rule of zero, deliberately. This used to hand-roll a copy constructor and
   // copy assignment that were byte-for-byte what the compiler generates — but
@@ -211,6 +231,34 @@ struct FrameData {
 struct CameraConfig {
   uint32_t width = 2328;
   uint32_t height = 1748;
+  // Also capture the sensor's raw Bayer image, unpacked to 16 bits per sample
+  // (no PISP_COMP1 compression), for `stack_capture`. The YUV420 main stream
+  // is unaffected.
+  bool raw = false;
+};
+
+// One raw Bayer frame as the camera hands it to the stacker: the mapped
+// buffer of the unpacked 16-bit raw stream (each sample the sensor's N-bit
+// value shifted left by 16 - N) plus the per-frame facts a stack checks and
+// reports. Valid only for the duration of the callback.
+struct RawFrame {
+  const uint8_t* data = nullptr;
+  size_t stride = 0;  // bytes per row
+  uint32_t width = 0;
+  uint32_t height = 0;
+  unsigned bit_depth = 0;  // the sensor mode's own bit depth
+  uint32_t camera_id = 0;
+  uint32_t frame_id = 0;   // the frame_id the frame's YUV twin carries
+  uint64_t timestamp_us = 0;
+  uint32_t frame_duration_us = 0;
+  int32_t exposure_time_us = -1;  // -1 = not reported
+  float analogue_gain = std::numeric_limits<float>::quiet_NaN();
+  // Mean of libcamera's SensorBlackLevels (already on the 16-bit scale); NaN
+  // when not reported.
+  float black_level = std::numeric_limits<float>::quiet_NaN();
+  float lens_position = std::numeric_limits<float>::quiet_NaN();
+  uint8_t af_state = 0xFF;
+  int32_t focus_fom = -1;
 };
 
 // Per-frame processing modes. Each mode names the pipeline applied to a
@@ -224,7 +272,10 @@ enum class ProcessMode {
   CHECKERBOARD,
   CHECKERBOARD2X2,
   ARUCO,
-  ARUCO2X2
+  ARUCO2X2,
+  // Streams carry stacked raw images (one per completed stack_capture) and no
+  // live frames; nothing is detected or saved per frame.
+  STACK
 };
 
 // Map a process mode to the DetectionKind its detector emits (NONE for the
@@ -374,6 +425,12 @@ struct ProcessConfig {
   // robotic arm that has only just come to rest). Overridable per request via
   // the trigger_capture command's `skip_frames` param.
   int trigger_skip_frames = 0;
+
+  // STACK mode: what stack_capture detects on each stacked image when the
+  // request names no `detect` (one of the four detector modes, or NONE). The
+  // detector modes default to themselves; STACK has no live detector to
+  // borrow from, so it uses this.
+  ProcessMode stack_detect = ProcessMode::CHECKERBOARD;
 };
 
 // Message types for WebSocket protocol
@@ -397,6 +454,7 @@ constexpr const char* CMD_SET_FRAME_DURATION = "set_frame_duration";
 constexpr const char* CMD_GET_FRAME_DURATION_LIMITS = "get_frame_duration_limits";
 constexpr const char* CMD_GET_LENS_POSITION_LIMITS = "get_lens_position_limits";
 constexpr const char* CMD_GET_FOCUS_FOM_REGION = "get_focus_fom_region";
+constexpr const char* CMD_STACK_CAPTURE = "stack_capture";
 
 // Response types from server
 constexpr const char* TYPE_DISCOVERY = "discovery";
@@ -408,6 +466,7 @@ constexpr const char* TYPE_TRIGGER_RESULT = "trigger_result";
 constexpr const char* TYPE_FRAME_DURATION_LIMITS = "frame_duration_limits";
 constexpr const char* TYPE_LENS_POSITION_LIMITS = "lens_position_limits";
 constexpr const char* TYPE_FOCUS_FOM_REGION = "focus_fom_region";
+constexpr const char* TYPE_STACK_RESULT = "stack_result";
 
 // `code` values carried by `error` responses that clients may want to branch
 // on. Every other error is a plain message with no code.

@@ -145,6 +145,15 @@ void CameraManager::setFrameCallback(
   for (auto& camera : cameras) camera->onFrameCaptured = callback;
 }
 
+void CameraManager::setRawFrameCallback(
+    std::function<void(const RawFrame&)> callback) {
+  for (auto& camera : cameras) camera->onRawFrame = callback;
+}
+
+void CameraManager::setLiveFrames(bool enabled) {
+  for (auto& camera : cameras) camera->setLiveFrames(enabled);
+}
+
 void CameraManager::setStreamManagerNotify(std::function<void()> callback) {
   stream_manager_notify = callback;
   for (auto& camera : cameras) camera->setFrameAvailableCallback(callback);

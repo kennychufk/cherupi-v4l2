@@ -14,6 +14,7 @@
 #include "frame_processor.hpp"
 #include "frame_sink.hpp"
 #include "rate_controller.hpp"
+#include "raw_stacker.hpp"
 #include "stream_priority.hpp"
 #include "types.hpp"
 
@@ -73,6 +74,10 @@ class StreamManager {
   // chunks are handed to the sink only while `higher` is clear. nullptr (the
   // default) never yields. `higher` must outlive this object.
   void setYieldTo(const StreamManager* higher) { yield_to_ = higher; }
+
+  // Where stacked images come from in process mode STACK, which streams
+  // those instead of live frames. Must outlive this object.
+  void setStackSource(RawStacker* stacker) { stacker_ = stacker; }
 
   // Connect/disconnect a FrameSink (owned by the caller). clearSink also
   // drops every subscription: a subscription belongs to a connection.
@@ -135,6 +140,7 @@ class StreamManager {
     // roles consume the shared slots independently.
     uint64_t camera_cursor = 0;
     uint64_t detected_cursor = 0;
+    uint64_t stack_cursor = 0;  // RawStacker::getStackedFrameForStreaming
     // When this camera's last frame went out, for max_fps pacing.
     std::chrono::steady_clock::time_point last_sent{};
   };
@@ -143,6 +149,7 @@ class StreamManager {
   FrameProcessor* frame_processor;
   const ClientRole role_;
   const StreamManager* yield_to_ = nullptr;
+  RawStacker* stacker_ = nullptr;
 
   // Streaming state
   std::map<uint32_t, CameraStream> streaming_cameras;

@@ -1,5 +1,7 @@
 #include "camera.hpp"
 
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <algorithm>
 #include <chrono>
@@ -96,6 +98,7 @@ bool Camera::configure(size_t buffer_count) {
       }
       raw_format = libcamera::PixelFormat::fromString(mode->format);
       bit_depth = mode->bit_depth;
+      raw_bit_depth_ = bit_depth;
       LOG_INFO("Camera", "Camera " + std::to_string(camera_id) +
                              " sensor mode: " + std::to_string(config.width) +
                              "x" + std::to_string(config.height) + " " +
@@ -104,6 +107,12 @@ bool Camera::configure(size_t buffer_count) {
 
     raw_cfg.size = libcamera::Size(config.width, config.height);
     raw_cfg.pixelFormat = raw_format;
+    // For stacking, ask for the raw stream unpacked to 16 bits. With a packed
+    // or default format the Pi 5 frontend writes PISP_COMP1, a lossy
+    // compression whose error would be stacked along with the signal. The
+    // 16-bit format only changes the buffer layout; the sensor mode (and so
+    // the bit depth) is still pinned through sensorConfig below.
+    if (config.raw) raw_cfg.pixelFormat = libcamera::formats::SBGGR16;
     raw_cfg.bufferCount = static_cast<unsigned int>(buffer_count);
 
     cam_config->sensorConfig = libcamera::SensorConfiguration();
@@ -163,41 +172,21 @@ bool Camera::configure(size_t buffer_count) {
   mmap_regions.resize(buffers.size());
   requests.reserve(buffers.size());
 
+  const bool map_raw = config.raw && raw_stream_;
+  if (map_raw) raw_mapped_planes_.resize(buffers.size());
   for (size_t i = 0; i < buffers.size(); ++i) {
     libcamera::FrameBuffer* buf = buffers[i].get();
-    mapped_planes[i].resize(buf->planes().size());
-
-    // Determine total mapped size required for each unique fd.
-    // mmap requires page-aligned offsets, so we map each fd from offset 0
-    // with enough length to cover all planes that share it, then derive
-    // per-plane pointers as base + plane.offset.
-    std::map<int, size_t> fd_total_size;
-    for (const auto& plane : buf->planes()) {
-      int fd = plane.fd.get();
-      size_t needed = static_cast<size_t>(plane.offset) + plane.length;
-      fd_total_size[fd] = std::max(fd_total_size[fd], needed);
+    if (!mapBuffer(buf, mapped_planes[i], mmap_regions[i])) {
+      releaseConfiguredResources();
+      return false;
     }
-
-    std::map<int, void*> fd_base;
-    for (auto& [fd, total] : fd_total_size) {
-      void* base = ::mmap(nullptr, total, PROT_READ, MAP_SHARED, fd, 0);
-      if (base == MAP_FAILED) {
-        LOG_ERROR("Camera",
-                  "mmap failed for camera " + std::to_string(camera_id));
-        // Unmap any already-mapped fds for this buffer.
-        for (auto& [mapped_fd, ptr] : fd_base)
-          ::munmap(ptr, fd_total_size[mapped_fd]);
+    if (map_raw) {
+      const auto& raw_bufs = allocator->buffers(raw_stream_);
+      if (i >= raw_bufs.size() ||
+          !mapBuffer(raw_bufs[i].get(), raw_mapped_planes_[i], mmap_regions[i])) {
         releaseConfiguredResources();
         return false;
       }
-      fd_base[fd] = base;
-      mmap_regions[i].push_back({base, total});
-    }
-
-    for (size_t p = 0; p < buf->planes().size(); ++p) {
-      const libcamera::FrameBuffer::Plane& plane = buf->planes()[p];
-      uint8_t* ptr = static_cast<uint8_t*>(fd_base[plane.fd.get()]) + plane.offset;
-      mapped_planes[i][p] = {ptr, plane.length};
     }
 
     auto req = lcam->createRequest(static_cast<uint64_t>(i));
@@ -226,6 +215,17 @@ bool Camera::configure(size_t buffer_count) {
   }
 
   state = CameraState::CONFIGURED;
+  if (map_raw) {
+    const libcamera::StreamConfiguration& raw_cfg = cam_config->at(1);
+    raw_info_ = {true, raw_cfg.pixelFormat.toString(), raw_cfg.size.width,
+                 raw_cfg.size.height, raw_cfg.stride, raw_bit_depth_};
+    LOG_INFO("Camera", "Camera " + std::to_string(camera_id) + " raw stream: " +
+                           raw_cfg.toString() + " stride=" +
+                           std::to_string(raw_cfg.stride) + " (" +
+                           std::to_string(raw_bit_depth_) + "-bit sensor mode)");
+  } else {
+    raw_info_ = {};
+  }
   LOG_INFO("Camera",
            "Camera " + std::to_string(camera_id) + " configured: format=" +
                stream_cfg.pixelFormat.toString() + " " +
@@ -315,6 +315,11 @@ bool Camera::start() {
   }
   applied_frame_duration_generation_ = frame_duration_generation_.load();
 
+  // A stack never outlives a capture session (stop_cameras cancels it), so
+  // start from the preview settings alone.
+  override_active_.store(false);
+  applied_override_generation_ = override_generation_.load();
+
   // Arm the capture watchdog before the first request goes out, so a camera
   // that never delivers a single frame is still reported as stalled.
   last_frame_wall_us_.store(nowMonotonicUs());
@@ -392,6 +397,41 @@ focus_region::Region Camera::getFocusFomRegion() const {
                                  config.width, config.height);
 }
 
+bool Camera::mapBuffer(libcamera::FrameBuffer* buf,
+                       std::vector<MappedPlane>& planes,
+                       std::vector<MmapRegion>& regions) {
+  planes.resize(buf->planes().size());
+
+  // Determine total mapped size required for each unique fd.
+  // mmap requires page-aligned offsets, so we map each fd from offset 0
+  // with enough length to cover all planes that share it, then derive
+  // per-plane pointers as base + plane.offset.
+  std::map<int, size_t> fd_total_size;
+  for (const auto& plane : buf->planes()) {
+    int fd = plane.fd.get();
+    size_t needed = static_cast<size_t>(plane.offset) + plane.length;
+    fd_total_size[fd] = std::max(fd_total_size[fd], needed);
+  }
+
+  std::map<int, void*> fd_base;
+  for (auto& [fd, total] : fd_total_size) {
+    void* base = ::mmap(nullptr, total, PROT_READ, MAP_SHARED, fd, 0);
+    if (base == MAP_FAILED) {
+      LOG_ERROR("Camera", "mmap failed for camera " + std::to_string(camera_id));
+      return false;  // regions already pushed are unmapped by the caller
+    }
+    fd_base[fd] = base;
+    regions.push_back({base, total});
+  }
+
+  for (size_t p = 0; p < buf->planes().size(); ++p) {
+    const libcamera::FrameBuffer::Plane& plane = buf->planes()[p];
+    uint8_t* ptr = static_cast<uint8_t*>(fd_base[plane.fd.get()]) + plane.offset;
+    planes[p] = {ptr, plane.length};
+  }
+  return true;
+}
+
 void Camera::releaseConfiguredResources() {
   for (auto& regions : mmap_regions) {
     for (auto& r : regions) {
@@ -403,6 +443,7 @@ void Camera::releaseConfiguredResources() {
   }
   mmap_regions.clear();
   mapped_planes.clear();
+  raw_mapped_planes_.clear();
   requests.clear();
   if (allocator && cam_config) {
     allocator->free(cam_config->at(0).stream());
@@ -505,6 +546,55 @@ void Camera::onRequestComplete(libcamera::Request* request) {
                   " ts=" + std::to_string(hw_ts_us) +
                   " µs  IPA_fd=" + std::to_string(actual_fd_us) + " µs");
 
+    // Hand the raw twin of this frame to the stacker, read in place from its
+    // DMA buffer. The buffer goes back to libcamera at requeue, so the
+    // callback must be done with it by the time it returns.
+    if (onRawFrame && !raw_mapped_planes_.empty() && raw_stream_) {
+      libcamera::FrameBuffer* raw_buf = request->findBuffer(raw_stream_);
+      if (raw_buf && slot < raw_mapped_planes_.size() &&
+          !raw_mapped_planes_[slot].empty() &&
+          raw_mapped_planes_[slot][0].data != MAP_FAILED) {
+        const libcamera::StreamConfiguration& raw_cfg = cam_config->at(1);
+        RawFrame raw;
+        raw.data = static_cast<const uint8_t*>(raw_mapped_planes_[slot][0].data);
+        raw.stride = raw_cfg.stride;
+        raw.width = raw_cfg.size.width;
+        raw.height = raw_cfg.size.height;
+        raw.bit_depth = raw_bit_depth_;
+        raw.camera_id = camera_id;
+        raw.frame_id = frame_counter.load();
+        raw.timestamp_us = hw_ts_us;
+        raw.frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
+        const auto& md = request->metadata();
+        if (auto v = md.get(libcamera::controls::ExposureTime)) raw.exposure_time_us = *v;
+        if (auto v = md.get(libcamera::controls::AnalogueGain)) raw.analogue_gain = *v;
+        if (auto v = md.get(libcamera::controls::SensorBlackLevels)) {
+          float sum = 0.f;
+          for (int32_t b : *v) sum += static_cast<float>(b);
+          if (!v->empty()) raw.black_level = sum / static_cast<float>(v->size());
+        }
+        raw.lens_position = lens_position;
+        raw.af_state = af_state;
+        raw.focus_fom = focus_fom;
+        // The buffer may be CPU-cached: bracket the read with the dma-buf
+        // sync calls so the CPU sees what the frontend wrote, not stale
+        // cache lines from an earlier frame in the same buffer.
+        const int fd = raw_buf->planes()[0].fd.get();
+        struct dma_buf_sync sync{DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+        ::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+        onRawFrame(raw);
+        sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+        ::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+      }
+    }
+
+    // Nothing consumes live frames (process mode STACK): skip the copy of a
+    // whole YUV frame per capture, and the memory it would hold.
+    if (!live_frames_.load()) {
+      ++frame_counter;
+      goto requeue;
+    }
+
     FrameData frame;
     frame.camera_id = camera_id;
     frame.frame_id = frame_counter++;
@@ -575,8 +665,37 @@ requeue:
       }
       applied_focus_generation_ = gen;
     }
+    // A stack's pinned exposure/gain, or the return to the preview ones.
+    // Ahead of the preview exposure below so that, on release, the preview
+    // exposure is re-sent in this same request.
+    uint64_t ov_gen = override_generation_.load();
+    if (ov_gen != applied_override_generation_) {
+      libcamera::ControlList& reqctrls = request->controls();
+      if (override_active_.load()) {
+        const int32_t exp = override_exposure_us_.load();
+        if (exp > 0) {
+          reqctrls.set(libcamera::controls::ExposureTimeMode,
+                       static_cast<int32_t>(libcamera::controls::ExposureTimeModeManual));
+          reqctrls.set(libcamera::controls::ExposureTime, exp);
+        }
+        const float gain = override_gain_.load();
+        if (gain > 0.f) {
+          reqctrls.set(libcamera::controls::AnalogueGainMode,
+                       static_cast<int32_t>(libcamera::controls::AnalogueGainModeManual));
+          reqctrls.set(libcamera::controls::AnalogueGain, gain);
+        }
+      } else {
+        // The preview never pins gain, so releasing means handing it back
+        // to the AGC; forcing a mismatch re-sends the preview exposure.
+        reqctrls.set(libcamera::controls::AnalogueGainMode,
+                     static_cast<int32_t>(libcamera::controls::AnalogueGainModeAuto));
+        applied_exposure_generation_ = ~exposure_generation_.load();
+      }
+      applied_override_generation_ = ov_gen;
+    }
     uint64_t exp_gen = exposure_generation_.load();
-    if (exp_gen != applied_exposure_generation_) {
+    // While a stack pins the exposure, a preview change waits for release.
+    if (exp_gen != applied_exposure_generation_ && !override_active_.load()) {
       libcamera::ControlList& reqctrls = request->controls();
       if (ae_auto_.load()) {
         reqctrls.set(libcamera::controls::ExposureTimeMode,
@@ -640,6 +759,19 @@ void Camera::setExposureTime(int32_t exposure_time_us) {
                            std::to_string(exposure_time_us) + " \xc2\xb5s");
   }
   exposure_generation_.fetch_add(1);
+}
+
+void Camera::setCaptureOverride(std::optional<int32_t> exposure_time_us,
+                                std::optional<float> analogue_gain) {
+  override_exposure_us_.store(exposure_time_us.value_or(0));
+  override_gain_.store(analogue_gain.value_or(0.f));
+  override_active_.store(true);
+  override_generation_.fetch_add(1);
+}
+
+void Camera::clearCaptureOverride() {
+  if (!override_active_.exchange(false)) return;
+  override_generation_.fetch_add(1);
 }
 
 void Camera::setFrameDuration(int64_t frame_duration_us) {
@@ -723,6 +855,11 @@ uint64_t Camera::captureStalledForUs() const {
     expected = std::max(expected, static_cast<uint64_t>(requested));
   if (!ae_auto_.load()) {
     const int32_t shutter = exposure_time_us_.load();
+    if (shutter > 0)
+      expected = std::max(expected, static_cast<uint64_t>(shutter));
+  }
+  if (override_active_.load()) {
+    const int32_t shutter = override_exposure_us_.load();
     if (shutter > 0)
       expected = std::max(expected, static_cast<uint64_t>(shutter));
   }

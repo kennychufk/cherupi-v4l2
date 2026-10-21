@@ -40,6 +40,8 @@ All paths below are under `src/`.
 - `frame_processor.*` / `frame_processor_helpers.*` — `FrameProcessor` runs the per-frame process modes NONE / BUFFER / BATCH / CHECKERBOARD / ARUCO plus pure helpers (filename, timestamped dir, Y-plane extraction)
 - `checkerboard_detector.*` — OpenCV `findChessboardCornersSB` detection + `cornerSubPix` refinement on the full-res image
 - `aruco_detector.*` — OpenCV `cv::aruco::detectMarkers` detection (dictionary hard-coded to `DICT_APRILTAG_16h5`)
+- `raw_stack.*` — pure raw-stacking pieces: 2x2-binned accumulation of 16-bit raw frames, the mean image, the exposure/gain settle check, detection on a stacked float image, `.npy` writer
+- `raw_stacker.*` — `RawStacker`, the `stack_capture` orchestrator: per-camera settle → skip → sum state machine fed from the capture thread, a worker thread that detects/saves/reports, and the stacked-image publication slot the `stack` mode streams
 - `capacity.*` — resource arithmetic: bytes/frame, the backlog budget derived from `MemAvailable`, an `O_DIRECT` probe of the output filesystem's sustained write rate, and the feasibility verdicts `start_cameras` gates on. Pure except for the two OS probes, so the arithmetic is unit-tested.
 - `types.hpp` — logger, protocol constants, `ClientRole`, `StreamOptions`, `CameraConfig`, `ProcessConfig`, chunk headers
 
@@ -81,9 +83,16 @@ Set via `set_process_mode`; each mode names what happens to a captured frame. Wh
 - `CHECKERBOARD` — detect a checkerboard and report its corners to the client (`rows`, `cols`, `full_res_detection`, `num_threads`, `subpix_window`); when `save_frames`, also save frames where one is detected. Detected corners are refined with `cv::cornerSubPix` on the full-res Y plane (`checkerboard_subpix_window`, default 15 px half-size, clamped to 40 % of the corner spacing, 0 = off): SB's own corners scatter ~0.12 px and are biased on defocused corners; refined ~0.025 px, for ~4 ms vs ~400 ms detection on a Pi 5 at 4056x3040
 - `CHECKERBOARD2X2` — same params; split each frame into 4 equal quadrants, detect in each, report every detecting quadrant's corners; when `save_frames`, save if any quadrant detects. The 4 detections run in parallel, batched by `num_threads` (clamped to `[1, 4]`).
 - `ARUCO` — detect ArUco/AprilTag markers (`cv::aruco::detectMarkers`, dictionary hard-coded `DICT_APRILTAG_16h5`) and report each marker's id + 4 corners to the client. Params: `aruco_full_res_detection`, `aruco_corner_refine` (false ⇒ `CORNER_REFINE_NONE`, true ⇒ `CORNER_REFINE_SUBPIX`), `aruco_edge_refine` (default true: after OpenCV, each marker's corners are re-derived from its EDGES in linear light — OpenCV's corners, NONE and SUBPIX alike, sit ~1 px inside the true corner of a blurred square on gamma-encoded luma, which read every ~95 px tag 2 % small on the arm cameras; a marker the fit cannot hold keeps OpenCV's corners) and `aruco_edge_gamma` (the decode exponent, 2.2 as measured on the Pi ISP output; 1.0 = none). When `save_frames`, also save frames where a marker is detected.
+- `STACK` — streams carry stacked raw images (one per completed `stack_capture`) and no live frames; nothing is detected or saved per frame. Needs `configure` with `raw: true`. `stack_detect` (default checkerboard) is what an unqualified `stack_capture` detects.
 - `ARUCO2X2` — same params (`aruco_num_threads` for the quadrant parallelism, clamped `[1, 4]`); split each frame into 4 equal quadrants, detect in each; when `save_frames`, save if any quadrant detects.
 - **`save_frames: false`** decouples detection from persistence: the detector still runs and streams its side-products (corners/markers), but no frames are written — the writer pool is never started and the per-detection full-frame copy is skipped (optimized detection-only pipeline). For `buffer`/`batch` it just means no output.
 - Output directory optionally prepended with timestamp (ignored when `save_frames: false`).
+
+## Raw Frame Stacking
+
+`configure` with `raw: true` adds the sensor's raw stream, unpacked to 16 bits (SBGGR16: no lossy PISP_COMP1), alongside YUV420. `stack_capture` (commander, RUNNING, any process mode) optionally pins `exposure_time` / `analogue_gain` (gain defaults to 1.0 with an exposure), waits until the frame metadata shows them (≤ 30 frames), skips `skip_frames`, then sums `num_frames` raw frames per 2x2 Bayer quad on the capture thread (`Camera::onRawFrame`, read in place from the DMA buffer under `DMA_BUF_IOCTL_SYNC`), restores the preview settings and replies with an async `stack_result` (corners in full-res sensor pixels, `b ↦ 2b + 0.5`). Detection: SB / `detectMarkers` on a gamma-2.2 8-bit rendering, `cornerSubPix` / the ArUco edge fit on the float stack. One stack outstanding; `stop_cameras` cancels it. In process mode `stack` the stream carries the stacked image (`frame_kind = 1`, pixel format `'SF32'`, float32 half-resolution linear DN above black) instead of live frames.
+
+Why raw: the ISP's temporal denoise correlates consecutive YUV frames, so stacking YUV barely helps; raw frames are independent and scatter falls as 1/√N (IMX477, 50 ms, gain 1: 0.0154 px → 0.0029 px over 32 frames).
 
 ## Build
 
@@ -119,6 +128,13 @@ mechanisms bound it, all configured through `set_process_mode`:
 1. **`ProcessConfig::backlog_max_bytes`** caps the RAM held by captured-but-unwritten frames (`buffered_frames` + `write_queue` + `pending_batch`), accounted in `FrameProcessor::reserveBacklog` / `releaseBacklog`. `0` ⇒ half of `MemAvailable`, clamped to `[64 MiB, 2 GiB]`. On reaching it the processor **keeps the frames already accepted and refuses new ones**, so a flush yields a usable contiguous prefix; drops are counted (`getFramesDroppedForBacklog`) and warned once.
 2. **A feasibility gate in `start_cameras`** refuses a mode that provably cannot keep up: `BATCH` against the measured write rate of `output_dir`, `BUFFER` against a budget too small to hold two seconds. `allow_overcommit` downgrades the refusal to a warning.
 3. **A capture watchdog** (`WebSocketServer::captureWatchdogLoop`, 250 ms ticks) reports a camera that has gone silent for 10x its cadence (min 3 s) as an unsolicited `error` with `code: "capture_timeout"`. libcamera surfaces a frontend timeout to nobody, so without this the server hangs silently on a healthy socket. The cadence is the slowest of observed interval, locked `FrameDurationLimits` and manual `ExposureTime`, so a deliberate slow-down never reads as a stall.
+
+**Large buffers go back to the kernel.** `main` pins glibc's mmap threshold at
+1 MiB (`mallopt(M_MMAP_THRESHOLD)`). glibc's default threshold rises after the
+first large free, after which multi-MB frame buffers come from per-thread heaps
+that rarely shrink: the server sat at 516 MB resident while idle on a 1 GB Pi
+(27 MB with the fix). In process mode `stack` the cameras also skip copying out
+YUV frames nobody streams (`Camera::setLiveFrames`).
 
 **Frames are shared, not copied, between consumers.** `Camera` publishes each
 captured frame as a `shared_ptr<const FrameData>` with a monotonic sequence
