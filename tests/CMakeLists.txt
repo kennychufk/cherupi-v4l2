@@ -17,6 +17,7 @@ set(UNIT_SOURCES
     unit/aruco_detector_test.cpp
     unit/raw_stack_test.cpp
     unit/raw_stacker_test.cpp
+    unit/trigger_capturer_test.cpp
 )
 
 # Production sources included in the unit binary. StreamManager currently
@@ -41,6 +42,7 @@ add_executable(unit_tests
     ../src/aruco_detector.cpp
     ../src/raw_stack.cpp
     ../src/raw_stacker.cpp
+    ../src/trigger_capturer.cpp
     ../src/camera.cpp
     ../src/camera_manager.cpp
 )

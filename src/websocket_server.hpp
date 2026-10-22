@@ -11,6 +11,7 @@
 #include "frame_processor.hpp"
 #include "raw_stacker.hpp"
 #include "stream_manager.hpp"
+#include "trigger_capturer.hpp"
 #include "types.hpp"
 #include "uws_frame_sink.hpp"
 
@@ -45,11 +46,26 @@ class WebSocketServer {
 
   std::unique_ptr<CameraManager> camera_manager;
   std::unique_ptr<FrameProcessor> frame_processor;
-  // Declared after camera_manager (its callbacks reach the cameras) and
-  // before the sessions (their streamers read its stacked images).
-  std::unique_ptr<RawStacker> raw_stacker;
   ClientSession commander_;
   ClientSession observer_;
+  // The on-demand captures. Declared after the sessions, which their
+  // callbacks hand frames to, so they are destroyed (and their workers
+  // joined) first.
+  std::unique_ptr<RawStacker> raw_stacker;
+  std::unique_ptr<TriggerCapturer> trigger_capturer;
+  // One capture of either kind at a time: set when a trigger or stack is
+  // armed, cleared once its frames have been queued on the commander's
+  // stream — whose queue then holds the gate until they are sent (see
+  // captureInProgress).
+  std::atomic<bool> capture_busy_{false};
+  bool captureInProgress();
+  // Hand a finished capture's frames to the commander and release the gate.
+  void deliverCapture(std::vector<CaptureFrame> frames);
+  // Have the cameras copy out live YUV frames only while something uses
+  // them: a process mode, a stream subscription, or a trigger waiting for
+  // its frame. Saves a full-frame copy per capture otherwise — while
+  // stacking with nobody watching, say.
+  void updateLiveFrames();
 
   ClientSession& session(ClientRole role) {
     return role == ClientRole::OBSERVER ? observer_ : commander_;

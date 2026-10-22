@@ -86,11 +86,10 @@ TEST(CapacityTest, BatchIsFeasibleOnFastEnoughStorage) {
 TEST(CapacityTest, DiskCheckAbstainsForModesThatDoNotWriteEveryFrame) {
   const auto d = capacity::computeDemand(kW, kH, 1, kTwoFpsUs, 69669);
   const size_t slow = 21500000;
-  // TRIGGER writes only on demand; the detector modes only what they detect;
-  // BUFFER is bounded by RAM, not by the disk rate.
+  // The detector modes write only what they detect; BUFFER is bounded by
+  // RAM, not by the disk rate.
   for (ProcessMode mode : {ProcessMode::NONE, ProcessMode::BUFFER,
-                           ProcessMode::TRIGGER, ProcessMode::ARUCO2X2,
-                           ProcessMode::CHECKERBOARD}) {
+                           ProcessMode::ARUCO2X2, ProcessMode::CHECKERBOARD}) {
     EXPECT_TRUE(capacity::checkDiskThroughput(mode, true, d, slow).feasible)
         << "mode index " << static_cast<int>(mode);
   }

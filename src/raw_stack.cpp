@@ -4,7 +4,6 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <future>
 
 #include <opencv2/imgproc.hpp>
@@ -252,32 +251,6 @@ std::vector<CornerSet> detect(const cv::Mat& linear, const DetectConfig& cfg) {
       for (auto& set : job.get()) sets.push_back(std::move(set));
   }
   return sets;
-}
-
-bool writeNpy(const std::string& path, const cv::Mat& img) {
-  if (img.type() != CV_32FC1) return false;
-  std::string header = "{'descr': '<f4', 'fortran_order': False, 'shape': (" +
-                       std::to_string(img.rows) + ", " +
-                       std::to_string(img.cols) + "), }";
-  // Magic (6) + version (2) + length (2) + header, padded with spaces and a
-  // closing newline to a multiple of 64 bytes.
-  const size_t unpadded = 10 + header.size() + 1;
-  header.append((64 - unpadded % 64) % 64, ' ');
-  header.push_back('\n');
-
-  std::ofstream f(path, std::ios::binary);
-  if (!f) return false;
-  const char magic[] = {'\x93', 'N', 'U', 'M', 'P', 'Y', 1, 0};
-  f.write(magic, sizeof(magic));
-  const uint16_t len = static_cast<uint16_t>(header.size());
-  const char len_le[2] = {static_cast<char>(len & 0xFF),
-                          static_cast<char>(len >> 8)};
-  f.write(len_le, 2);
-  f.write(header.data(), static_cast<std::streamsize>(header.size()));
-  for (int y = 0; y < img.rows; ++y)
-    f.write(reinterpret_cast<const char*>(img.ptr<float>(y)),
-            static_cast<std::streamsize>(img.cols * sizeof(float)));
-  return static_cast<bool>(f);
 }
 
 }  // namespace raw_stack

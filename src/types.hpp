@@ -73,7 +73,7 @@ class Logger {
 // Chunked transfer structures
 struct ChunkStartMarker {
   uint32_t magic = 0x4348554E;  // 'CHUN' in hex
-  uint32_t version = 7;
+  uint32_t version = 8;
 } __attribute__((packed));
 
 struct ChunkHeader {
@@ -110,7 +110,10 @@ struct ChunkHeader {
   // are 0 when no block follows.
   uint32_t corner_block_size;
   uint16_t num_corner_sets;
-  uint16_t reserved;
+  // v8: the trigger_id / stack_id (low 16 bits) of the trigger_capture or
+  // stack_capture that produced this frame; 0 on a live frame. Was
+  // `reserved` (always 0) before v8.
+  uint16_t capture_id;
   // v5 additions: per-frame focus metadata reported by the libcamera IPA for
   // this exact frame (EXIF-style), valid in manual, auto and continuous AF.
   // lens_position: focus distance the IPA actually applied, in dioptres
@@ -127,10 +130,9 @@ struct ChunkHeader {
   // byte that was `reserved2[0]` (always 0) before v6, so ChunkHeader stays
   // 68 bytes.
   uint8_t detection_kind;
-  // What the payload is (see FrameKind): 0 = a live camera frame, 1 = a
-  // stacked raw image from `stack_capture` (process mode `stack`). Was
-  // `reserved2[0]` (always 0) before stacking existed, so every frame a
-  // client saw before keeps reading as live.
+  // What the frame is (see FrameKind): 0 = a live camera frame, 1 = a
+  // stacked raw image from `stack_capture`, 2 = a frame captured by
+  // `trigger_capture`. Was `reserved2[0]` (always 0) before stacking existed.
   uint8_t frame_kind;
   uint8_t reserved2;
   // v7 addition: libcamera `FocusFoM` metadata for this frame — the Raspberry
@@ -150,10 +152,13 @@ enum class DetectionKind : uint8_t {
   ARUCO = 2,         // records are MarkerSetHeader
 };
 
-// What a streamed frame's payload is (its ChunkHeader `frame_kind`).
+// What a streamed frame is (its ChunkHeader `frame_kind`). Capture frames
+// (STACK, TRIGGER) answer a request: they go to the commander that asked,
+// once each, never superseded by a newer frame.
 enum class FrameKind : uint8_t {
-  LIVE = 0,   // a captured frame as the ISP delivered it (YUV420)
-  STACK = 1,  // a stacked raw image (PIXEL_FORMAT_STACK_F32), see raw_stack.hpp
+  LIVE = 0,     // a captured frame as the ISP delivered it (YUV420)
+  STACK = 1,    // a stacked raw image (PIXEL_FORMAT_STACK_F32), see raw_stack.hpp
+  TRIGGER = 2,  // the YUV420 frame a trigger_capture took
 };
 
 // FourCC of a stacked raw image: 'S','F','3','2' — single-channel float32,
@@ -218,6 +223,8 @@ struct FrameData {
   uint8_t af_state = 0xFF;  // libcamera AfState enum, 0xFF = unavailable
   int32_t focus_fom = -1;   // libcamera FocusFoM (ChunkHeader v7), -1 = unavailable
   FrameKind frame_kind = FrameKind::LIVE;
+  // trigger_id / stack_id of the capture that produced the frame; 0 = live.
+  uint32_t capture_id = 0;
 
   // Rule of zero, deliberately. This used to hand-roll a copy constructor and
   // copy assignment that were byte-for-byte what the compiler generates — but
@@ -261,21 +268,19 @@ struct RawFrame {
   int32_t focus_fom = -1;
 };
 
-// Per-frame processing modes. Each mode names the pipeline applied to a
-// captured frame; whether processed frames are also written to disk is a
-// separate axis controlled by ProcessConfig::save_frames.
+// Per-frame processing modes. Each mode names the post-processing applied to
+// a captured frame; whether processed frames are also written to disk is a
+// separate axis controlled by ProcessConfig::save_frames. On-demand captures
+// (trigger_capture, stack_capture) are not modes: they run in any of these,
+// get the mode's detection and are never saved.
 enum class ProcessMode {
   NONE,
   BUFFER,
   BATCH,
-  TRIGGER,
   CHECKERBOARD,
   CHECKERBOARD2X2,
   ARUCO,
   ARUCO2X2,
-  // Streams carry stacked raw images (one per completed stack_capture) and no
-  // live frames; nothing is detected or saved per frame.
-  STACK
 };
 
 // Map a process mode to the DetectionKind its detector emits (NONE for the
@@ -308,8 +313,7 @@ inline bool isDetectorMode(ProcessMode mode) {
 // opposed to BUFFER, which holds everything in RAM until stop). The pool is
 // only actually started when `save_frames` is also set.
 inline bool usesWriterPool(ProcessMode mode) {
-  return mode == ProcessMode::BATCH || mode == ProcessMode::TRIGGER ||
-         isDetectorMode(mode);
+  return mode == ProcessMode::BATCH || isDetectorMode(mode);
 }
 
 // Camera state
@@ -417,20 +421,6 @@ struct ProcessConfig {
   // up on this hardware. The check still runs and still logs, but start_cameras
   // no longer refuses — frames are dropped at the backlog budget instead.
   bool allow_overcommit = false;
-
-  // TRIGGER mode: how many freshly delivered frames to discard per camera
-  // before saving the triggered one. 0 (the default) saves the very next frame
-  // each camera delivers after the trigger arrives. Raise it when the frame
-  // already in flight at trigger time may still carry motion blur (e.g. a
-  // robotic arm that has only just come to rest). Overridable per request via
-  // the trigger_capture command's `skip_frames` param.
-  int trigger_skip_frames = 0;
-
-  // STACK mode: what stack_capture detects on each stacked image when the
-  // request names no `detect` (one of the four detector modes, or NONE). The
-  // detector modes default to themselves; STACK has no live detector to
-  // borrow from, so it uses this.
-  ProcessMode stack_detect = ProcessMode::CHECKERBOARD;
 };
 
 // Message types for WebSocket protocol

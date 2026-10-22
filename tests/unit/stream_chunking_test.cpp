@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -101,7 +102,7 @@ TEST(StreamChunkingTest, ChunkedFrameProducesHeaderPlusChunkCount) {
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
   EXPECT_EQ(marker.magic, 0x4348554Eu);
-  EXPECT_EQ(marker.version, 7u);
+  EXPECT_EQ(marker.version, 8u);
 
   ChunkHeader header{};
   std::memcpy(&header, sink.messages[0].data() + sizeof(marker),
@@ -303,7 +304,7 @@ TEST(StreamChunkingTest, ChunkHeaderAppendsCornerBlockForDetectingFrame) {
   // Parse marker + header from message 0.
   ChunkStartMarker marker{};
   std::memcpy(&marker, sink.messages[0].data(), sizeof(marker));
-  EXPECT_EQ(marker.version, 7u);
+  EXPECT_EQ(marker.version, 8u);
 
   ChunkHeader header{};
   std::memcpy(&header,
@@ -493,6 +494,122 @@ TEST(StreamChunkingTest, ClearingSinkResetsRateControl) {
   sm.clearSink();
   // Another send with no sink should fail cleanly rather than crash.
   EXPECT_FALSE(sm.sendFrameForTest(frame, 0));
+}
+
+// A sink the streaming thread writes to while the test reads it.
+class LockedSink : public FrameSink {
+ public:
+  bool send(const uint8_t* data, size_t len) override {
+    std::lock_guard<std::mutex> lock(m_);
+    messages_.emplace_back(data, data + len);
+    return true;
+  }
+  size_t bufferedAmount() const override { return 0; }
+  std::vector<std::vector<uint8_t>> messages() {
+    std::lock_guard<std::mutex> lock(m_);
+    return messages_;
+  }
+
+ private:
+  std::mutex m_;
+  std::vector<std::vector<uint8_t>> messages_;
+};
+
+CaptureFrame makeCapture(FrameKind kind, uint32_t capture_id, size_t bytes,
+                         bool send_image) {
+  auto f = std::make_shared<FrameData>(makeSyntheticFrame(bytes, /*cam_id=*/1));
+  f->frame_kind = kind;
+  f->capture_id = capture_id;
+  CaptureFrame cf;
+  cf.frame = std::move(f);
+  cf.send_image = send_image;
+  return cf;
+}
+
+// The headers among `messages` (every message that is not a CHNK packet).
+std::vector<ChunkHeader> headersIn(const std::vector<std::vector<uint8_t>>& messages) {
+  std::vector<ChunkHeader> out;
+  for (const auto& m : messages) {
+    ChunkStartMarker marker{};
+    if (m.size() < sizeof(marker) + sizeof(ChunkHeader)) continue;
+    std::memcpy(&marker, m.data(), sizeof(marker));
+    if (marker.magic != 0x4348554Eu) continue;
+    ChunkHeader h{};
+    std::memcpy(&h, m.data() + sizeof(marker), sizeof(h));
+    out.push_back(h);
+  }
+  return out;
+}
+
+TEST(StreamChunkingTest, CaptureFramesGoOutWithoutASubscription) {
+  CameraManager dummy_mgr;
+  FrameProcessor dummy_saver;
+  StreamManager sm(&dummy_mgr, &dummy_saver);
+  LockedSink sink;
+  sm.setSink(&sink);
+  // Header-only applies to live frames, not to a capture that asked for its
+  // pixels.
+  sm.setHeaderOnlyMode(true);
+
+  const size_t payload = StreamManager::CHUNK_SIZE * 2 + 9;
+  std::vector<CaptureFrame> frames;
+  frames.push_back(makeCapture(FrameKind::TRIGGER, 3, payload, true));
+  frames.push_back(makeCapture(FrameKind::STACK, 4, payload, false));
+  sm.enqueueCaptures(std::move(frames));
+
+  // 1 header + 3 chunks, then a header alone.
+  std::vector<std::vector<uint8_t>> got;
+  for (int i = 0; i < 400 && (got.size() < 5 || sm.hasPendingCaptures()); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    got = sink.messages();
+  }
+  ASSERT_EQ(got.size(), 5u);
+  EXPECT_FALSE(sm.hasPendingCaptures());
+  const auto headers = headersIn(got);
+  ASSERT_EQ(headers.size(), 2u);
+  EXPECT_EQ(headers[0].frame_kind, static_cast<uint8_t>(FrameKind::TRIGGER));
+  EXPECT_EQ(headers[0].capture_id, 3u);
+  EXPECT_EQ(headers[0].camera_id, 1u);
+  EXPECT_EQ(headers[0].total_chunks, 3u);
+  EXPECT_EQ(headers[0].total_size, payload);
+  // send_image false: geometry and metadata, no pixels.
+  EXPECT_EQ(headers[1].frame_kind, static_cast<uint8_t>(FrameKind::STACK));
+  EXPECT_EQ(headers[1].capture_id, 4u);
+  EXPECT_EQ(headers[1].total_chunks, 0u);
+  EXPECT_EQ(headers[1].total_size, 0u);
+  EXPECT_EQ(headers[1].width, 1920u);
+
+  sm.clearSink();
+}
+
+TEST(StreamChunkingTest, CaptureFramesNeedAClient) {
+  CameraManager dummy_mgr;
+  FrameProcessor dummy_saver;
+  StreamManager sm(&dummy_mgr, &dummy_saver);
+
+  // Nobody attached: the frames are dropped rather than held forever.
+  std::vector<CaptureFrame> frames;
+  frames.push_back(makeCapture(FrameKind::TRIGGER, 1, 64, true));
+  sm.enqueueCaptures(std::move(frames));
+  EXPECT_FALSE(sm.hasPendingCaptures());
+}
+
+TEST(StreamChunkingTest, PendingCapturesMakeTheCommanderBusy) {
+  CameraManager dummy_mgr;
+  FrameProcessor dummy_saver;
+  StreamManager sm(&dummy_mgr, &dummy_saver);
+  RecordingSink sink;
+  sink.buffered = StreamManager::SOFT_BUFFER_LIMIT * 4;  // a congested link
+  sm.setSink(&sink);
+  EXPECT_TRUE(sm.isClearForLowerPriority());  // no subscriptions, no captures
+
+  std::vector<CaptureFrame> frames;
+  frames.push_back(makeCapture(FrameKind::STACK, 1, 64, true));
+  sm.enqueueCaptures(std::move(frames));
+  // The capture's frames are commander traffic: the observer must yield.
+  EXPECT_FALSE(sm.isClearForLowerPriority());
+  sm.clearSink();
+  EXPECT_FALSE(sm.hasPendingCaptures());
 }
 
 }  // namespace

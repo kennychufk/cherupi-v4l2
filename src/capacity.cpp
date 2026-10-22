@@ -128,8 +128,8 @@ Verdict checkDiskThroughput(ProcessMode mode, bool save_frames,
                             const Demand& demand,
                             size_t disk_bytes_per_second) {
   // Only BATCH writes every captured frame continuously. Detector modes write
-  // only frames that detected something, and TRIGGER only frames explicitly
-  // asked for — neither has a rate we can bound ahead of time.
+  // only frames that detected something, which has no rate we can bound
+  // ahead of time.
   if (mode != ProcessMode::BATCH || !save_frames) return {};
   if (demand.bytes_per_second == 0 || disk_bytes_per_second == 0) return {};
   if (demand.bytes_per_second <= disk_bytes_per_second) return {};
@@ -147,8 +147,8 @@ Verdict checkDiskThroughput(ProcessMode mode, bool save_frames,
       << std::fixed << std::setprecision(1) << shortfall
       << "x too slow). The write queue would grow until the backlog budget is "
          "exhausted and frames start dropping. Lower the frame rate or the "
-         "resolution, use 'trigger' mode to save on demand, write to faster "
-         "storage, or set allow_overcommit to start anyway.";
+         "resolution, take frames on demand with trigger_capture instead, write "
+         "to faster storage, or set allow_overcommit to start anyway.";
   return {false, oss.str()};
 }
 
@@ -175,8 +175,9 @@ Verdict checkBufferHeadroom(ProcessMode mode, bool save_frames,
       << formatBytes(demand.bytes_per_frame) << " each — " << std::fixed
       << std::setprecision(1) << seconds << " s of capture at "
       << std::setprecision(2) << demand.frames_per_second
-      << " fps. Use 'batch' to stream to disk, 'trigger' to save on demand, "
-         "lower the resolution, or set allow_overcommit to start anyway.";
+      << " fps. Use 'batch' to stream to disk, take frames on demand with "
+         "trigger_capture, lower the resolution, or set allow_overcommit to "
+         "start anyway.";
   return {false, oss.str()};
 }
 

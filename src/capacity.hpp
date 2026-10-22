@@ -74,7 +74,7 @@ struct Verdict {
 
 // Can the disk keep up with a mode that writes every captured frame? Only
 // BATCH does that continuously; the detector modes write only what they
-// detect, and TRIGGER only what is asked for, so both abstain here.
+// detect, so they abstain here.
 Verdict checkDiskThroughput(ProcessMode mode, bool save_frames,
                             const Demand& demand,
                             size_t disk_bytes_per_second);

@@ -151,12 +151,6 @@ void FrameProcessor::start() {
   bytes_written = 0;
   frames_saved_per_camera.clear();
 
-  // Drop a trigger left armed by a previous session (its client is long gone).
-  {
-    std::lock_guard<std::mutex> lock(trigger_mutex);
-    pending_trigger.reset();
-  }
-
   // Clear best-effort detection slots left over from a previous session.
   {
     std::lock_guard<std::mutex> lock(pending_mutex);
@@ -203,24 +197,6 @@ void FrameProcessor::start() {
 
 void FrameProcessor::stop() {
   enabled = false;
-
-  // A trigger still waiting on cameras that will now never deliver: resolve it
-  // as cancelled (with whatever was already captured) so the client isn't left
-  // waiting on an ack that can no longer arrive.
-  {
-    std::unique_ptr<PendingTrigger> abandoned;
-    {
-      std::lock_guard<std::mutex> lock(trigger_mutex);
-      abandoned = std::move(pending_trigger);
-    }
-    if (abandoned && abandoned->on_complete) {
-      abandoned->result.cancelled = true;
-      LOG_WARN("FrameProcessor",
-               "Trigger " + std::to_string(abandoned->id) +
-                   " cancelled: capture stopped while it was pending");
-      abandoned->on_complete(std::move(abandoned->result));
-    }
-  }
 
   // Detector modes: shut down the detection worker FIRST. Its drain pass
   // detects every still-pending frame and enqueues any resulting write task,
@@ -351,10 +327,6 @@ void FrameProcessor::saveFrame(const FrameData& frame) {
       }
     }
     if (flushed) queue_cv.notify_all();
-  } else if (config.mode == ProcessMode::TRIGGER) {
-    // Nothing is written unless a trigger is armed; frames still stream live so
-    // the operator (or the robot's supervisor) can see what is being framed.
-    handleTriggerFrame(frame);
   } else if (isDetectorMode(config.mode)) {
     // Best-effort: hand the frame to the async detection worker instead of
     // detecting inline. Detection takes tens–hundreds of ms — far longer than
@@ -371,90 +343,6 @@ void FrameProcessor::saveFrame(const FrameData& frame) {
     }
     pending_cv.notify_one();
   }
-}
-
-std::optional<uint32_t> FrameProcessor::armTrigger(
-    const std::vector<uint32_t>& camera_ids, int skip_frames,
-    std::function<void(TriggerResult)> on_complete) {
-  if (!enabled || config.mode != ProcessMode::TRIGGER) return std::nullopt;
-  if (camera_ids.empty()) return std::nullopt;
-
-  std::lock_guard<std::mutex> lock(trigger_mutex);
-  if (pending_trigger) return std::nullopt;  // one outstanding trigger at a time
-
-  auto trigger = std::make_unique<PendingTrigger>();
-  trigger->id = next_trigger_id++;
-  const int skip = std::max(0, skip_frames);
-  for (uint32_t camera_id : camera_ids) trigger->waiting[camera_id] = skip;
-  trigger->result.trigger_id = trigger->id;
-  trigger->result.captures.reserve(camera_ids.size());
-  trigger->on_complete = std::move(on_complete);
-  pending_trigger = std::move(trigger);
-
-  LOG_INFO("FrameProcessor",
-           "Trigger " + std::to_string(pending_trigger->id) + " armed for " +
-               std::to_string(camera_ids.size()) + " camera(s), skipping " +
-               std::to_string(skip) + " frame(s) each");
-  return pending_trigger->id;
-}
-
-bool FrameProcessor::hasPendingTrigger() {
-  std::lock_guard<std::mutex> lock(trigger_mutex);
-  return pending_trigger != nullptr;
-}
-
-void FrameProcessor::handleTriggerFrame(const FrameData& frame) {
-  WriteTask task;
-  bool queue_write = false;
-  std::function<void(TriggerResult)> on_complete;
-  TriggerResult finished;
-
-  {
-    std::lock_guard<std::mutex> lock(trigger_mutex);
-    if (!pending_trigger) return;  // not armed: this frame is preview only
-    auto it = pending_trigger->waiting.find(frame.camera_id);
-    // Camera not part of this trigger, or already served by an earlier frame.
-    if (it == pending_trigger->waiting.end()) return;
-    // Settling frames requested by the client: discard and keep waiting.
-    if (it->second > 0) {
-      it->second--;
-      return;
-    }
-
-    TriggerResult::Capture capture;
-    capture.camera_id = frame.camera_id;
-    capture.frame_id = frame.frame_id;
-    if (config.save_frames) {
-      capture.filename = generateFilename(frame.camera_id, frame.frame_id);
-      task.filename = capture.filename;
-      task.camera_id = frame.camera_id;
-      task.frame_id = frame.frame_id;
-      queue_write = true;
-    }
-    pending_trigger->result.captures.push_back(std::move(capture));
-    pending_trigger->waiting.erase(it);
-
-    if (pending_trigger->waiting.empty()) {
-      finished = std::move(pending_trigger->result);
-      on_complete = std::move(pending_trigger->on_complete);
-      pending_trigger.reset();
-    }
-  }
-
-  if (queue_write && reserveBacklog(frame.data.size())) {
-    // Copy the multi-MB payload outside trigger_mutex so a second camera's
-    // callback isn't held up behind this one's memcpy.
-    task.data = frame.data;
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex);
-      write_queue.push(std::move(task));
-    }
-    queue_cv.notify_one();
-  }
-
-  // Fires only after the frame is queued for writing, so the client's ack
-  // means "captured and handed to the writer pool" — the robot can move on.
-  if (on_complete) on_complete(std::move(finished));
 }
 
 void FrameProcessor::detectionWorkerFunc() {
@@ -487,25 +375,7 @@ void FrameProcessor::processDetection(FrameData frame) {
   frames_checked++;
 
   std::vector<CornerSet> sets;
-  bool detected = false;
-  switch (config.mode) {
-    case ProcessMode::CHECKERBOARD:
-      detected = detectCheckerboard(frame, sets);
-      break;
-    case ProcessMode::CHECKERBOARD2X2:
-      detected = detectCheckerboard2x2(frame, sets);
-      break;
-    case ProcessMode::ARUCO:
-      detected = detectAruco(frame, sets);
-      break;
-    case ProcessMode::ARUCO2X2:
-      detected = detectAruco2x2(frame, sets);
-      break;
-    default:
-      break;
-  }
-
-  if (detected) {
+  if (runDetector(frame, sets)) {
     frames_detected++;
 
     // Persist the detected frame only when saving is enabled. When it is off we
@@ -542,6 +412,29 @@ void FrameProcessor::processDetection(FrameData frame) {
     df.sets = std::move(sets);
     df.seq = ++detected_seq_counter_;
   }
+}
+
+bool FrameProcessor::runDetector(const FrameData& frame,
+                                 std::vector<CornerSet>& out_sets) {
+  switch (config.mode) {
+    case ProcessMode::CHECKERBOARD:
+      return detectCheckerboard(frame, out_sets);
+    case ProcessMode::CHECKERBOARD2X2:
+      return detectCheckerboard2x2(frame, out_sets);
+    case ProcessMode::ARUCO:
+      return detectAruco(frame, out_sets);
+    case ProcessMode::ARUCO2X2:
+      return detectAruco2x2(frame, out_sets);
+    default:
+      out_sets.clear();
+      return false;
+  }
+}
+
+std::vector<CornerSet> FrameProcessor::detectCaptured(const FrameData& frame) {
+  std::vector<CornerSet> sets;
+  if (isDetectorMode(config.mode)) runDetector(frame, sets);
+  return sets;
 }
 
 namespace {

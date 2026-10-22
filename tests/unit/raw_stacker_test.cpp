@@ -4,6 +4,7 @@
 #include <cstring>
 #include <future>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -72,7 +73,7 @@ TEST(RawStackerTest, WaitsForTheSettingsThenStacksAndRestores) {
   RawStacker stacker(ov.apply(), ov.restore());
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  auto id = stacker.arm(plan({0}, 3), [&](StackResult r) { done.set_value(r); });
+  auto id = stacker.arm(plan({0}, 3), [&](StackResult r) { done.set_value(r); }, nullptr);
   ASSERT_TRUE(id.has_value());
   EXPECT_EQ(*id, 1u);
   EXPECT_EQ(ov.applied, std::vector<uint32_t>({0}));
@@ -109,7 +110,7 @@ TEST(RawStackerTest, SkipsFramesAndRestartsWhenTheSettingsChange) {
   p.skip_frames = 2;
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(p, [&](StackResult r) { done.set_value(r); }));
+  ASSERT_TRUE(stacker.arm(p, [&](StackResult r) { done.set_value(r); }, nullptr));
 
   FakeCamera cam;
   stacker.onRawFrame(cam.frame(30000, 1.0f));  // 0: settled, skipped
@@ -135,7 +136,7 @@ TEST(RawStackerTest, SettingsThatKeepChangingFailTheCamera) {
   p.analogue_gain.reset();
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(p, [&](StackResult r) { done.set_value(r); }));
+  ASSERT_TRUE(stacker.arm(p, [&](StackResult r) { done.set_value(r); }, nullptr));
   FakeCamera cam;
   for (int i = 0; i < 100; ++i)
     stacker.onRawFrame(cam.frame(10000 + 1000 * i, 1.0f));  // a ramping AGC
@@ -149,7 +150,7 @@ TEST(RawStackerTest, SettingsThatNeverArriveFailTheCamera) {
   RawStacker stacker(ov.apply(), ov.restore());
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(plan({0}, 2), [&](StackResult r) { done.set_value(r); }));
+  ASSERT_TRUE(stacker.arm(plan({0}, 2), [&](StackResult r) { done.set_value(r); }, nullptr));
   FakeCamera cam;
   for (uint32_t i = 0; i <= RawStacker::kSettleMaxFrames; ++i)
     stacker.onRawFrame(cam.frame(20000, 1.0f));  // clamped exposure
@@ -165,8 +166,8 @@ TEST(RawStackerTest, OneStackAtATimeAndCancelRestoresAndReports) {
   RawStacker stacker(ov.apply(), ov.restore());
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(plan({0, 1}, 4), [&](StackResult r) { done.set_value(r); }));
-  EXPECT_FALSE(stacker.arm(plan({0}, 1), [](StackResult) {}).has_value());
+  ASSERT_TRUE(stacker.arm(plan({0, 1}, 4), [&](StackResult r) { done.set_value(r); }, nullptr));
+  EXPECT_FALSE(stacker.arm(plan({0}, 1), [](StackResult) {}, nullptr).has_value());
 
   FakeCamera cam0;
   stacker.onRawFrame(cam0.frame(30000, 1.0f));
@@ -178,7 +179,7 @@ TEST(RawStackerTest, OneStackAtATimeAndCancelRestoresAndReports) {
   EXPECT_EQ(r.captures[0].error, "cancelled");
   EXPECT_EQ(ov.restored.size(), 2u);
   EXPECT_FALSE(stacker.hasPending());
-  EXPECT_TRUE(stacker.arm(plan({0}, 1), [](StackResult) {}).has_value());
+  EXPECT_TRUE(stacker.arm(plan({0}, 1), [](StackResult) {}, nullptr).has_value());
 }
 
 TEST(RawStackerTest, WaitsForEveryArmedCamera) {
@@ -186,7 +187,7 @@ TEST(RawStackerTest, WaitsForEveryArmedCamera) {
   RawStacker stacker(ov.apply(), ov.restore());
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(plan({0, 1}, 1), [&](StackResult r) { done.set_value(r); }));
+  ASSERT_TRUE(stacker.arm(plan({0, 1}, 1), [&](StackResult r) { done.set_value(r); }, nullptr));
   FakeCamera cam0, cam1, cam2;
   cam1.id = 1;
   cam2.id = 2;
@@ -200,59 +201,77 @@ TEST(RawStackerTest, WaitsForEveryArmedCamera) {
   EXPECT_EQ(r.captures[1].camera_id, 1u);
 }
 
-TEST(RawStackerTest, PublishesTheStackedImageForStreaming) {
+TEST(RawStackerTest, CancelHandsOverNoFrames) {
   Overrides ov;
   RawStacker stacker(ov.apply(), ov.restore());
-  int published = 0;
-  stacker.setPublishedCallback([&] { ++published; });
-  StackPlan p = plan({0}, 2);
-  p.publish = true;
-  std::promise<StackResult> done;
-  auto fut = done.get_future();
-  ASSERT_TRUE(stacker.arm(p, [&](StackResult r) { done.set_value(r); }));
-  FakeCamera cam;
-  stacker.onRawFrame(cam.frame(30000, 1.0f, 10000));
-  stacker.onRawFrame(cam.frame(30000, 1.0f, 12000));
-  await(fut);
-
-  uint64_t cursor = 0;
-  std::shared_ptr<const FrameData> frame;
-  std::vector<CornerSet> sets;
-  uint8_t kind = 0xFF;
-  // The image is published right after the result is delivered.
-  for (int i = 0; i < 100 && !frame; ++i) {
-    stacker.getStackedFrameForStreaming(0, cursor, frame, sets, kind);
-    if (!frame) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  ASSERT_TRUE(frame);
-  EXPECT_EQ(published, 1);
-  EXPECT_EQ(frame->frame_kind, FrameKind::STACK);
-  EXPECT_EQ(frame->pixel_format, PIXEL_FORMAT_STACK_F32);
-  EXPECT_EQ(frame->frame_id, 1u);
-  EXPECT_EQ(frame->width, 4u);
-  EXPECT_EQ(frame->bytes_per_line, 16u);
-  ASSERT_EQ(frame->data.size(), 4u * 2u * sizeof(float));
-  float v;
-  std::memcpy(&v, frame->data.data(), sizeof(v));
-  EXPECT_FLOAT_EQ(v, 11000.f - 4096.f);
-  EXPECT_EQ(kind, 0);  // nothing detected (detect none)
-  EXPECT_FALSE(stacker.getStackedFrameForStreaming(0, cursor, frame, sets, kind));
-
-  // A new run (start_cameras) starts with nothing published, even for a
-  // fresh cursor.
-  stacker.reset();
-  uint64_t fresh = 0;
-  EXPECT_FALSE(stacker.getStackedFrameForStreaming(0, fresh, frame, sets, kind));
+  std::promise<std::vector<CaptureFrame>> frames;
+  auto fut = frames.get_future();
+  ASSERT_TRUE(stacker.arm(plan({0}, 4), [](StackResult) {},
+                          [&](std::vector<CaptureFrame> f) { frames.set_value(std::move(f)); }));
+  stacker.cancel();
+  ASSERT_EQ(fut.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(fut.get().empty());
 }
 
-TEST(RawStackerTest, ResultJsonCarriesCornersAndErrors) {
+TEST(RawStackerTest, HandsTheStackedImageOverAfterTheAck) {
+  Overrides ov;
+  RawStacker stacker(ov.apply(), ov.restore());
+  StackPlan p = plan({0, 1}, 2);
+  p.send_image = false;
+  p.detect.kind = ProcessMode::CHECKERBOARD;  // a flat image: nothing found
+  std::mutex m;
+  std::vector<std::string> order;
+  std::promise<std::vector<CaptureFrame>> frames;
+  auto fut = frames.get_future();
+  ASSERT_TRUE(stacker.arm(
+      p,
+      [&](StackResult) {
+        std::lock_guard<std::mutex> lock(m);
+        order.push_back("ack");
+      },
+      [&](std::vector<CaptureFrame> f) {
+        {
+          std::lock_guard<std::mutex> lock(m);
+          order.push_back("frames");
+        }
+        frames.set_value(std::move(f));
+      }));
+  FakeCamera cam0, cam1;
+  cam1.id = 1;
+  for (int i = 0; i < 4; ++i) stacker.onRawFrame(cam1.frame(30000, 1.0f));  // 2 summed
+  stacker.onRawFrame(cam0.frame(30000, 1.0f, 10000));
+  stacker.onRawFrame(cam0.frame(30000, 1.0f, 12000));
+  ASSERT_EQ(fut.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  std::vector<CaptureFrame> out = fut.get();
+  EXPECT_EQ(order, std::vector<std::string>({"ack", "frames"}));
+
+  // One image per camera, in camera_id order.
+  ASSERT_EQ(out.size(), 2u);
+  const FrameData& frame = *out[0].frame;
+  EXPECT_EQ(frame.camera_id, 0u);
+  EXPECT_EQ(out[1].frame->camera_id, 1u);
+  EXPECT_EQ(frame.frame_kind, FrameKind::STACK);
+  EXPECT_EQ(frame.capture_id, 1u);  // the stack id
+  EXPECT_EQ(frame.frame_id, 1u);    // the last summed frame
+  EXPECT_EQ(frame.pixel_format, PIXEL_FORMAT_STACK_F32);
+  EXPECT_EQ(frame.width, 4u);
+  EXPECT_EQ(frame.bytes_per_line, 16u);
+  ASSERT_EQ(frame.data.size(), 4u * 2u * sizeof(float));
+  float v;
+  std::memcpy(&v, frame.data.data(), sizeof(v));
+  EXPECT_FLOAT_EQ(v, 11000.f - 4096.f);
+  EXPECT_EQ(out[0].detection_kind, DetectionKind::CHECKERBOARD);
+  EXPECT_TRUE(out[0].sets.empty());
+  EXPECT_FALSE(out[0].send_image);
+  EXPECT_FALSE(stacker.hasPending());
+}
+
+TEST(RawStackerTest, ResultJsonCarriesStatsAndErrors) {
   StackResult r;
   r.stack_id = 5;
   StackResult::Capture ok;
   ok.camera_id = 0;
   ok.frames_stacked = 8;
-  ok.detect = ProcessMode::CHECKERBOARD;
-  ok.sets.push_back({0, -1, {{1.5f, 2.5f}}});
   StackResult::Capture bad;
   bad.camera_id = 1;
   bad.error = "boom";
@@ -260,10 +279,11 @@ TEST(RawStackerTest, ResultJsonCarriesCornersAndErrors) {
   const nlohmann::json j = stackResultJson(r);
   EXPECT_EQ(j["type"], "stack_result");
   EXPECT_EQ(j["stack_id"], 5);
-  EXPECT_EQ(j["captures"][0]["detect"], "checkerboard");
+  EXPECT_EQ(j["captures"][0]["frames_stacked"], 8);
   EXPECT_FALSE(j["captures"][0].contains("error"));
-  EXPECT_EQ(j["captures"][0]["sets"][0]["corners"][0][0], 1.5);
-  EXPECT_FALSE(j["captures"][0]["sets"][0].contains("marker_id"));
+  // Detection rides on the binary frame, and nothing is saved.
+  EXPECT_FALSE(j["captures"][0].contains("sets"));
+  EXPECT_FALSE(j["captures"][0].contains("filename"));
   EXPECT_EQ(j["captures"][1]["error"], "boom");
 }
 

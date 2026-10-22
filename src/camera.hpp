@@ -46,10 +46,11 @@ class Camera {
                           std::optional<float> analogue_gain);
   void clearCaptureOverride();
   // Whether each captured YUV frame is copied out and published for the
-  // streamers and onFrameCaptured (default). Off when nothing consumes live
-  // frames — process mode STACK — which saves a full-frame copy per capture.
-  // Raw frames and the capture watchdog are unaffected.
-  void setLiveFrames(bool enabled) { live_frames_.store(enabled); }
+  // streamers and onFrameCaptured (default). Off while nothing consumes live
+  // frames, which saves a full-frame copy per capture. Turning it off drops
+  // the published frame, so a subscriber arriving later never gets a stale
+  // one. Raw frames and the capture watchdog are unaffected.
+  void setLiveFrames(bool enabled);
   // Returns the currently-configured frame duration in microseconds, or 0 if
   // unset (no fixed FrameDurationLimits applied).
   int64_t getCurrentFrameDuration() const {

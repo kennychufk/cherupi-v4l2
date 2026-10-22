@@ -1,7 +1,5 @@
 #include "command_parser.hpp"
 
-#include <algorithm>
-
 namespace command_parser {
 
 using nlohmann::json;
@@ -69,12 +67,10 @@ std::optional<ProcessMode> parseProcessMode(const std::string& mode) {
   if (mode == "none") return ProcessMode::NONE;
   if (mode == "buffer") return ProcessMode::BUFFER;
   if (mode == "batch") return ProcessMode::BATCH;
-  if (mode == "trigger") return ProcessMode::TRIGGER;
   if (mode == "checkerboard") return ProcessMode::CHECKERBOARD;
   if (mode == "checkerboard2x2") return ProcessMode::CHECKERBOARD2X2;
   if (mode == "aruco") return ProcessMode::ARUCO;
   if (mode == "aruco2x2") return ProcessMode::ARUCO2X2;
-  if (mode == "stack") return ProcessMode::STACK;
   return std::nullopt;
 }
 
@@ -248,10 +244,6 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
       const double g = params["aruco_edge_gamma"].get<double>();
       config.aruco_edge_gamma = g > 0.0 ? static_cast<float>(g) : 1.0f;
     }
-    if (params.contains("trigger_skip_frames") &&
-        params["trigger_skip_frames"].is_number_integer())
-      config.trigger_skip_frames =
-          std::max(0, params["trigger_skip_frames"].get<int>());
     // Resource guards. All three are optional; 0 / absent means "decide at
     // start()" for the two byte counts, and "refuse an infeasible mode" for
     // allow_overcommit.
@@ -265,50 +257,50 @@ std::optional<ProcessConfig> buildProcessConfig(const json& message) {
     if (params.contains("allow_overcommit") &&
         params["allow_overcommit"].is_boolean())
       config.allow_overcommit = params["allow_overcommit"];
-    if (params.contains("stack_detect") && params["stack_detect"].is_string()) {
-      // An unknown name keeps the default rather than failing the whole
-      // mode, as every other param here does.
-      if (auto kind = parseDetectKind(params["stack_detect"].get<std::string>()))
-        config.stack_detect = *kind;
-    }
   }
 
   return config;
 }
 
-std::optional<ProcessMode> parseDetectKind(const std::string& name) {
-  if (name == "none") return ProcessMode::NONE;
-  auto mode = parseProcessMode(name);
-  if (mode && isDetectorMode(*mode)) return mode;
+namespace {
+
+// Range-checked integer field of `message`: nothing when absent, an error
+// naming the field when present but not an integer in [lo, hi].
+std::optional<std::string> integerField(const json& message, const char* key,
+                                        int64_t lo, int64_t hi, int64_t* out) {
+  if (!message.contains(key)) return std::nullopt;
+  const json& v = message[key];
+  if (!v.is_number_integer() || v.get<int64_t>() < lo || v.get<int64_t>() > hi)
+    return std::string(key) + " must be an integer in [" + std::to_string(lo) +
+           ", " + std::to_string(hi) + "]";
+  *out = v.get<int64_t>();
   return std::nullopt;
 }
 
+// `send_image` (default true): whether a capture's frames carry their pixels.
+std::optional<std::string> sendImageField(const json& message, bool* out) {
+  if (!message.contains("send_image")) return std::nullopt;
+  if (!message["send_image"].is_boolean())
+    return std::string("send_image must be a boolean");
+  *out = message["send_image"];
+  return std::nullopt;
+}
+
+}  // namespace
+
 std::variant<StackRequest, std::string> buildStackRequest(const json& message) {
   StackRequest req;
-  auto integer = [&](const char* key, int64_t lo, int64_t hi,
-                     int64_t* out) -> std::optional<std::string> {
-    if (!message.contains(key)) return std::nullopt;
-    const json& v = message[key];
-    if (!v.is_number_integer() || v.get<int64_t>() < lo || v.get<int64_t>() > hi)
-      return std::string(key) + " must be an integer in [" + std::to_string(lo) +
-             ", " + std::to_string(hi) + "]";
-    *out = v.get<int64_t>();
-    return std::nullopt;
-  };
   int64_t v = 0;
-  if (message.contains("camera_id")) {
-    if (auto err = integer("camera_id", 0, 255, &v)) return *err;
-    req.camera_id = static_cast<uint32_t>(v);
-  }
-  if (message.contains("num_frames")) {
-    if (auto err = integer("num_frames", 1, raw_stack::Accumulator::kMaxFrames, &v))
-      return *err;
-    req.num_frames = static_cast<uint32_t>(v);
-  }
-  if (message.contains("exposure_time")) {
-    if (auto err = integer("exposure_time", 1, 10000000, &v)) return *err;
+  if (auto err = integerField(message, "camera_id", 0, 255, &v)) return *err;
+  if (message.contains("camera_id")) req.camera_id = static_cast<uint32_t>(v);
+  if (auto err = integerField(message, "num_frames", 1,
+                              raw_stack::Accumulator::kMaxFrames, &v))
+    return *err;
+  if (message.contains("num_frames")) req.num_frames = static_cast<uint32_t>(v);
+  if (auto err = integerField(message, "exposure_time", 1, 10000000, &v))
+    return *err;
+  if (message.contains("exposure_time"))
     req.exposure_time_us = static_cast<int32_t>(v);
-  }
   if (message.contains("analogue_gain")) {
     const json& g = message["analogue_gain"];
     if (!g.is_number() || !(g.get<double>() >= 1.0) || g.get<double>() > 64.0)
@@ -317,35 +309,21 @@ std::variant<StackRequest, std::string> buildStackRequest(const json& message) {
   } else if (req.exposure_time_us) {
     req.analogue_gain = 1.0f;
   }
-  if (message.contains("skip_frames")) {
-    if (auto err = integer("skip_frames", 0, 100, &v)) return *err;
-    req.skip_frames = static_cast<int>(v);
-  }
-  if (message.contains("detect")) {
-    const json& d = message["detect"];
-    std::optional<ProcessMode> kind;
-    if (d.is_string()) kind = parseDetectKind(d.get<std::string>());
-    if (!kind)
-      return std::string(
-          "detect must be one of none, checkerboard, checkerboard2x2, aruco, "
-          "aruco2x2");
-    req.detect = *kind;
-  }
-  if (message.contains("subpix_window")) {
-    if (auto err = integer("subpix_window", 0, 100, &v)) return *err;
-    req.subpix_window = static_cast<int>(v);
-  }
-  if (message.contains("save_image")) {
-    if (!message["save_image"].is_boolean())
-      return std::string("save_image must be a boolean");
-    req.save_image = message["save_image"];
-  }
-  if (message.contains("output_dir")) {
-    if (!message["output_dir"].is_string() ||
-        message["output_dir"].get<std::string>().empty())
-      return std::string("output_dir must be a non-empty string");
-    req.output_dir = message["output_dir"].get<std::string>();
-  }
+  if (auto err = integerField(message, "skip_frames", 0, 100, &v)) return *err;
+  if (message.contains("skip_frames")) req.skip_frames = static_cast<int>(v);
+  if (auto err = sendImageField(message, &req.send_image)) return *err;
+  return req;
+}
+
+std::variant<TriggerRequest, std::string> buildTriggerRequest(
+    const json& message) {
+  TriggerRequest req;
+  int64_t v = 0;
+  if (auto err = integerField(message, "camera_id", 0, 255, &v)) return *err;
+  if (message.contains("camera_id")) req.camera_id = static_cast<uint32_t>(v);
+  if (auto err = integerField(message, "skip_frames", 0, 100, &v)) return *err;
+  if (message.contains("skip_frames")) req.skip_frames = static_cast<int>(v);
+  if (auto err = sendImageField(message, &req.send_image)) return *err;
   return req;
 }
 

@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "raw_stacker.hpp"
+#include "trigger_capturer.hpp"
 #include "types.hpp"
 
 // Pure parsing/validation for the WebSocket command protocol. No socket I/O;
@@ -68,9 +69,8 @@ bool isCommandPermitted(CommandKind kind, ClientRole role);
 
 // State-machine gate: is `kind` allowed while the system is in `current`?
 // `discover`, `set_process_mode`, `reset_frame_counts`, `set_header_only` are
-// always allowed. Lifecycle commands gate on `current`. `trigger_capture`
-// requires RUNNING (and, on top of this gate, the TRIGGER process mode — that
-// check lives in the server since it depends on the frame processor).
+// always allowed. Lifecycle commands gate on `current`; `trigger_capture` and
+// `stack_capture` require RUNNING.
 // `role` matters only for `start_stream` / `stop_stream`: a commander needs
 // RUNNING, whereas an observer's subscription is persistent and may be made
 // in any state (frames flow whenever the cameras are running).
@@ -93,15 +93,19 @@ std::variant<StreamRequest, std::string> buildStreamRequest(
 // Parse a stack_capture message: `camera_id` (optional), `num_frames`
 // (1..1024, default 16), `exposure_time` (us, 1..10 000 000), `analogue_gain`
 // (>= 1, <= 64; defaults to 1.0 when `exposure_time` is given), `skip_frames`
-// (0..100), `detect` ("none" or a detector mode name), `subpix_window`
-// (full-res px, 0..100; 0 = no refinement), `save_image`, `output_dir`.
-// Returns an error string suitable for the client on invalid input.
+// (0..100), `send_image` (boolean, default true). The fields protocol v8
+// removed — `detect`, `subpix_window`, `save_image`, `output_dir` — are
+// refused rather than ignored, so a client relying on them learns they no
+// longer do anything. Returns an error string suitable for the client on
+// invalid input.
 std::variant<StackRequest, std::string> buildStackRequest(
     const nlohmann::json& message);
 
-// Map a `detect` / `stack_detect` value: "none" or one of the four detector
-// mode names. std::nullopt for anything else.
-std::optional<ProcessMode> parseDetectKind(const std::string& name);
+// Parse a trigger_capture message: `camera_id` (optional), `skip_frames`
+// (0..100, default 0), `send_image` (boolean, default true). Returns an error
+// string suitable for the client on invalid input.
+std::variant<TriggerRequest, std::string> buildTriggerRequest(
+    const nlohmann::json& message);
 
 // Convert a successful CameraConfig build. Pure: no camera, no transport.
 // The function does not reject unknown fields — it silently ignores them

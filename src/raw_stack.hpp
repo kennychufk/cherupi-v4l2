@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <string>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -117,9 +116,5 @@ struct DetectConfig {
 // are in `linear`'s pixel coordinates, laid out as the live detector modes
 // lay them out (set_id = quadrant for the 2x2 modes, marker_id for ArUco).
 std::vector<CornerSet> detect(const cv::Mat& linear, const DetectConfig& cfg);
-
-// Write a CV_32FC1 image as a NumPy .npy file (format 1.0, '<f4', C order).
-// Returns false on any I/O failure.
-bool writeNpy(const std::string& path, const cv::Mat& img);
 
 }  // namespace raw_stack

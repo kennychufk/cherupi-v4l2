@@ -137,6 +137,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/aruco_detector.cpp
         src/raw_stack.cpp
         src/raw_stacker.cpp
+        src/trigger_capturer.cpp
     )
 
     # Header files
@@ -160,6 +161,8 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/aruco_detector.h
         src/raw_stack.hpp
         src/raw_stacker.hpp
+        src/trigger_capturer.hpp
+        src/capture_frame.hpp
     )
 
     # Create executable

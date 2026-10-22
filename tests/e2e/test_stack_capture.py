@@ -1,22 +1,23 @@
-"""Raw frame stacking: stack_capture, its stack_result, and the `stack` mode.
+"""Raw frame stacking: stack_capture, its stack_result and the stacked image.
 
 Requires live hardware. A board in view is not required: these tests check
-the protocol — settling on the pinned exposure, the result's shape, the
-stacked image streamed in `stack` mode, one stack at a time, cancellation,
-and saving — with detection off.
+the protocol — settling on the pinned exposure, the ack's shape, the stacked
+image that follows it (`frame_kind = 1`), send_image, one capture at a time,
+and cancellation.
 """
 
 from __future__ import annotations
 
-import json
 import struct
 import time
-from pathlib import Path
 
 import pytest
 
 from .client import (
+    DETECTION_CHECKERBOARD,
+    DETECTION_NONE,
     FOURCC_SF32,
+    FRAME_KIND_LIVE,
     FRAME_KIND_STACK,
     CherupiClient,
     CommandError,
@@ -42,14 +43,12 @@ def test_stack_capture_needs_the_raw_stream(
         client.stack_capture(num_frames=2)
 
 
-def test_stack_capture_pins_exposure_and_reports_the_stack(
+def test_stack_capture_reports_then_sends_the_image(
     client: CherupiClient, discovered_cameras: list[dict]
 ) -> None:
     cam_id = discovered_cameras[0]["id"]
     _start(client)
-    result = client.stack_capture(
-        camera_id=cam_id, num_frames=4, exposure_time=20000, detect="none"
-    )
+    result = client.stack_capture(camera_id=cam_id, num_frames=4, exposure_time=20000)
     assert result["cancelled"] is False
     assert result["stack_id"] == 1
     (c,) = result["captures"]
@@ -62,33 +61,16 @@ def test_stack_capture_pins_exposure_and_reports_the_stack(
     assert c["width"] == TEST_CONFIG["width"] // 2
     assert c["height"] == TEST_CONFIG["height"] // 2
     assert 0.0 <= c["white_fraction"] <= 1.0
-    assert c["detect"] == "none" and c["sets"] == []
     assert c["accumulate_ms"] > 0
+    # Detection rides on the frame; nothing is saved.
+    assert "sets" not in c and "filename" not in c
 
-    # Ids count up within a session.
-    again = client.stack_capture(camera_id=cam_id, num_frames=1, detect="none")
-    assert again["stack_id"] == 2
-
-
-def test_stack_mode_streams_only_stacked_images(
-    client: CherupiClient, discovered_cameras: list[dict]
-) -> None:
-    cam_id = discovered_cameras[0]["id"]
-    _start(client, "stack", stack_detect="none")
-    client.start_stream(cam_id)
-
-    # No live frames in this mode.
-    time.sleep(1.0)
-    assert client.drain_frames() == []
-
-    result = client.stack_capture(camera_id=cam_id, num_frames=2)
-    (c,) = result["captures"]
-    assert "error" not in c, c
-    frame = client.next_frame(timeout=15.0)
-    assert frame.frame_kind == FRAME_KIND_STACK
+    # No subscription: the image is sent because it was asked for.
+    frame = client.next_capture_frame(FRAME_KIND_STACK, result["stack_id"])
     assert frame.pixel_format == FOURCC_SF32
-    assert frame.frame_id == result["stack_id"]
     assert frame.camera_id == cam_id
+    assert frame.frame_id == c["last_frame_id"]
+    assert frame.detection_kind == DETECTION_NONE  # process mode none
     assert (frame.width, frame.height) == (c["width"], c["height"])
     assert frame.bytes_per_line == frame.width * 4
     assert len(frame.data) == frame.width * frame.height * 4
@@ -98,49 +80,58 @@ def test_stack_mode_streams_only_stacked_images(
     assert min(samples) > -500.0
     assert max(samples) > 0.0
 
-    # Header-only: the stacked frame's header still arrives, without pixels.
-    client.set_header_only(True)
-    client.stack_capture(camera_id=cam_id, num_frames=1)
-    hdr = client.next_frame(timeout=15.0)
-    assert hdr.is_header_only and hdr.frame_kind == FRAME_KIND_STACK
+    # Ids count up within a session.
+    again = client.stack_capture(camera_id=cam_id, num_frames=1)
+    assert again["stack_id"] == 2
+    client.next_capture_frame(FRAME_KIND_STACK, 2)
 
 
-def test_one_stack_at_a_time_and_stop_cancels(
+def test_send_image_false_sends_only_the_header(
+    client: CherupiClient, discovered_cameras: list[dict]
+) -> None:
+    """Whatever the header-only state: here live frames keep their pixels."""
+    cam_id = discovered_cameras[0]["id"]
+    _start(client)
+    client.start_stream(cam_id, subsample=4)
+    result = client.stack_capture(camera_id=cam_id, num_frames=2, send_image=False)
+    (c,) = result["captures"]
+    frame = client.next_capture_frame(FRAME_KIND_STACK, result["stack_id"])
+    assert frame.is_header_only
+    # Full stack geometry, not the subscription's subsampled size.
+    assert (frame.width, frame.height) == (c["width"], c["height"])
+    # The live stream keeps its pixels.
+    live = client.next_frame(timeout=5.0)
+    assert live.frame_kind == FRAME_KIND_LIVE and not live.is_header_only
+
+
+def test_stack_gets_the_modes_detection(
+    client: CherupiClient, discovered_cameras: list[dict]
+) -> None:
+    cam_id = discovered_cameras[0]["id"]
+    _start(client, "checkerboard", save_frames=False)
+    result = client.stack_capture(camera_id=cam_id, num_frames=2, send_image=False)
+    frame = client.next_capture_frame(FRAME_KIND_STACK, result["stack_id"],
+                                      timeout=30.0)
+    assert frame.detection_kind == DETECTION_CHECKERBOARD
+
+
+def test_one_capture_at_a_time_and_stop_cancels(
     client: CherupiClient, discovered_cameras: list[dict]
 ) -> None:
     cam_id = discovered_cameras[0]["id"]
     _start(client)
-    client._send({"cmd": "stack_capture", "camera_id": cam_id,
-                  "num_frames": 1000, "detect": "none"})
+    client._send({"cmd": "stack_capture", "camera_id": cam_id, "num_frames": 1000})
     time.sleep(0.3)
-    with pytest.raises(CommandError, match="already pending"):
+    # Either kind of capture is refused while one is outstanding.
+    with pytest.raises(CommandError, match="already in progress"):
         client.stack_capture(camera_id=cam_id, num_frames=1)
+    with pytest.raises(CommandError, match="already in progress"):
+        client.trigger_capture(camera_id=cam_id)
 
     client._send({"cmd": "stop_cameras"})
     msg = client.wait_for_message(lambda m: m.get("type") == "stack_result",
                                   timeout=15.0)
     assert msg["cancelled"] is True
     assert msg["captures"][0]["error"] == "cancelled"
-
-
-def test_save_image_writes_npy_and_sidecar(
-    client: CherupiClient,
-    discovered_cameras: list[dict],
-    tmp_output_dir: Path,
-) -> None:
-    cam_id = discovered_cameras[0]["id"]
-    out = tmp_output_dir / "stacks"
-    _start(client)
-    result = client.stack_capture(camera_id=cam_id, num_frames=2, detect="none",
-                                  save_image=True, output_dir=str(out))
-    (c,) = result["captures"]
-    npy = Path(c["filename"])
-    assert npy == out / f"stack{result['stack_id']}-cam{cam_id}.npy"
-    data = npy.read_bytes()
-    assert data[:6] == b"\x93NUMPY"
-    header_len = struct.unpack_from("<H", data, 8)[0]
-    header = data[10:10 + header_len].decode()
-    assert f"'shape': ({c['height']}, {c['width']})" in header
-    assert len(data) == 10 + header_len + c["width"] * c["height"] * 4
-    sidecar = json.loads(npy.with_suffix(".json").read_text())
-    assert sidecar["frames_stacked"] == 2
+    time.sleep(0.5)
+    assert all(f.frame_kind != FRAME_KIND_STACK for f in client.drain_frames())

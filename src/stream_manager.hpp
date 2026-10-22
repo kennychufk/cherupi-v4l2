@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -11,10 +12,10 @@
 #include <vector>
 
 #include "camera_manager.hpp"
+#include "capture_frame.hpp"
 #include "frame_processor.hpp"
 #include "frame_sink.hpp"
 #include "rate_controller.hpp"
-#include "raw_stacker.hpp"
 #include "stream_priority.hpp"
 #include "types.hpp"
 
@@ -38,6 +39,9 @@ struct ChunkedTransfer {
   size_t current_chunk = 0;
   std::chrono::steady_clock::time_point start_time;
   bool in_progress = false;
+  // An on-demand capture frame: not tied to a subscription, so unsubscribing
+  // its camera does not abort it.
+  bool capture = false;
 };
 
 // One client connection's streaming session: the cameras it subscribed to
@@ -75,10 +79,6 @@ class StreamManager {
   // default) never yields. `higher` must outlive this object.
   void setYieldTo(const StreamManager* higher) { yield_to_ = higher; }
 
-  // Where stacked images come from in process mode STACK, which streams
-  // those instead of live frames. Must outlive this object.
-  void setStackSource(RawStacker* stacker) { stacker_ = stacker; }
-
   // Connect/disconnect a FrameSink (owned by the caller). clearSink also
   // drops every subscription: a subscription belongs to a connection.
   void setSink(FrameSink* sink);
@@ -90,7 +90,22 @@ class StreamManager {
   // made while they are stopped simply waits.
   bool startStreamingCamera(uint32_t camera_id, StreamOptions options = {});
   bool stopStreamingCamera(uint32_t camera_id);
+  // Drop every subscription and stop the streaming thread; queued capture
+  // frames go with it.
   void stopAllStreaming();
+  // Drop every subscription but keep the thread, so capture frames already
+  // queued still reach the client (stop_cameras).
+  void clearSubscriptions();
+
+  // Queue the frames of an on-demand capture (trigger_capture,
+  // stack_capture) for this session's client. Each goes out once, in order
+  // and ahead of any live frame, whatever the subscriptions, max_fps,
+  // subsample or header-only state; a transfer cut short (backpressure) is
+  // retried, not dropped. Dropped only when no client is attached, now or by
+  // the time it would be sent.
+  void enqueueCaptures(std::vector<CaptureFrame> frames);
+  // Capture frames still queued or being sent.
+  bool hasPendingCaptures() const;
 
   // Header only mode control
   void setHeaderOnlyMode(bool enabled) {
@@ -140,7 +155,6 @@ class StreamManager {
     // roles consume the shared slots independently.
     uint64_t camera_cursor = 0;
     uint64_t detected_cursor = 0;
-    uint64_t stack_cursor = 0;  // RawStacker::getStackedFrameForStreaming
     // When this camera's last frame went out, for max_fps pacing.
     std::chrono::steady_clock::time_point last_sent{};
   };
@@ -149,7 +163,6 @@ class StreamManager {
   FrameProcessor* frame_processor;
   const ClientRole role_;
   const StreamManager* yield_to_ = nullptr;
-  RawStacker* stacker_ = nullptr;
 
   // Streaming state
   std::map<uint32_t, CameraStream> streaming_cameras;
@@ -175,6 +188,12 @@ class StreamManager {
   std::unique_ptr<ChunkedTransfer> current_transfer;
   std::mutex transfer_mutex;
 
+  // On-demand capture frames awaiting the sink, oldest first, and whether one
+  // has been taken off the queue and is being sent.
+  std::deque<CaptureFrame> captures_;
+  bool capture_in_flight_ = false;  // guarded by captures_mutex_
+  mutable std::mutex captures_mutex_;
+
   AdaptiveRateController rate_controller;
 
   struct StreamStats {
@@ -190,7 +209,13 @@ class StreamManager {
   } stats;
 
   std::string tag() const;  // log prefix carrying the role
+  // Start the streaming thread unless it is running; needs sink_mutex held
+  // and a sink attached.
+  void startThreadLocked();
   void streamingLoop();
+  // Send the oldest queued capture frame, if any. Returns whether one was
+  // taken off the queue (sent, or dropped because the client went away).
+  bool sendNextCapture();
   // Block the streaming thread until sink->bufferedAmount() drops below
   // SOFT_BUFFER_LIMIT, or `should_stop` fires, or we've waited too long.
   // Returns true if the caller should proceed, false if it should bail.
@@ -201,7 +226,7 @@ class StreamManager {
   bool sendChunkedFrame(std::shared_ptr<const FrameData> frame,
                         uint32_t camera_id,
                         std::vector<CornerSet> corner_sets,
-                        uint8_t detection_kind);
+                        uint8_t detection_kind, bool capture = false);
   bool sendHeaderOnlyFrame(std::shared_ptr<const FrameData> frame,
                            uint32_t camera_id,
                            std::vector<CornerSet> corner_sets,

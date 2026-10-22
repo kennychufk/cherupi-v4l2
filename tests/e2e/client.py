@@ -1,6 +1,6 @@
 """WebSocket client for the cherupi-v4l2 camera server.
 
-Speaks the v7 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
+Speaks the v8 CHUN/CHNK binary protocol defined in docs/websocket-protocol.md.
 Designed for use from pytest end-to-end tests but has no test-framework
 dependency and can be driven from a plain script.
 
@@ -58,13 +58,13 @@ import websocket  # pip install websocket-client  # noqa: E402
 
 CHUN_MAGIC = 0x4348554E  # 'CHUN'
 CHNK_MAGIC = 0x43484E4B  # 'CHNK'
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 # ChunkStartMarker (8 bytes) + ChunkHeader (72 bytes)
 START_STRUCT = struct.Struct("<II")  # magic, version
 # frame_uuid, frame_id, camera_id, total_chunks, total_size, bytes_per_line,
 # width, height, pixel_format, frames_saved, timestamp_us (u64),
-# frame_duration_us, corner_block_size, num_corner_sets (u16), reserved (u16),
+# frame_duration_us, corner_block_size, num_corner_sets (u16), capture_id (u16),
 # lens_position (f32), af_state (u8), detection_kind (u8), frame_kind (u8),
 # reserved2 (u8), focus_fom (i32)
 HEADER_STRUCT = struct.Struct("<IIIIIIIIIIQIIHHfBBBBi")
@@ -92,7 +92,8 @@ FOURCC_SF32 = 0x32334653
 
 # ChunkHeader.frame_kind
 FRAME_KIND_LIVE = 0
-FRAME_KIND_STACK = 1
+FRAME_KIND_STACK = 1  # a stack_capture's image
+FRAME_KIND_TRIGGER = 2  # a trigger_capture's frame
 
 ROLE_COMMANDER = "commander"
 ROLE_OBSERVER = "observer"
@@ -149,6 +150,8 @@ class Frame:
     detection_kind: int = DETECTION_NONE
     focus_fom: int = -1  # libcamera FocusFoM; -1 if unavailable
     frame_kind: int = FRAME_KIND_LIVE
+    # trigger_id / stack_id (low 16 bits) of the capture; 0 on a live frame.
+    capture_id: int = 0
     corner_sets: List[CornerSet] = field(default_factory=list)
 
     @property
@@ -331,7 +334,7 @@ class CherupiClient:
             frame_duration_us,
             corner_block_size,
             num_corner_sets,
-            _reserved,
+            capture_id,
             lens_position,
             af_state,
             detection_kind,
@@ -369,6 +372,7 @@ class CherupiClient:
             detection_kind=detection_kind,
             focus_fom=focus_fom,
             frame_kind=frame_kind,
+            capture_id=capture_id,
             corner_sets=corner_sets,
         )
 
@@ -514,19 +518,23 @@ class CherupiClient:
         self,
         camera_id: Optional[int] = None,
         skip_frames: Optional[int] = None,
+        send_image: Optional[bool] = None,
         timeout: float = 10.0,
     ) -> Dict[str, Any]:
-        """Fire a `trigger` mode capture and wait for the `trigger_result` ack.
+        """Fire a `trigger_capture` and wait for the `trigger_result` ack.
 
         The ack is asynchronous: it arrives only once every armed camera has
         delivered its triggered frame, so the timeout must cover at least one
-        frame interval per camera (plus `skip_frames` more).
+        frame interval per camera (plus `skip_frames` more). The frames follow
+        as binary `frame_kind = 2` frames (see `next_capture_frame`).
         """
         body: Dict[str, Any] = {"cmd": "trigger_capture"}
         if camera_id is not None:
             body["camera_id"] = camera_id
         if skip_frames is not None:
             body["skip_frames"] = skip_frames
+        if send_image is not None:
+            body["send_image"] = send_image
         return self.command(body, expect=("trigger_result",), timeout=timeout)
 
     def stack_capture(self, timeout: float = 30.0, **fields: Any) -> Dict[str, Any]:
@@ -573,6 +581,23 @@ class CherupiClient:
             return self._frames.get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError(f"No frame received within {timeout}s")
+
+    def next_capture_frame(self, frame_kind: int, capture_id: int,
+                           timeout: float = 15.0) -> Frame:
+        """Pop frames until the one a capture (`frame_kind` STACK or TRIGGER,
+        `capture_id` its stack_id / trigger_id) produced; live frames on the
+        way are dropped."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"No capture frame (kind {frame_kind}, id {capture_id}) "
+                    f"within {timeout}s"
+                )
+            frame = self.next_frame(timeout=remaining)
+            if frame.frame_kind == frame_kind and frame.capture_id == capture_id:
+                return frame
 
     def drain_frames(self) -> List[Frame]:
         out: List[Frame] = []

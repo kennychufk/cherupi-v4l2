@@ -588,7 +588,7 @@ void Camera::onRequestComplete(libcamera::Request* request) {
       }
     }
 
-    // Nothing consumes live frames (process mode STACK): skip the copy of a
+    // Nothing consumes live frames (see setLiveFrames): skip the copy of a
     // whole YUV frame per capture, and the memory it would hold.
     if (!live_frames_.load()) {
       ++frame_counter;
@@ -811,6 +811,13 @@ LensPositionLimits Camera::getLensPositionLimitsHw() const {
   const libcamera::ControlInfo& info = it->second;
   float def = info.def().isNone() ? nan : info.def().get<float>();
   return {info.min().get<float>(), info.max().get<float>(), def};
+}
+
+void Camera::setLiveFrames(bool enabled) {
+  if (live_frames_.exchange(enabled) && !enabled) {
+    std::lock_guard<std::mutex> lock(latest_frame_mutex);
+    latest_frame_.reset();
+  }
 }
 
 bool Camera::getFrameForStreaming(uint64_t& last_seen_seq,

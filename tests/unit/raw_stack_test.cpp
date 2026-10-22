@@ -1,10 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <cstring>
-#include <fstream>
 #include <iostream>
-#include <string>
 #include <vector>
 
 #include <opencv2/imgproc.hpp>
@@ -84,31 +81,6 @@ TEST(RawStackTest, BinnedPixelMapsToTheCentreOfItsQuad) {
   const cv::Point2f p = raw_stack::binnedToFull({10.f, 3.25f});
   EXPECT_FLOAT_EQ(p.x, 20.5f);
   EXPECT_FLOAT_EQ(p.y, 7.0f);
-}
-
-TEST(RawStackTest, WritesALoadableNpy) {
-  cv::Mat img(3, 5, CV_32FC1);
-  for (int i = 0; i < 15; ++i) img.at<float>(i / 5, i % 5) = 0.5f * i;
-  const std::string path = std::string(CHERUPI_TEST_SCRATCH_DIR) + "/stack.npy";
-  std::system(("mkdir -p " + std::string(CHERUPI_TEST_SCRATCH_DIR)).c_str());
-  ASSERT_TRUE(raw_stack::writeNpy(path, img));
-
-  std::ifstream f(path, std::ios::binary);
-  std::vector<char> bytes((std::istreambuf_iterator<char>(f)),
-                          std::istreambuf_iterator<char>());
-  ASSERT_GE(bytes.size(), 10u);
-  EXPECT_EQ(std::string(bytes.data() + 1, 5), "NUMPY");
-  const size_t header_len = static_cast<uint8_t>(bytes[8]) |
-                            (static_cast<uint8_t>(bytes[9]) << 8);
-  EXPECT_EQ((10 + header_len) % 64, 0u);
-  const std::string header(bytes.data() + 10, header_len);
-  EXPECT_NE(header.find("'descr': '<f4'"), std::string::npos);
-  EXPECT_NE(header.find("'shape': (3, 5)"), std::string::npos);
-  EXPECT_EQ(header.back(), '\n');
-  ASSERT_EQ(bytes.size(), 10 + header_len + 15 * sizeof(float));
-  float last;
-  std::memcpy(&last, bytes.data() + bytes.size() - sizeof(float), sizeof(float));
-  EXPECT_FLOAT_EQ(last, 7.0f);
 }
 
 // --- stacking a synthetic board ---------------------------------------------

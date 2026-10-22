@@ -148,202 +148,6 @@ TEST_F(FrameProcessorTempDir, BatchModeWritesThroughWriterThreads) {
   }
 }
 
-TEST_F(FrameProcessorTempDir, TriggerModeSavesNothingUntilArmed) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  for (int i = 0; i < 5; ++i) {
-    saver.saveFrame(makeFrame(/*camera_id=*/0, /*frame_id=*/i, 4096));
-  }
-  saver.stop();
-
-  EXPECT_EQ(saver.getFramesSaved(), 0u);
-  EXPECT_TRUE(fs::is_empty(dir));
-}
-
-TEST_F(FrameProcessorTempDir, TriggerCapturesNextFrameOfEveryArmedCamera) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  // Free-running frames before the trigger are discarded.
-  saver.saveFrame(makeFrame(0, 0, 4096));
-  saver.saveFrame(makeFrame(1, 0, 4096));
-
-  TriggerResult result;
-  int completions = 0;
-  auto trigger_id = saver.armTrigger({0, 1}, /*skip_frames=*/0,
-                                     [&](TriggerResult r) {
-                                       result = std::move(r);
-                                       ++completions;
-                                     });
-  ASSERT_TRUE(trigger_id.has_value());
-  EXPECT_TRUE(saver.hasPendingTrigger());
-
-  // Camera 0 delivers first: the trigger stays pending on camera 1.
-  saver.saveFrame(makeFrame(0, 1, 4096));
-  EXPECT_EQ(completions, 0);
-  EXPECT_TRUE(saver.hasPendingTrigger());
-  // A second frame from the already-served camera is not saved again.
-  saver.saveFrame(makeFrame(0, 2, 4096));
-  EXPECT_EQ(completions, 0);
-
-  saver.saveFrame(makeFrame(1, 1, 4096));
-  EXPECT_EQ(completions, 1);
-  EXPECT_FALSE(saver.hasPendingTrigger());
-
-  // Frames after completion are free-running again.
-  saver.saveFrame(makeFrame(0, 3, 4096));
-  saver.saveFrame(makeFrame(1, 2, 4096));
-  saver.stop();
-
-  EXPECT_EQ(result.trigger_id, *trigger_id);
-  EXPECT_FALSE(result.cancelled);
-  ASSERT_EQ(result.captures.size(), 2u);
-  EXPECT_EQ(result.captures[0].camera_id, 0u);
-  EXPECT_EQ(result.captures[0].frame_id, 1u);
-  EXPECT_EQ(result.captures[1].camera_id, 1u);
-  EXPECT_EQ(result.captures[1].frame_id, 1u);
-
-  EXPECT_EQ(saver.getFramesSaved(), 2u);
-  EXPECT_TRUE(fs::exists(dir / "cam0-1.yuv"));
-  EXPECT_TRUE(fs::exists(dir / "cam1-1.yuv"));
-  EXPECT_FALSE(fs::exists(dir / "cam0-0.yuv"));
-  EXPECT_FALSE(fs::exists(dir / "cam0-2.yuv"));
-  EXPECT_FALSE(fs::exists(dir / "cam0-3.yuv"));
-}
-
-TEST_F(FrameProcessorTempDir, TriggerSkipFramesDiscardsSettlingFrames) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  TriggerResult result;
-  ASSERT_TRUE(saver.armTrigger({0}, /*skip_frames=*/2, [&](TriggerResult r) {
-    result = std::move(r);
-  }));
-
-  saver.saveFrame(makeFrame(0, 10, 4096));  // skipped
-  saver.saveFrame(makeFrame(0, 11, 4096));  // skipped
-  EXPECT_TRUE(saver.hasPendingTrigger());
-  saver.saveFrame(makeFrame(0, 12, 4096));  // saved
-  EXPECT_FALSE(saver.hasPendingTrigger());
-  saver.stop();
-
-  ASSERT_EQ(result.captures.size(), 1u);
-  EXPECT_EQ(result.captures[0].frame_id, 12u);
-  EXPECT_EQ(saver.getFramesSaved(), 1u);
-  EXPECT_TRUE(fs::exists(dir / "cam0-12.yuv"));
-}
-
-TEST_F(FrameProcessorTempDir, TriggerRejectsSecondArmWhilePending) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  ASSERT_TRUE(saver.armTrigger({0}, 0, [](TriggerResult) {}));
-  EXPECT_FALSE(saver.armTrigger({0}, 0, [](TriggerResult) {}).has_value());
-
-  // Once served, a new trigger can be armed and gets a distinct id.
-  saver.saveFrame(makeFrame(0, 0, 4096));
-  auto second = saver.armTrigger({0}, 0, [](TriggerResult) {});
-  ASSERT_TRUE(second.has_value());
-  EXPECT_EQ(*second, 2u);
-  saver.stop();
-}
-
-TEST_F(FrameProcessorTempDir, TriggerArmRejectedOutsideTriggerMode) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::BATCH;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-  EXPECT_FALSE(saver.armTrigger({0}, 0, [](TriggerResult) {}).has_value());
-  saver.stop();
-}
-
-TEST_F(FrameProcessorTempDir, TriggerPendingAtStopIsCancelled) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.output_dir = dir.string();
-  cfg.writer_threads = 1;
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  TriggerResult result;
-  int completions = 0;
-  ASSERT_TRUE(saver.armTrigger({0, 1}, 0, [&](TriggerResult r) {
-    result = std::move(r);
-    ++completions;
-  }));
-  saver.saveFrame(makeFrame(0, 7, 4096));  // camera 1 never delivers
-  saver.stop();
-
-  EXPECT_EQ(completions, 1);
-  EXPECT_TRUE(result.cancelled);
-  ASSERT_EQ(result.captures.size(), 1u);
-  EXPECT_EQ(result.captures[0].camera_id, 0u);
-  EXPECT_EQ(result.captures[0].frame_id, 7u);
-  // The camera that did deliver still had its frame written.
-  EXPECT_TRUE(fs::exists(dir / "cam0-7.yuv"));
-}
-
-TEST_F(FrameProcessorTempDir, TriggerWithSaveFramesOffAcksWithoutWriting) {
-  ProcessConfig cfg;
-  cfg.mode = ProcessMode::TRIGGER;
-  cfg.save_frames = false;
-  cfg.output_dir = dir.string();
-
-  FrameProcessor saver;
-  saver.configure(cfg);
-  saver.start();
-
-  TriggerResult result;
-  ASSERT_TRUE(saver.armTrigger({0}, 0, [&](TriggerResult r) {
-    result = std::move(r);
-  }));
-  saver.saveFrame(makeFrame(0, 4, 4096));
-  saver.stop();
-
-  ASSERT_EQ(result.captures.size(), 1u);
-  EXPECT_EQ(result.captures[0].frame_id, 4u);
-  EXPECT_TRUE(result.captures[0].filename.empty());
-  EXPECT_EQ(saver.getFramesSaved(), 0u);
-  EXPECT_TRUE(fs::is_empty(dir));
-}
-
-// --- Backlog budget -------------------------------------------------------
-// The regression these guard: BUFFER used to retain every frame with no bound,
-// so at 4608x2592 (17.9 MB/frame) ~54 frames exhausted a 1 GB Pi, the
-// libcamera frontend timed out under the swap thrash, and the process was
-// OOM-killed — losing the very frames it was buffering.
-
 TEST_F(FrameProcessorTempDir, BufferModeStopsAtTheBacklogBudget) {
   ProcessConfig cfg;
   cfg.mode = ProcessMode::BUFFER;
@@ -635,6 +439,44 @@ TEST_F(FrameProcessorTempDir, DetectorModeWithSaveFramesOffStreamsButWritesNothi
   EXPECT_EQ(saver.getDetections(), 1u);
   EXPECT_EQ(saver.getFramesSaved(), 0u);
   EXPECT_FALSE(fs::exists(out_dir)) << out_dir;
+}
+
+TEST_F(FrameProcessorTempDir, DetectCapturedRunsTheModesDetectorWithoutSaving) {
+  // A trigger_capture frame gets the mode's detection synchronously, and none
+  // of the live path's bookkeeping: nothing counted, published or written,
+  // even with save_frames on.
+  Pgm board = loadCheckerboardFixture();
+  ASSERT_GT(board.width, 0);
+  FrameData frame =
+      makeYuvFrameWithOptionalBoard(/*camera_id=*/0, /*frame_id=*/9, board,
+                                    /*paste=*/true);
+
+  ProcessConfig cfg;
+  cfg.mode = ProcessMode::CHECKERBOARD2X2;
+  cfg.output_dir = dir.string();
+  cfg.checkerboard_cols = 11;
+  cfg.checkerboard_rows = 8;
+  cfg.checkerboard_full_res_detection = true;
+  cfg.writer_threads = 1;
+
+  FrameProcessor saver;
+  saver.configure(cfg);
+  saver.start();
+  std::vector<CornerSet> sets = saver.detectCaptured(frame);
+  saver.stop();
+
+  ASSERT_EQ(sets.size(), 1u);
+  EXPECT_EQ(sets[0].set_id, 0u);  // the top-left quadrant
+  EXPECT_EQ(sets[0].corners.size(), 11u * 8u);
+  EXPECT_EQ(saver.getFramesChecked(), 0u);
+  EXPECT_EQ(saver.getFramesSaved(), 0u);
+  EXPECT_TRUE(fs::is_empty(dir));
+
+  // A mode without a detector detects nothing.
+  cfg.mode = ProcessMode::BATCH;
+  FrameProcessor batch;
+  batch.configure(cfg);
+  EXPECT_TRUE(batch.detectCaptured(frame).empty());
 }
 
 TEST_F(FrameProcessorTempDir, Checkerboard2x2SkipsWhenNoQuadrantHasBoard) {

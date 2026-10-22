@@ -1,6 +1,6 @@
 # End-to-End Tests
 
-Black-box pytest suite that drives a running `camera_ws_server` through the v7
+Black-box pytest suite that drives a running `camera_ws_server` through the v8
 WebSocket protocol. Covers:
 
 - Full lifecycle (discover → configure → start → stream → stop)
@@ -12,7 +12,9 @@ WebSocket protocol. Covers:
 - CHUN/CHNK binary frame format (header fields, detection block, chunk
   reassembly, frame_uuid uniqueness)
 - Header-only mode
-- Process modes: NONE / BUFFER / BATCH / TRIGGER / CHECKERBOARD / CHECKERBOARD2X2
+- Process modes: NONE / BUFFER / BATCH / CHECKERBOARD / CHECKERBOARD2X2
+- On-demand captures: `trigger_capture` and `stack_capture` (acks, capture
+  frames, `send_image`, one capture at a time)
 
 `client.py` is the harness: `CherupiClient(url, role="commander"|"observer")`
 connects to the role's path, replies to commands synchronously, queues frames

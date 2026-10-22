@@ -42,12 +42,11 @@ WebSocketServer::WebSocketServer() {
         if (Camera* camera = camera_manager->getCamera(id))
           camera->clearCaptureOverride();
       });
-  raw_stacker->setPublishedCallback([this]() {
-    if (commander_.stream) commander_.stream->notifyFrameAvailable();
-    if (observer_.stream) observer_.stream->notifyFrameAvailable();
-  });
-  commander_.stream->setStackSource(raw_stacker.get());
-  observer_.stream->setStackSource(raw_stacker.get());
+  // A triggered frame gets the process mode's detection, like a live one.
+  trigger_capturer = std::make_unique<TriggerCapturer>(
+      [this](const FrameData& frame) {
+        return frame_processor->detectCaptured(frame);
+      });
 
   // Set up the callback for frame notifications: both sessions consume the
   // same publication slots, each with its own cursor.
@@ -488,89 +487,94 @@ void WebSocketServer::handleSetProcessMode(Socket* ws, const json& msg) {
   sendStatus(ws, "Process mode configured: " + mode);
 }
 
+bool WebSocketServer::captureInProgress() {
+  return capture_busy_.load() || commander_.stream->hasPendingCaptures();
+}
+
+void WebSocketServer::deliverCapture(std::vector<CaptureFrame> frames) {
+  // Queue first, then release: the queue holds the gate from here on, so
+  // there is no moment in which a second capture could slip in.
+  commander_.stream->enqueueCaptures(std::move(frames));
+  capture_busy_ = false;
+}
+
+void WebSocketServer::updateLiveFrames() {
+  const bool needed = frame_processor->getMode() != ProcessMode::NONE ||
+                      commander_.stream->getStreamingCameraCount() > 0 ||
+                      observer_.stream->getStreamingCameraCount() > 0 ||
+                      trigger_capturer->hasPending();
+  camera_manager->setLiveFrames(needed);
+}
+
 void WebSocketServer::handleTriggerCapture(Socket* ws, const json& msg) {
   if (!command_parser::isCommandAllowed(
           command_parser::CommandKind::TriggerCapture, system_state)) {
     sendError(ws, "trigger_capture requires RUNNING state");
     return;
   }
-  // The request is meaningful only in trigger mode; in any other mode it is
-  // rejected rather than silently changing what that mode saves.
-  if (frame_processor->getMode() != ProcessMode::TRIGGER) {
-    sendError(ws, "trigger_capture requires the 'trigger' process mode");
+  auto parsed = command_parser::buildTriggerRequest(msg);
+  if (std::holds_alternative<std::string>(parsed)) {
+    sendError(ws, std::get<std::string>(parsed));
     return;
   }
+  const TriggerRequest& req = std::get<TriggerRequest>(parsed);
 
   // Which cameras to capture from: every running camera by default, or just
   // the one named by an optional "camera_id".
-  std::vector<uint32_t> camera_ids;
-  if (msg.contains("camera_id") && msg["camera_id"].is_number_integer()) {
-    int64_t requested = msg["camera_id"].get<int64_t>();
-    if (requested < 0) {
-      sendError(ws, "camera_id must be non-negative");
-      return;
-    }
-    uint32_t camera_id = static_cast<uint32_t>(requested);
-    Camera* camera = camera_manager->getCamera(camera_id);
+  TriggerPlan plan;
+  if (req.camera_id) {
+    Camera* camera = camera_manager->getCamera(*req.camera_id);
     if (!camera || camera->getState() != CameraState::RUNNING) {
-      sendError(ws, "Camera " + std::to_string(camera_id) + " is not running");
+      sendError(ws, "Camera " + std::to_string(*req.camera_id) + " is not running");
       return;
     }
-    camera_ids.push_back(camera_id);
+    plan.camera_ids.push_back(*req.camera_id);
   } else {
-    for (Camera* camera : camera_manager->getAllCameras()) {
-      if (camera->getState() == CameraState::RUNNING) {
-        camera_ids.push_back(camera->getId());
-      }
-    }
-    if (camera_ids.empty()) {
+    for (Camera* camera : camera_manager->getAllCameras())
+      if (camera->getState() == CameraState::RUNNING)
+        plan.camera_ids.push_back(camera->getId());
+    if (plan.camera_ids.empty()) {
       sendError(ws, "No running cameras to trigger");
       return;
     }
   }
+  plan.skip_frames = req.skip_frames;
+  plan.send_image = req.send_image;
+  plan.detection_kind = detectionKindForMode(frame_processor->getMode());
 
-  int skip_frames = frame_processor->getTriggerSkipFrames();
-  if (msg.contains("skip_frames") && msg["skip_frames"].is_number_integer()) {
-    skip_frames = std::max(0, msg["skip_frames"].get<int>());
-  }
-
-  // The ack is produced on a capture thread, so it must not touch `ws`
-  // directly. Capture the sink's shared_ptr here (on the loop thread) and let
-  // it marshal the send back onto the loop — it also no-ops safely if the
-  // client disconnects while the trigger is pending. Only a commander can get
-  // here (role gate), so this is the commander's sink.
-  std::shared_ptr<UwsFrameSink> sink = sinkOf(sessionFor(ws));
-  auto trigger_id = frame_processor->armTrigger(
-      camera_ids, skip_frames, [sink](TriggerResult result) {
-        json response;
-        response["type"] = Protocol::TYPE_TRIGGER_RESULT;
-        response["trigger_id"] = result.trigger_id;
-        response["cancelled"] = result.cancelled;
-        response["captures"] = json::array();
-        for (const auto& capture : result.captures) {
-          json entry;
-          entry["camera_id"] = capture.camera_id;
-          entry["frame_id"] = capture.frame_id;
-          entry["filename"] = capture.filename;
-          response["captures"].push_back(std::move(entry));
-        }
-        if (sink) sink->sendText(response.dump());
-      });
-
-  if (!trigger_id) {
-    // The only other way to fail here is a processor that never started in
-    // trigger mode — i.e. set_process_mode was issued after start_cameras, so
-    // the pipeline is still running whatever mode was active at start.
-    sendError(ws, frame_processor->hasPendingTrigger()
-                      ? "A trigger capture is already pending"
-                      : "Frame processor is not running the trigger mode; send "
-                        "set_process_mode 'trigger' before start_cameras");
+  if (captureInProgress()) {
+    sendError(ws, "A capture is already in progress: wait for its frames "
+                  "before the next trigger_capture or stack_capture");
     return;
   }
+  capture_busy_ = true;
+  // The triggered frame is a copy of a live frame, so the cameras must be
+  // copying them out before the trigger can see one.
+  camera_manager->setLiveFrames(true);
 
+  // The ack comes from a capture thread and the frames from the capturer's
+  // worker, so neither may touch `ws`: the ack goes through the sink (which
+  // marshals onto the loop and no-ops once the client has gone) and the
+  // frames through the commander's stream. Only a commander gets here (role
+  // gate).
+  std::shared_ptr<UwsFrameSink> sink = sinkOf(sessionFor(ws));
+  const size_t num_cameras = plan.camera_ids.size();
+  auto trigger_id = trigger_capturer->arm(
+      std::move(plan),
+      [this, sink](TriggerResult result) {
+        if (sink) sink->sendText(triggerResultJson(result).dump());
+        updateLiveFrames();
+      },
+      [this](std::vector<CaptureFrame> frames) { deliverCapture(std::move(frames)); });
+  if (!trigger_id) {
+    capture_busy_ = false;
+    updateLiveFrames();
+    sendError(ws, "A trigger capture is already pending");
+    return;
+  }
   LOG_INFO("WebSocketServer",
            "Trigger capture " + std::to_string(*trigger_id) + " armed for " +
-               std::to_string(camera_ids.size()) + " camera(s)");
+               std::to_string(num_cameras) + " camera(s)");
 }
 
 bool WebSocketServer::rawConfigured() {
@@ -627,37 +631,43 @@ void WebSocketServer::handleStackCapture(Socket* ws, const json& msg) {
     }
   }
 
+  // The process mode's detection, with its parameters.
   const ProcessConfig& pc = frame_processor->getConfig();
   plan.num_frames = req.num_frames;
   plan.exposure_time_us = req.exposure_time_us;
   plan.analogue_gain = req.analogue_gain;
   plan.skip_frames = req.skip_frames;
-  plan.detect.kind = req.detect ? *req.detect
-                     : isDetectorMode(pc.mode)   ? pc.mode
-                     : pc.mode == ProcessMode::STACK ? pc.stack_detect
-                                                     : ProcessMode::NONE;
+  plan.send_image = req.send_image;
+  plan.detect.kind = isDetectorMode(pc.mode) ? pc.mode : ProcessMode::NONE;
   plan.detect.rows = pc.checkerboard_rows;
   plan.detect.cols = pc.checkerboard_cols;
-  // The window is asked for in full-res pixels; the stack is 2x2-binned.
-  plan.detect.subpix_half_window = req.subpix_window / 2;
+  // The window is set in full-res pixels; the stack is 2x2-binned.
+  plan.detect.subpix_half_window = pc.checkerboard_subpix_window / 2;
   const bool aruco = plan.detect.kind == ProcessMode::ARUCO ||
                      plan.detect.kind == ProcessMode::ARUCO2X2;
   plan.detect.num_threads = aruco ? pc.aruco_num_threads : pc.checkerboard_num_threads;
   plan.detect.aruco_corner_refine = pc.aruco_corner_refine;
   plan.detect.aruco_edge_refine = pc.aruco_edge_refine;
-  plan.save_image = req.save_image;
-  plan.output_dir = req.output_dir.value_or(pc.output_dir);
-  plan.publish = frame_processor->getMode() == ProcessMode::STACK;
 
-  // The result is produced on the stacker's worker thread; like the trigger
-  // ack it goes out through the commander's sink, which marshals onto the
-  // loop and no-ops if the client has gone.
+  if (captureInProgress()) {
+    sendError(ws, "A capture is already in progress: wait for its frames "
+                  "before the next trigger_capture or stack_capture");
+    return;
+  }
+  capture_busy_ = true;
+
+  // The ack and the images come from the stacker's worker thread; like the
+  // trigger's they go out through the commander's sink and stream.
   std::shared_ptr<UwsFrameSink> sink = sinkOf(sessionFor(ws));
   const size_t num_cameras = plan.camera_ids.size();
-  auto stack_id = raw_stacker->arm(std::move(plan), [sink](StackResult result) {
-    if (sink) sink->sendText(stackResultJson(result).dump());
-  });
+  auto stack_id = raw_stacker->arm(
+      std::move(plan),
+      [sink](StackResult result) {
+        if (sink) sink->sendText(stackResultJson(result).dump());
+      },
+      [this](std::vector<CaptureFrame> frames) { deliverCapture(std::move(frames)); });
   if (!stack_id) {
+    capture_busy_ = false;
     sendError(ws, "A stack capture is already pending");
     return;
   }
@@ -674,12 +684,6 @@ void WebSocketServer::handleStartCameras(Socket* ws) {
     return;
   }
 
-  if (frame_processor->getConfig().mode == ProcessMode::STACK && !rawConfigured()) {
-    sendError(ws, "Process mode 'stack' needs the raw stream: configure with "
-                  "\"raw\": true");
-    return;
-  }
-
   // Refuse a mode that arithmetically cannot keep up before any of it runs.
   // frame_processor->start() has to come first because the budget it resolves
   // is one of the inputs, so the check reads the started processor and we tear
@@ -691,16 +695,13 @@ void WebSocketServer::handleStartCameras(Socket* ws) {
     return;
   }
 
-  // Set up the frame callback whenever any processing is active (detection
-  // and/or saving); the processor itself decides what to do per frame.
-  if (frame_processor->getMode() != ProcessMode::NONE) {
-    LOG_INFO("WebSocketServer", "Frame processing enabled, setting up callback");
-    camera_manager->setFrameCallback(
-        [this](const FrameData& frame) { frame_processor->saveFrame(frame); });
-  } else {
-    LOG_INFO("WebSocketServer", "Frame processing disabled, no callback set");
-    camera_manager->setFrameCallback(nullptr);
-  }
+  // Every live frame goes past the trigger capturer (which ignores it unless
+  // a trigger is armed) and the processor, which decides per mode what to do
+  // with it — nothing in mode none.
+  camera_manager->setFrameCallback([this](const FrameData& frame) {
+    trigger_capturer->onFrame(frame);
+    frame_processor->saveFrame(frame);
+  });
 
   // Raw frames feed the stacker, which ignores them until a stack is armed.
   if (rawConfigured()) {
@@ -710,7 +711,8 @@ void WebSocketServer::handleStartCameras(Socket* ws) {
     camera_manager->setRawFrameCallback(nullptr);
   }
   raw_stacker->reset();
-  camera_manager->setLiveFrames(frame_processor->getMode() != ProcessMode::STACK);
+  trigger_capturer->reset();
+  updateLiveFrames();
 
   // Start all cameras
   if (camera_manager->startAll()) {
@@ -751,6 +753,7 @@ void WebSocketServer::handleStartStream(Socket* ws, const json& msg) {
 
   ClientSession& s = sessionFor(ws);
   if (s.stream->startStreamingCamera(request.camera_id, request.options)) {
+    updateLiveFrames();
     std::ostringstream text;
     text << "Started streaming camera " << request.camera_id;
     if (request.options.subsample > 1) {
@@ -783,6 +786,7 @@ void WebSocketServer::handleStopStream(Socket* ws, const json& msg) {
 
   ClientSession& s = sessionFor(ws);
   if (s.stream->stopStreamingCamera(camera_id)) {
+    updateLiveFrames();
     LOG_INFO("WebSocketServer",
              std::string(clientRoleName(s.role)) +
                  ": stopped streaming camera " + std::to_string(camera_id));
@@ -805,13 +809,17 @@ void WebSocketServer::handleStopCameras(Socket* ws) {
   // stalled sensor and fire a spurious capture_timeout.
   stopCaptureWatchdog();
 
-  // Stop the commander's streaming first. The observer's subscriptions are
-  // deliberately left alone: they are persistent, and its streamer simply
-  // finds no new frames until the next start_cameras.
-  commander_.stream->stopAllStreaming();
+  // Drop the commander's subscriptions first. Its streaming thread keeps
+  // running so the frames of a capture already taken still go out. The
+  // observer's subscriptions are deliberately left alone: they are
+  // persistent, and its streamer simply finds no new frames until the next
+  // start_cameras.
+  commander_.stream->clearSubscriptions();
 
-  // A stack still capturing can never finish now: hand its cameras back
-  // their preview settings and tell the client it was cancelled.
+  // A capture still waiting on cameras can never finish now: a trigger
+  // delivers the frames it already has, a stack hands its cameras back their
+  // preview settings, and each tells the client it was cancelled.
+  trigger_capturer->cancel();
   raw_stacker->cancel();
 
   // Stop all cameras
@@ -1188,4 +1196,6 @@ void WebSocketServer::cleanupConnection(ClientSession& s) {
 
   // Release the slot
   s.connected = false;
+  // Its subscriptions went with it.
+  updateLiveFrames();
 }

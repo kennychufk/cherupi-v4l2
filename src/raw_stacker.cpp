@@ -3,8 +3,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <sstream>
 
 namespace {
@@ -13,21 +11,6 @@ double nowUs() {
   return std::chrono::duration<double, std::micro>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
-}
-
-const char* detectName(ProcessMode mode) {
-  switch (mode) {
-    case ProcessMode::CHECKERBOARD:
-      return "checkerboard";
-    case ProcessMode::CHECKERBOARD2X2:
-      return "checkerboard2x2";
-    case ProcessMode::ARUCO:
-      return "aruco";
-    case ProcessMode::ARUCO2X2:
-      return "aruco2x2";
-    default:
-      return "none";
-  }
 }
 
 nlohmann::json captureJson(const StackResult::Capture& c) {
@@ -50,19 +33,7 @@ nlohmann::json captureJson(const StackResult::Capture& c) {
   j["clipped_fraction"] = c.clipped_fraction;
   j["width"] = c.width;
   j["height"] = c.height;
-  j["detect"] = detectName(c.detect);
-  j["sets"] = nlohmann::json::array();
-  for (const auto& set : c.sets) {
-    nlohmann::json s;
-    s["set_id"] = set.set_id;
-    if (set.marker_id >= 0) s["marker_id"] = set.marker_id;
-    s["corners"] = nlohmann::json::array();
-    for (const auto& p : set.corners) s["corners"].push_back({p.x, p.y});
-    j["sets"].push_back(std::move(s));
-  }
   j["accumulate_ms"] = c.accumulate_ms;
-  j["detect_ms"] = c.detect_ms;
-  j["filename"] = c.filename;
   return j;
 }
 
@@ -93,8 +64,8 @@ RawStacker::~RawStacker() {
   if (worker_.joinable()) worker_.join();
 }
 
-std::optional<uint32_t> RawStacker::arm(
-    StackPlan plan, std::function<void(StackResult)> on_complete) {
+std::optional<uint32_t> RawStacker::arm(StackPlan plan, AckFn on_ack,
+                                         FramesFn on_frames) {
   if (plan.camera_ids.empty()) return std::nullopt;
   uint32_t id = 0;
   {
@@ -104,7 +75,8 @@ std::optional<uint32_t> RawStacker::arm(
     id = p->id = next_id_++;
     for (uint32_t cam : plan.camera_ids) p->jobs[cam];
     p->plan = std::move(plan);
-    p->on_complete = std::move(on_complete);
+    p->on_ack = std::move(on_ack);
+    p->on_frames = std::move(on_frames);
     pending_ = std::move(p);
     if (apply_ && (pending_->plan.exposure_time_us || pending_->plan.analogue_gain)) {
       for (const auto& [cam, job] : pending_->jobs)
@@ -120,12 +92,8 @@ bool RawStacker::hasPending() const {
 }
 
 void RawStacker::reset() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!pending_) next_id_ = 1;
-  }
-  std::lock_guard<std::mutex> lock(published_mutex_);
-  published_.clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!pending_) next_id_ = 1;
 }
 
 void RawStacker::onRawFrame(const RawFrame& frame) {
@@ -235,7 +203,8 @@ void RawStacker::cancel() {
     c.settle_frames = job.settle_frames;
     result.captures.push_back(std::move(c));
   }
-  if (p->on_complete) p->on_complete(std::move(result));
+  if (p->on_ack) p->on_ack(std::move(result));
+  if (p->on_frames) p->on_frames({});
 }
 
 void RawStacker::workerLoop() {
@@ -251,21 +220,43 @@ void RawStacker::workerLoop() {
     }
     // `finishing` keeps onRawFrame, arm and cancel off the pending stack, so
     // it can be read here without the lock while detection runs.
-    StackResult result = finish(*p);
-    std::function<void(StackResult)> done;
+    std::vector<std::shared_ptr<FrameData>> images;
+    StackResult result = finish(*p, images);
+    // The ack goes out once the images exist — the summed frames are taken,
+    // so a robot may move — and ahead of the frames it describes.
+    if (p->on_ack) p->on_ack(result);
+
+    std::vector<CaptureFrame> out;
+    out.reserve(images.size());
+    for (auto& img : images) {
+      const double t0 = nowUs();
+      // The image is float32 in the frame's payload; detect views it in place.
+      cv::Mat view(static_cast<int>(img->height), static_cast<int>(img->width),
+                   CV_32FC1, img->data.data());
+      CaptureFrame cf;
+      cf.sets = raw_stack::detect(view, p->plan.detect);
+      cf.detection_kind = detectionKindForMode(p->plan.detect.kind);
+      cf.send_image = p->plan.send_image;
+      LOG_INFO("RawStacker",
+               "Stack " + std::to_string(p->id) + " camera " +
+                   std::to_string(img->camera_id) + ": " +
+                   std::to_string(cf.sets.size()) + " set(s), detect " +
+                   std::to_string((nowUs() - t0) / 1000.0) + " ms");
+      cf.frame = std::move(img);
+      out.push_back(std::move(cf));
+    }
+    FramesFn on_frames;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      done = std::move(pending_->on_complete);
+      on_frames = std::move(pending_->on_frames);
       pending_.reset();
     }
-    // The result goes out before the image is published, so a client sees
-    // the stack_result ahead of the frame it describes.
-    if (done) done(result);
-    publish(result);
+    if (on_frames) on_frames(std::move(out));
   }
 }
 
-StackResult RawStacker::finish(Pending& p) {
+StackResult RawStacker::finish(Pending& p,
+                               std::vector<std::shared_ptr<FrameData>>& images) {
   StackResult result;
   result.stack_id = p.id;
   for (auto& [cam, job] : p.jobs) {
@@ -282,7 +273,6 @@ StackResult RawStacker::finish(Pending& p) {
     c.exposure_time_us = job.first.exposure_time_us;
     c.analogue_gain = std::isfinite(job.first.analogue_gain) ? job.first.analogue_gain : 0.f;
     c.bit_depth = job.first.bit_depth;
-    c.detect = p.plan.detect.kind;
     if (!c.error.empty() || job.acc.frames() == 0) {
       if (c.error.empty()) c.error = "no frames stacked";
       result.captures.push_back(std::move(c));
@@ -296,9 +286,9 @@ StackResult RawStacker::finish(Pending& p) {
                             ? job.first.black_level
                             : full / 16.f;
     c.black_level = black;
-    // The image is formed straight into the payload of the frame the
-    // streamers will share, and the 12 MB sum is freed before detection:
-    // this runs on a 1 GB Pi beside the live pipeline.
+    // The image is formed straight into the payload of the frame that goes
+    // to the client, and the 12 MB sum is freed before detection: this runs
+    // on a 1 GB Pi beside the live pipeline.
     auto frame = std::make_shared<FrameData>();
     cv::Mat img = raw_stack::meanImage(job.acc, black, frame->data);
     c.width = static_cast<uint32_t>(img.cols);
@@ -312,87 +302,25 @@ StackResult RawStacker::finish(Pending& p) {
     c.accumulate_ms = job.accumulate_us / job.acc.frames() / 1000.0;
     job.acc.release();
 
-    const double t0 = nowUs();
-    std::vector<CornerSet> binned = raw_stack::detect(img, p.plan.detect);
-    c.detect_ms = (nowUs() - t0) / 1000.0;
-    c.sets = binned;
-    for (auto& set : c.sets)
-      for (auto& pt : set.corners) pt = raw_stack::binnedToFull(pt);
-
-    if (p.plan.save_image) {
-      std::error_code ec;
-      std::filesystem::create_directories(p.plan.output_dir, ec);
-      const std::string base = p.plan.output_dir + "/stack" +
-                               std::to_string(p.id) + "-cam" +
-                               std::to_string(cam);
-      c.filename = base + ".npy";
-      if (raw_stack::writeNpy(c.filename, img)) {
-        // A sidecar with the same record the client received, so the image
-        // can be analysed offline without the session log.
-        std::ofstream(base + ".json") << captureJson(c).dump(1) << "\n";
-      } else {
-        LOG_ERROR("RawStacker", "Failed to write " + c.filename);
-        c.filename.clear();
-        c.error = "failed to write the stacked image to " + p.plan.output_dir;
-      }
-    }
-
-    if (p.plan.publish) {
-      frame->camera_id = cam;
-      frame->frame_id = p.id;
-      frame->width = c.width;
-      frame->height = c.height;
-      frame->bytes_per_line = c.width * sizeof(float);
-      frame->pixel_format = PIXEL_FORMAT_STACK_F32;
-      frame->timestamp_us = job.last.timestamp_us;
-      frame->frame_duration_us = job.last.frame_duration_us;
-      frame->lens_position = job.last.lens_position;
-      frame->af_state = job.last.af_state;
-      frame->focus_fom = job.last.focus_fom;
-      frame->frame_kind = FrameKind::STACK;
-      c.image = std::move(frame);
-      c.image_sets = std::move(binned);
-    }
+    frame->camera_id = cam;
+    frame->frame_id = job.last.frame_id;
+    frame->width = c.width;
+    frame->height = c.height;
+    frame->bytes_per_line = c.width * sizeof(float);
+    frame->pixel_format = PIXEL_FORMAT_STACK_F32;
+    frame->timestamp_us = job.last.timestamp_us;
+    frame->frame_duration_us = job.last.frame_duration_us;
+    frame->lens_position = job.last.lens_position;
+    frame->af_state = job.last.af_state;
+    frame->focus_fom = job.last.focus_fom;
+    frame->frame_kind = FrameKind::STACK;
+    frame->capture_id = p.id;
+    images.push_back(std::move(frame));
     LOG_INFO("RawStacker",
              "Stack " + std::to_string(p.id) + " camera " + std::to_string(cam) +
-                 ": " + std::to_string(c.frames_stacked) + " frames, " +
-                 std::to_string(c.sets.size()) + " set(s), accumulate " +
-                 std::to_string(c.accumulate_ms) + " ms/frame, detect " +
-                 std::to_string(c.detect_ms) + " ms");
+                 ": " + std::to_string(c.frames_stacked) + " frames, accumulate " +
+                 std::to_string(c.accumulate_ms) + " ms/frame");
     result.captures.push_back(std::move(c));
   }
   return result;
-}
-
-void RawStacker::publish(const StackResult& result) {
-  bool any = false;
-  {
-    std::lock_guard<std::mutex> lock(published_mutex_);
-    for (const auto& c : result.captures) {
-      if (!c.image) continue;
-      Published& slot = published_[c.camera_id];
-      slot.frame = c.image;
-      slot.sets = c.image_sets;
-      slot.detection_kind = static_cast<uint8_t>(detectionKindForMode(c.detect));
-      slot.seq = ++published_seq_;
-      any = true;
-    }
-  }
-  if (any && on_published_) on_published_();
-}
-
-bool RawStacker::getStackedFrameForStreaming(
-    uint32_t camera_id, uint64_t& last_seen_seq,
-    std::shared_ptr<const FrameData>& frame, std::vector<CornerSet>& sets,
-    uint8_t& detection_kind) {
-  std::lock_guard<std::mutex> lock(published_mutex_);
-  auto it = published_.find(camera_id);
-  if (it == published_.end() || !it->second.frame ||
-      it->second.seq <= last_seen_seq)
-    return false;
-  frame = it->second.frame;
-  sets = it->second.sets;
-  detection_kind = it->second.detection_kind;
-  last_seen_seq = it->second.seq;
-  return true;
 }

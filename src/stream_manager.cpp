@@ -51,13 +51,16 @@ void StreamManager::setSink(FrameSink* new_sink) {
 
   LOG_INFO("StreamManager", tag() + "Sink attached");
 
-  if (!streaming_active && getStreamingCameraCount() > 0) {
-    should_stop = false;
-    streaming_active = true;
-    streaming_thread =
-        std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
-    LOG_INFO("StreamManager", tag() + "Streaming thread started");
-  }
+  if (getStreamingCameraCount() > 0) startThreadLocked();
+}
+
+void StreamManager::startThreadLocked() {
+  if (streaming_active || !sink) return;
+  should_stop = false;
+  streaming_active = true;
+  streaming_thread =
+      std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
+  LOG_INFO("StreamManager", tag() + "Streaming thread started");
 }
 
 void StreamManager::clearSink() {
@@ -68,6 +71,15 @@ void StreamManager::clearSink() {
   {
     std::lock_guard<std::mutex> lock(sink_mutex);
     sink = nullptr;
+  }
+  // Capture frames belong to the connection that asked for them.
+  {
+    std::lock_guard<std::mutex> lock(captures_mutex_);
+    if (!captures_.empty())
+      LOG_WARN("StreamManager", tag() + "Dropping " +
+                                    std::to_string(captures_.size()) +
+                                    " undelivered capture frame(s)");
+    captures_.clear();
   }
 
   cleanupTransfer();
@@ -95,15 +107,9 @@ bool StreamManager::startStreamingCamera(uint32_t camera_id,
   LOG_INFO("StreamManager", tag() + "Started streaming camera " +
                                 std::to_string(camera_id) + detail.str());
 
-  if (!streaming_active) {
+  {
     std::lock_guard<std::mutex> lock(sink_mutex);
-    if (sink) {
-      should_stop = false;
-      streaming_active = true;
-      streaming_thread =
-          std::make_unique<std::thread>(&StreamManager::streamingLoop, this);
-      LOG_INFO("StreamManager", tag() + "Streaming thread started");
-    }
+    startThreadLocked();
   }
 
   return true;
@@ -122,7 +128,8 @@ bool StreamManager::stopStreamingCamera(uint32_t camera_id) {
 
     {
       std::lock_guard<std::mutex> lock(transfer_mutex);
-      if (current_transfer && current_transfer->frame &&
+      if (current_transfer && !current_transfer->capture &&
+          current_transfer->frame &&
           current_transfer->frame->camera_id == camera_id) {
         current_transfer->in_progress = false;
       }
@@ -155,6 +162,78 @@ void StreamManager::stopAllStreaming() {
   cleanupTransfer();
 
   LOG_INFO("StreamManager", tag() + "All streaming stopped");
+}
+
+void StreamManager::clearSubscriptions() {
+  {
+    std::lock_guard<std::mutex> lock(streaming_mutex);
+    streaming_cameras.clear();
+  }
+  // A live frame mid-transfer notices at its next chunk and stops.
+  LOG_INFO("StreamManager", tag() + "Cleared all subscriptions");
+}
+
+void StreamManager::enqueueCaptures(std::vector<CaptureFrame> frames) {
+  if (frames.empty()) return;
+  std::lock_guard<std::mutex> lock(sink_mutex);
+  if (!sink) {
+    LOG_WARN("StreamManager", tag() + "No client for " +
+                                  std::to_string(frames.size()) +
+                                  " capture frame(s); dropping them");
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> cl(captures_mutex_);
+    for (auto& f : frames) captures_.push_back(std::move(f));
+  }
+  startThreadLocked();
+  frame_available_cv.notify_one();
+}
+
+bool StreamManager::hasPendingCaptures() const {
+  std::lock_guard<std::mutex> lock(captures_mutex_);
+  return !captures_.empty() || capture_in_flight_;
+}
+
+bool StreamManager::sendNextCapture() {
+  CaptureFrame cf;
+  {
+    std::lock_guard<std::mutex> lock(captures_mutex_);
+    if (captures_.empty()) return false;
+    cf = std::move(captures_.front());
+    captures_.pop_front();
+    capture_in_flight_ = true;
+  }
+  const uint32_t camera_id = cf.frame->camera_id;
+  const uint8_t kind = static_cast<uint8_t>(cf.detection_kind);
+  // Never dropped while the client is there: a transfer cut short by
+  // backpressure starts again under a new frame_uuid (the client discards
+  // the partial one, as it does any frame that stops arriving).
+  for (int attempt = 0; !should_stop; ++attempt) {
+    if (attempt > 0) {
+      {
+        std::lock_guard<std::mutex> lock(sink_mutex);
+        if (!sink) break;
+      }
+      LOG_WARN("StreamManager",
+               tag() + "Resending capture frame of camera " +
+                   std::to_string(camera_id) + " (attempt " +
+                   std::to_string(attempt + 1) + ")");
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const bool ok =
+        cf.send_image
+            ? sendChunkedFrame(cf.frame, camera_id, cf.sets, kind, /*capture=*/true)
+            : sendHeaderOnlyFrame(cf.frame, camera_id, cf.sets, kind);
+    if (ok) {
+      stats.frames_sent++;
+      if (!cf.send_image) stats.header_only_frames++;
+      break;
+    }
+  }
+  std::lock_guard<std::mutex> lock(captures_mutex_);
+  capture_in_flight_ = false;
+  return true;
 }
 
 bool StreamManager::isStreamingCamera(uint32_t camera_id) const {
@@ -206,6 +285,8 @@ stream_priority::Snapshot StreamManager::prioritySnapshot() const {
     s.streaming_payload =
         !streaming_cameras.empty() && !header_only_mode.load();
   }
+  // A capture's frames are commander traffic too, whatever the subscriptions.
+  if (hasPendingCaptures()) s.streaming_payload = true;
   s.in_backpressure = has_backpressure.load();
   const int64_t last_us = last_backpressure_us.load();
   if (last_us > 0) {
@@ -268,7 +349,7 @@ void StreamManager::streamingLoop() {
                                        " cameras");
       }
     }
-    if (no_cameras) {
+    if (no_cameras && !hasPendingCaptures()) {
       LOG_DEBUG("StreamManager", tag() + "No cameras streaming, waiting");
       std::unique_lock<std::mutex> wait_lock(frame_wait_mutex);
       frame_available_cv.wait_for(wait_lock, std::chrono::milliseconds(100));
@@ -304,6 +385,10 @@ void StreamManager::streamingLoop() {
         continue;
       }
     }
+
+    // Capture frames answer a request and go ahead of live frames.
+    if (sendNextCapture()) continue;
+    if (camera_order.empty()) continue;
 
     bool found_frame = false;
     size_t cameras_checked = 0;
@@ -344,8 +429,6 @@ void StreamManager::streamingLoop() {
       // corners); otherwise we pull the latest captured frame from the camera.
       // Either way the frame is shared, not copied, and the session's own
       // cursor decides what counts as new.
-      // In STACK mode the only streamable frames are stacked images, each
-      // carrying the detection made on it.
       const ProcessMode mode = frame_processor ? frame_processor->getMode() : ProcessMode::NONE;
       const bool detector_gated = isDetectorMode(mode);
       uint8_t detection_kind =
@@ -354,11 +437,7 @@ void StreamManager::streamingLoop() {
       std::shared_ptr<const FrameData> frame;
       std::vector<CornerSet> corner_sets;
       bool got_frame = false;
-      if (mode == ProcessMode::STACK) {
-        got_frame = stacker_ && stacker_->getStackedFrameForStreaming(
-                                    camera_id, cs.stack_cursor, frame,
-                                    corner_sets, detection_kind);
-      } else if (detector_gated) {
+      if (detector_gated) {
         got_frame = frame_processor->getDetectedFrameForStreaming(
             camera_id, cs.detected_cursor, frame, corner_sets);
       } else {
@@ -374,7 +453,6 @@ void StreamManager::streamingLoop() {
         if (it != streaming_cameras.end()) {
           it->second.camera_cursor = cs.camera_cursor;
           it->second.detected_cursor = cs.detected_cursor;
-          it->second.stack_cursor = cs.stack_cursor;
         }
       }
 
@@ -384,10 +462,7 @@ void StreamManager::streamingLoop() {
 
       // Subsampled streams get their own decimated frame; the header and any
       // detection block then describe that frame's pixel space.
-      // A stacked image is float32, which the YUV420 decimation cannot read;
-      // it always goes out whole.
-      const uint32_t factor =
-          frame->frame_kind == FrameKind::STACK ? 1 : cs.options.subsample;
+      const uint32_t factor = cs.options.subsample;
       if (factor > 1) {
         if (header_only_mode) {
           // Geometry only — no point decimating pixels nobody will receive.
@@ -537,7 +612,7 @@ bool StreamManager::sendHeaderOnlyFrame(std::shared_ptr<const FrameData> frame,
 bool StreamManager::sendChunkedFrame(std::shared_ptr<const FrameData> frame,
                                      uint32_t camera_id,
                                      std::vector<CornerSet> corner_sets,
-                                     uint8_t detection_kind) {
+                                     uint8_t detection_kind, bool capture) {
   const uint32_t frame_id = frame->frame_id;
   {
     std::lock_guard<std::mutex> lock(transfer_mutex);
@@ -551,6 +626,7 @@ bool StreamManager::sendChunkedFrame(std::shared_ptr<const FrameData> frame,
     current_transfer->current_chunk = 0;
     current_transfer->start_time = std::chrono::steady_clock::now();
     current_transfer->in_progress = true;
+    current_transfer->capture = capture;
   }
 
   LOG_DEBUG("StreamManager",
@@ -578,8 +654,9 @@ bool StreamManager::sendChunkedFrame(std::shared_ptr<const FrameData> frame,
 
     // Only enforce the per-camera streaming check when the streaming loop is
     // driving the send. `sendFrameForTest` skips this so chunking can be
-    // exercised without entering the streaming state.
-    if (streaming_active && !isStreamingCamera(camera_id)) {
+    // exercised without entering the streaming state, and a capture frame
+    // was asked for directly rather than through a subscription.
+    if (!capture && streaming_active && !isStreamingCamera(camera_id)) {
       LOG_INFO("StreamManager", tag() + "Camera " + std::to_string(camera_id) +
                                     " stopped during transfer");
       cleanupTransfer();
@@ -737,7 +814,7 @@ bool StreamManager::sendChunkHeader(const ChunkedTransfer& transfer,
   header.frame_duration_us = frame.frame_duration_us;
   header.corner_block_size = corner_block_size;
   header.num_corner_sets = static_cast<uint16_t>(corner_sets.size());
-  header.reserved = 0;
+  header.capture_id = static_cast<uint16_t>(frame.capture_id);
   header.lens_position = frame.lens_position;
   header.af_state = frame.af_state;
   header.detection_kind = transfer.detection_kind;

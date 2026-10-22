@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "capture_frame.hpp"
 #include "raw_stack.hpp"
 #include "types.hpp"
 
@@ -25,10 +26,7 @@ struct StackRequest {
   std::optional<int32_t> exposure_time_us;
   std::optional<float> analogue_gain;
   int skip_frames = 0;  // after the settings have settled
-  std::optional<ProcessMode> detect;  // absent ⇒ the process mode's choice
-  int subpix_window = 40;  // cornerSubPix half-window, full-res pixels
-  bool save_image = false;
-  std::optional<std::string> output_dir;  // absent ⇒ the process mode's
+  bool send_image = true;
 };
 
 // What the server resolved a request into.
@@ -38,11 +36,9 @@ struct StackPlan {
   std::optional<int32_t> exposure_time_us;
   std::optional<float> analogue_gain;
   int skip_frames = 0;
+  // The process mode's detection, run on each stacked image.
   raw_stack::DetectConfig detect;
-  bool save_image = false;
-  std::string output_dir = ".";
-  // Hand each stacked image to the streamers (process mode STACK).
-  bool publish = false;
+  bool send_image = true;
 };
 
 // Outcome of one stack, one entry per armed camera in camera_id order.
@@ -68,15 +64,7 @@ struct StackResult {
     float peak_fraction = 0.f;
     float clipped_fraction = 0.f;
     uint32_t width = 0, height = 0;  // the stacked (2x2-binned) image
-    ProcessMode detect = ProcessMode::NONE;
-    std::vector<CornerSet> sets;  // full-resolution sensor pixels
     double accumulate_ms = 0.0;  // mean per frame, on the capture thread
-    double detect_ms = 0.0;
-    std::string filename;  // the .npy written, when save_image
-    // Process mode STACK: what was handed to the streamers (sets in the
-    // stacked image's own pixels, as every streamed detection block is).
-    std::shared_ptr<const FrameData> image;
-    std::vector<CornerSet> image_sets;
   };
   uint32_t stack_id = 0;
   bool cancelled = false;
@@ -91,10 +79,11 @@ nlohmann::json stackResultJson(const StackResult& result);
 // metadata shows the new settings, `skip_frames` more are dropped, and the
 // next `num_frames` taken with identical settings are summed (a change
 // restarts the sum). A camera whose settings never arrive, or keep changing,
-// fails with an error instead. Once every camera is done a worker thread turns the sums into
-// images, detects, saves and reports — off the capture thread, since
-// detection takes hundreds of ms. At most one stack is outstanding, from arm
-// until its result has been delivered.
+// fails with an error instead. Once every camera is done a worker thread
+// turns the sums into images and acks, then runs the process mode's detection
+// on each image — off the capture thread, since it takes hundreds of ms — and
+// hands the images over for delivery. Nothing is saved. At most one stack is
+// outstanding, from arm until its images have been handed over.
 class RawStacker {
  public:
   using OverrideFn = std::function<void(uint32_t camera_id,
@@ -116,11 +105,15 @@ class RawStacker {
   RawStacker(const RawStacker&) = delete;
   RawStacker& operator=(const RawStacker&) = delete;
 
-  // Arm a stack. `on_complete` runs on the worker thread (or, if cancelled,
-  // the canceller's). Returns the stack id, or nullopt when a stack is
-  // already outstanding or `plan` names no camera.
-  std::optional<uint32_t> arm(StackPlan plan,
-                              std::function<void(StackResult)> on_complete);
+  using AckFn = std::function<void(StackResult)>;
+  using FramesFn = std::function<void(std::vector<CaptureFrame>)>;
+
+  // Arm a stack. `on_ack` runs on the worker thread once the images are
+  // formed (or, if cancelled, on the canceller's); `on_frames` runs exactly
+  // once per stack after it, with one image per camera that succeeded, in
+  // camera_id order — none when cancelled. Returns the stack id, or nullopt
+  // when a stack is already outstanding or `plan` names no camera.
+  std::optional<uint32_t> arm(StackPlan plan, AckFn on_ack, FramesFn on_frames);
   bool hasPending() const;
 
   // Capture-thread entry point: one raw frame from one camera.
@@ -130,22 +123,8 @@ class RawStacker {
   // camera and deliver a `cancelled` result. A stack already being finished
   // runs to completion.
   void cancel();
-  // start_cameras: restart stack ids at 1, as trigger ids do, and drop the
-  // images published by the previous run — as Camera::stop() drops its frame
-  // — so a new stream never opens on a stale stack whose id is about to recur.
+  // start_cameras: restart stack ids at 1, as trigger ids do.
   void reset();
-
-  // Streamer-facing, process mode STACK: the newest stacked image for
-  // `camera_id` if it is newer than the caller's cursor — the same contract
-  // as Camera::getFrameForStreaming. `detection_kind` describes `sets`.
-  bool getStackedFrameForStreaming(uint32_t camera_id, uint64_t& last_seen_seq,
-                                   std::shared_ptr<const FrameData>& frame,
-                                   std::vector<CornerSet>& sets,
-                                   uint8_t& detection_kind);
-  // Run after each image is published, to wake the streamers.
-  void setPublishedCallback(std::function<void()> cb) {
-    on_published_ = std::move(cb);
-  }
 
  private:
   enum class Phase { SETTLING, SKIPPING, STACKING, DONE };
@@ -165,18 +144,18 @@ class RawStacker {
     uint32_t id = 0;
     StackPlan plan;
     std::map<uint32_t, CameraJob> jobs;
-    std::function<void(StackResult)> on_complete;
+    AckFn on_ack;
+    FramesFn on_frames;
     bool finishing = false;  // handed to the worker; frames are ignored
   };
 
   void advance(CameraJob& job, const RawFrame& frame);
   void workerLoop();
-  StackResult finish(Pending& p);
-  void publish(const StackResult& result);
+  // Form each camera's image (as a STACK frame, into `images`) and the ack.
+  StackResult finish(Pending& p, std::vector<std::shared_ptr<FrameData>>& images);
 
   OverrideFn apply_;
   RestoreFn restore_;
-  std::function<void()> on_published_;
 
   mutable std::mutex mutex_;
   std::unique_ptr<Pending> pending_;
@@ -184,14 +163,4 @@ class RawStacker {
   std::condition_variable work_cv_;
   bool stop_ = false;
   std::thread worker_;
-
-  struct Published {
-    std::shared_ptr<const FrameData> frame;
-    std::vector<CornerSet> sets;
-    uint8_t detection_kind = 0;
-    uint64_t seq = 0;
-  };
-  std::mutex published_mutex_;
-  std::map<uint32_t, Published> published_;
-  uint64_t published_seq_ = 0;  // never reset, so cursors stay valid
 };
