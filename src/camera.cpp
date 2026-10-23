@@ -595,51 +595,46 @@ void Camera::onRequestComplete(libcamera::Request* request) {
       goto requeue;
     }
 
-    FrameData frame;
-    frame.camera_id = camera_id;
-    frame.frame_id = frame_counter++;
-    frame.width = stream_cfg.size.width;
-    frame.height = stream_cfg.size.height;
-    frame.bytes_per_line = stream_cfg.stride;
-    frame.pixel_format = stream_cfg.pixelFormat.fourcc();
-    frame.timestamp_us = hw_ts_us;
-    frame.frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
-    frame.lens_position = lens_position;
-    frame.af_state = af_state;
-    frame.focus_fom = focus_fom;
+    // Built shared from the start, so the copy out of the DMA buffer is the
+    // only one made on this thread: the callback (the detector's pending slot)
+    // and every streamer hold this same allocation. This is libcamera's own
+    // thread, and at 4056x3040 each extra copy is 18.7 MB of fresh memory to
+    // fault in — under memory pressure that blocks in reclaim, and a callback
+    // that overruns the dequeue timeout kills the frontend for good (see
+    // CLAUDE.md, Resource Guards).
+    auto frame = std::make_shared<FrameData>();
+    frame->camera_id = camera_id;
+    frame->frame_id = frame_counter++;
+    frame->width = stream_cfg.size.width;
+    frame->height = stream_cfg.size.height;
+    frame->bytes_per_line = stream_cfg.stride;
+    frame->pixel_format = stream_cfg.pixelFormat.fourcc();
+    frame->timestamp_us = hw_ts_us;
+    frame->frame_duration_us = static_cast<uint32_t>(actual_fd_us > 0 ? actual_fd_us : 0);
+    frame->lens_position = lens_position;
+    frame->af_state = af_state;
+    frame->focus_fom = focus_fom;
 
     size_t total = 0;
     for (const auto& plane : buf->planes()) total += plane.length;
-    frame.data.resize(total);
+    frame->data.resize(total);
 
     size_t offset = 0;
     for (size_t p = 0; p < buf->planes().size(); ++p) {
       size_t len = buf->planes()[p].length;
       if (slot < mapped_planes.size() && p < mapped_planes[slot].size() &&
           mapped_planes[slot][p].data != MAP_FAILED) {
-        std::memcpy(frame.data.data() + offset,
+        std::memcpy(frame->data.data() + offset,
                     mapped_planes[slot][p].data, len);
       }
       offset += len;
     }
 
-    // Run the captured-frame callback (saveFrame, including any synchronous
-    // checkerboard detection) BEFORE publishing the frame for streaming.
-    // Detection writes its result into FrameProcessor's per-camera cache, and the
-    // streamer queries that cache keyed by frame_id. Publishing first would
-    // let the streamer pull frame N while detection for N is still mid-flight,
-    // causing a guaranteed cache miss on every frame (detection ≈360 ms ≫
-    // single-frame interval). With detection ahead of publish, the cache is
-    // populated by the time the streamer sees `latest_frame`.
-    if (onFrameCaptured) onFrameCaptured(frame);
+    std::shared_ptr<const FrameData> published = std::move(frame);
+    // The captured-frame callback (trigger capturer, then saveFrame) runs
+    // before the frame is published for streaming.
+    if (onFrameCaptured) onFrameCaptured(published);
     {
-      // Move into a shared, immutable frame: `frame` is not touched again
-      // below, and at 4608x2592 a copy here is 17.9 MB of memcpy on the
-      // completion thread — the thread that must requeue this request before
-      // libcamera's dequeue watchdog fires. Every streamer then shares this
-      // one allocation instead of taking its own copy.
-      std::shared_ptr<const FrameData> published =
-          std::make_shared<FrameData>(std::move(frame));
       std::lock_guard<std::mutex> lock(latest_frame_mutex);
       latest_frame_ = std::move(published);
       ++latest_seq_;

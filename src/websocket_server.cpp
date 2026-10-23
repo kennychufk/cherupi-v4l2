@@ -698,10 +698,11 @@ void WebSocketServer::handleStartCameras(Socket* ws) {
   // Every live frame goes past the trigger capturer (which ignores it unless
   // a trigger is armed) and the processor, which decides per mode what to do
   // with it — nothing in mode none.
-  camera_manager->setFrameCallback([this](const FrameData& frame) {
-    trigger_capturer->onFrame(frame);
-    frame_processor->saveFrame(frame);
-  });
+  camera_manager->setFrameCallback(
+      [this](const std::shared_ptr<const FrameData>& frame) {
+        trigger_capturer->onFrame(*frame);
+        frame_processor->saveFrame(frame);
+      });
 
   // Raw frames feed the stacker, which ignores them until a stack is armed.
   if (rawConfigured()) {

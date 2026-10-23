@@ -35,7 +35,8 @@ class CameraManager {
 
   size_t getCameraCount() const { return cameras.size(); }
 
-  void setFrameCallback(std::function<void(const FrameData&)> callback);
+  void setFrameCallback(
+      std::function<void(const std::shared_ptr<const FrameData>&)> callback);
   // Each camera's raw frames (Camera::onRawFrame); only cameras configured
   // with CameraConfig::raw deliver any.
   void setRawFrameCallback(std::function<void(const RawFrame&)> callback);

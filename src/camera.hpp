@@ -103,7 +103,10 @@ class Camera {
   // exceeds the stall threshold — 0 means "not stalled" (including a camera
   // that isn't RUNNING, or one that hasn't produced its first frame yet).
   // The threshold is 10x the observed inter-frame interval, floored at 3 s,
-  // so it always trips after libcamera's own watchdog rather than racing it.
+  // so with libcamera's default dequeue timeout (5 frames, floored at 1 s) it
+  // trips after libcamera's own watchdog rather than racing it. main() raises
+  // that timeout to 10 s, so this reports first; a stall that recovers clears
+  // the latch with its next frame.
   uint64_t captureStalledForUs() const;
   // Latch a stalled camera so a supervisor reports it exactly once per stall
   // episode. Returns true the first time; false while the latch is still set.
@@ -113,7 +116,9 @@ class Camera {
   // bring it back — stop_cameras + start_cameras is the recovery path.
   bool markCaptureFailed();
 
-  std::function<void(const FrameData&)> onFrameCaptured;
+  // Called on the libcamera completion thread with each live frame, shared
+  // with the streamers (the same allocation is published right after).
+  std::function<void(const std::shared_ptr<const FrameData>&)> onFrameCaptured;
   // Called on the libcamera completion thread with each frame's raw twin,
   // when configured with CameraConfig::raw. The data is valid only for the
   // duration of the call.

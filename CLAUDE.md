@@ -131,6 +131,31 @@ mechanisms bound it, all configured through `set_process_mode`:
 2. **A feasibility gate in `start_cameras`** refuses a mode that provably cannot keep up: `BATCH` against the measured write rate of `output_dir`, `BUFFER` against a budget too small to hold two seconds. `allow_overcommit` downgrades the refusal to a warning.
 3. **A capture watchdog** (`WebSocketServer::captureWatchdogLoop`, 250 ms ticks) reports a camera that has gone silent for 10x its cadence (min 3 s) as an unsolicited `error` with `code: "capture_timeout"`. libcamera surfaces a frontend timeout to nobody, so without this the server hangs silently on a healthy socket. The cadence is the slowest of observed interval, locked `FrameDurationLimits` and manual `ExposureTime`, so a deliberate slow-down never reads as a stall.
 
+**The frontend watchdog fires on a slow callback, not only on a dead sensor.**
+libcamera checks its dequeue timer on its own event-loop thread *after* that
+iteration's handlers have run — `Camera::onRequestComplete` among them. A
+callback that overruns the timeout lets the timer expire before the buffer
+already waiting is polled: "Dequeue timer … has expired!" on
+`rp1-cfe-fe_image0`, then "Camera frontend has timed out!", for good. A
+stopped process (SIGSTOP in `poll`) does not trip it; one 1.5 s sleep inside
+the callback always does. Under memory pressure no sleep is needed: on a 1 GB
+Pi 5 running the desktop, 4056x3040 YUV + `raw` + checkerboard + full-res
+streaming leaves ~350 MB of dmabufs pinned and the box swapping, callbacks
+that fault in fresh frame memory occasionally block in reclaim for 1–2 s, and
+capture died after ~13 min, twice. Hence:
+
+- `main` writes a libcamera pipeline config (unless `LIBCAMERA_RPI_CONFIG_FILE`
+  is already set) with `camera_timeout_value_ms: 10000` — transient stalls are
+  ridden out, and the capture watchdog above still reports at 3 s — and
+  `disable_hdr: true` (two unused full-size Bayer buffers, 49 MB at 4056x3040).
+  **Not `disable_tdn`**: with the raw stream configured, the camera then
+  delivers no frame at all.
+- `onRequestComplete` makes exactly one copy of a live frame (out of the DMA
+  buffer, into a `shared_ptr<const FrameData>`); `onFrameCaptured`, the
+  detector's pending slot and the streamers all share it. Keep it that way:
+  every further copy there is 18.7 MB of memory faulted in on libcamera's
+  thread.
+
 **Large buffers go back to the kernel.** `main` pins glibc's mmap threshold at
 1 MiB (`mallopt(M_MMAP_THRESHOLD)`). glibc's default threshold rises after the
 first large free, after which multi-MB frame buffers come from per-thread heaps

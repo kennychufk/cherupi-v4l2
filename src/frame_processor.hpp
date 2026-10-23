@@ -112,7 +112,10 @@ class FrameProcessor {
   // `detected_for_stream`. Frames that arrive while the worker is busy
   // overwrite the pending slot and are silently skipped, exactly like the
   // streamer drops older frames under backpressure.
-  std::map<uint32_t, FrameData> pending_detection;  // ordered → round-robin
+  // Shared with the camera's published frame, so handing a frame over costs
+  // no copy on the capture thread.
+  std::map<uint32_t, std::shared_ptr<const FrameData>>
+      pending_detection;  // ordered → round-robin
   std::mutex pending_mutex;
   std::condition_variable pending_cv;
   std::thread detection_thread;
@@ -146,7 +149,7 @@ class FrameProcessor {
   // detected_for_stream (always, regardless of save_frames — this is what feeds
   // the streamer). Runs on the detection worker thread; takes the frame by
   // value so it can be moved into the streaming slot.
-  void processDetection(FrameData frame);
+  void processDetection(std::shared_ptr<const FrameData> frame);
   // Run the mode's detector on `frame` into `out_sets`; true if it found
   // anything. False with no sets in a non-detector mode.
   bool runDetector(const FrameData& frame, std::vector<CornerSet>& out_sets);
@@ -189,7 +192,10 @@ class FrameProcessor {
   void start();
   void stop();
 
-  // Called for each captured frame
+  // Called for each captured frame, on the capture thread. The detector modes
+  // keep a reference to `frame` instead of copying it.
+  void saveFrame(const std::shared_ptr<const FrameData>& frame);
+  // Convenience for callers that own a plain frame (tests): copies it once.
   void saveFrame(const FrameData& frame);
 
   // The mode's detection on one frame a trigger_capture took, run

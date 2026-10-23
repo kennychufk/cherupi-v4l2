@@ -898,7 +898,8 @@ Everything else in this section is a reply to something the client sent. This
 one is not: the server pushes it whenever a camera stops delivering frames.
 
 libcamera's Raspberry Pi pipeline handler gives up on a stalled frontend after
-5x the frame duration (floored at 1 s), logging:
+its camera timeout — by default 5x the frame duration, floored at 1 s; this
+server sets it to **10 s** (below) — logging:
 
 ```
 WARN  V4L2 /dev/video4[19:cap]: Dequeue timer of 2495000.00us has expired!
@@ -914,9 +915,18 @@ A watchdog therefore polls every camera and reports one error per failure once a
 camera has been silent for **10x its cadence, never less than 3 s**. The cadence
 is the slowest of the observed inter-frame interval, the locked
 `FrameDurationLimits`, and any manual `ExposureTime` — so deliberately dropping
-to a slow frame rate never reads as a stall. The threshold sits above
-libcamera's own watchdog by construction, so when this fires the frontend really
-is gone.
+to a slow frame rate never reads as a stall.
+
+The 1 s default is checked on libcamera's own thread after that thread's
+handlers, the server's frame callback among them, so a single callback that
+stalls past it (a page fault waiting on memory reclaim on a swapping 1 GB Pi)
+kills a perfectly healthy camera. The server therefore starts libcamera with a
+10 s camera timeout (`camera_timeout_value_ms`, unless `LIBCAMERA_RPI_CONFIG_FILE`
+is already set), and this error usually fires **before** libcamera gives up: a
+stall that recovers within 10 s is followed by frames again, and the error
+needs no action. Frames still missing 10 s in are gone for good. The fixed
+timeout also means a locked `frame_duration` above 10 s trips libcamera's
+watchdog.
 
 ```json
 {

@@ -293,7 +293,12 @@ void FrameProcessor::releaseBacklog(size_t bytes) {
 }
 
 void FrameProcessor::saveFrame(const FrameData& frame) {
+  saveFrame(std::make_shared<const FrameData>(frame));
+}
+
+void FrameProcessor::saveFrame(const std::shared_ptr<const FrameData>& shared) {
   if (!enabled) return;
+  const FrameData& frame = *shared;
 
   if (config.mode == ProcessMode::BUFFER) {
     if (!config.save_frames) return;  // nothing to persist → nothing to buffer
@@ -333,13 +338,13 @@ void FrameProcessor::saveFrame(const FrameData& frame) {
     // the inter-frame interval — so running it on the capture thread would
     // stall the whole pipeline. Latest-wins per camera: if the worker is still
     // busy, the previously-pending frame for this camera is overwritten
-    // (dropped) so the detector only ever works on the freshest frame.
-    // Copy the multi-MB frame outside the lock so the critical section is just
-    // a vector move, keeping the worker's pop path responsive.
-    FrameData pending = frame;
+    // (dropped) so the detector only ever works on the freshest frame. The
+    // slot shares the camera's frame rather than copying it: this is
+    // libcamera's completion thread (see Camera::onRequestComplete).
+    std::shared_ptr<const FrameData> dropped;
     {
       std::lock_guard<std::mutex> lock(pending_mutex);
-      pending_detection[frame.camera_id] = std::move(pending);
+      dropped = std::exchange(pending_detection[frame.camera_id], shared);
     }
     pending_cv.notify_one();
   }
@@ -347,7 +352,7 @@ void FrameProcessor::saveFrame(const FrameData& frame) {
 
 void FrameProcessor::detectionWorkerFunc() {
   while (true) {
-    FrameData frame;
+    std::shared_ptr<const FrameData> frame;
     {
       std::unique_lock<std::mutex> lock(pending_mutex);
       pending_cv.wait(lock, [this] {
@@ -371,8 +376,9 @@ void FrameProcessor::detectionWorkerFunc() {
   }
 }
 
-void FrameProcessor::processDetection(FrameData frame) {
+void FrameProcessor::processDetection(std::shared_ptr<const FrameData> shared) {
   frames_checked++;
+  const FrameData& frame = *shared;
 
   std::vector<CornerSet> sets;
   if (runDetector(frame, sets)) {
@@ -381,12 +387,12 @@ void FrameProcessor::processDetection(FrameData frame) {
     // Persist the detected frame only when saving is enabled. When it is off we
     // skip building the WriteTask entirely — that avoids copying the multi-MB
     // frame payload into the write queue on every detection, which is the main
-    // win of the no-save detection pipeline (the frame is still moved once into
-    // the streaming slot below).
+    // win of the no-save detection pipeline (the frame itself is only shared
+    // into the streaming slot below).
     if (config.save_frames && reserveBacklog(frame.data.size())) {
       WriteTask task;
       task.filename = generateFilename(frame.camera_id, frame.frame_id);
-      task.data = frame.data;  // frame is moved into the stream slot below
+      task.data = frame.data;  // the frame itself is shared into the stream slot below
       task.camera_id = frame.camera_id;
       task.frame_id = frame.frame_id;
 
@@ -403,12 +409,10 @@ void FrameProcessor::processDetection(FrameData frame) {
   // actually ran on — are ever eligible to stream. Latest-wins per camera:
   // an earlier processed frame the streamer never picked up is overwritten.
   const uint32_t camera_id = frame.camera_id;
-  std::shared_ptr<const FrameData> published =
-      std::make_shared<FrameData>(std::move(frame));
   {
     std::lock_guard<std::mutex> lock(detected_mutex);
     DetectedFrame& df = detected_for_stream[camera_id];
-    df.frame = std::move(published);
+    df.frame = std::move(shared);
     df.sets = std::move(sets);
     df.seq = ++detected_seq_counter_;
   }

@@ -141,7 +141,7 @@ std::vector<Camera*> CameraManager::getAllCameras() {
 }
 
 void CameraManager::setFrameCallback(
-    std::function<void(const FrameData&)> callback) {
+    std::function<void(const std::shared_ptr<const FrameData>&)> callback) {
   for (auto& camera : cameras) camera->onFrameCaptured = callback;
 }
 
