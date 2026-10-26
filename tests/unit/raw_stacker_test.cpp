@@ -73,7 +73,12 @@ TEST(RawStackerTest, WaitsForTheSettingsThenStacksAndRestores) {
   RawStacker stacker(ov.apply(), ov.restore());
   std::promise<StackResult> done;
   auto fut = done.get_future();
-  auto id = stacker.arm(plan({0}, 3), [&](StackResult r) { done.set_value(r); }, nullptr);
+  // The stack stays pending after its ack until its frames are handed over
+  // (one capture at a time, §5.9), so the end state is checked after those.
+  std::promise<void> frames;
+  auto frames_fut = frames.get_future();
+  auto id = stacker.arm(plan({0}, 3), [&](StackResult r) { done.set_value(r); },
+                        [&](std::vector<CaptureFrame>) { frames.set_value(); });
   ASSERT_TRUE(id.has_value());
   EXPECT_EQ(*id, 1u);
   EXPECT_EQ(ov.applied, std::vector<uint32_t>({0}));
@@ -100,6 +105,7 @@ TEST(RawStackerTest, WaitsForTheSettingsThenStacksAndRestores) {
   EXPECT_NEAR(c.white_fraction, (20000.f - 4096.f) / (65520.f - 4096.f), 1e-4);
   EXPECT_EQ(c.clipped_fraction, 0.f);
   EXPECT_EQ(ov.restored, std::vector<uint32_t>({0}));
+  ASSERT_EQ(frames_fut.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   EXPECT_FALSE(stacker.hasPending());
 }
 
