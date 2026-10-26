@@ -18,6 +18,7 @@ set(UNIT_SOURCES
     unit/raw_stack_test.cpp
     unit/raw_stacker_test.cpp
     unit/trigger_capturer_test.cpp
+    unit/float_semantics_test.cpp
 )
 
 # Production sources included in the unit binary. StreamManager currently
@@ -46,6 +47,10 @@ add_executable(unit_tests
     ../src/camera.cpp
     ../src/camera_manager.cpp
 )
+
+# Same floating-point semantics as camera_ws_server, so NaN handling is tested
+# as it ships (see CHERUPI_MATH_FLAGS in the top-level CMakeLists.txt).
+target_compile_options(unit_tests PRIVATE ${CHERUPI_MATH_FLAGS})
 
 target_include_directories(unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src

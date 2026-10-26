@@ -165,6 +165,15 @@ if(NOT CHERUPI_TOOLS_ONLY)
         src/capture_frame.hpp
     )
 
+    # Floating-point semantics, shared with the unit tests so they exercise
+    # what ships. -ffast-math alone implies -ffinite-math-only, which lets the
+    # compiler assume NaN never occurs: std::isnan / std::isfinite fold to
+    # constants, and nlohmann::json then serialises a NaN as a garbage number
+    # instead of null. The server uses NaN on purpose — "no LensPosition",
+    # "no focuser" (lens_position_limits), "gain/black level unknown" in the
+    # stacker — so keep the rest of fast-math but not that assumption.
+    set(CHERUPI_MATH_FLAGS -ffast-math -fno-finite-math-only)
+
     # Create executable
     add_executable(camera_ws_server ${SOURCES} ${HEADERS})
 
@@ -193,7 +202,7 @@ if(NOT CHERUPI_TOOLS_ONLY)
         -O3
         -march=armv8.2-a+fp16+simd
         -mtune=cortex-a76
-        -ffast-math
+        ${CHERUPI_MATH_FLAGS}
         -funroll-loops
         -ftree-vectorize
     )
