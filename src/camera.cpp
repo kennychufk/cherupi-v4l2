@@ -24,6 +24,13 @@ uint64_t nowMonotonicUs() {
           .count());
 }
 
+// The value type of FrameDurationLimits: libcamera::Span<const int64_t, 2>
+// before the RPi 0.7.2+rpt20261009 package, std::span<const int64_t, 2> from
+// it on. The old Span does not accept a std::span, so name it through the
+// control.
+using FrameDurationSpan =
+    decltype(libcamera::controls::FrameDurationLimits)::type;
+
 }  // namespace
 
 Camera::Camera(uint32_t id, std::shared_ptr<libcamera::Camera> cam,
@@ -302,7 +309,7 @@ bool Camera::start() {
   if (fd_initial > 0) {
     int64_t v[2] = {fd_initial, fd_initial};
     controls.set(libcamera::controls::FrameDurationLimits,
-                 libcamera::Span<const int64_t, 2>(v));
+                 FrameDurationSpan(v));
     LOG_INFO("Camera",
              "Camera " + std::to_string(camera_id) +
                  " start: applying FrameDurationLimits lock @ " +
@@ -709,7 +716,7 @@ requeue:
       if (fd > 0) {
         int64_t v[2] = {fd, fd};
         reqctrls.set(libcamera::controls::FrameDurationLimits,
-                     libcamera::Span<const int64_t, 2>(v));
+                     FrameDurationSpan(v));
       } else {
         // Runtime "unset": release the lock by applying the HW max range
         // (omitting the control would just leave the previous lock in place).
@@ -717,7 +724,7 @@ requeue:
         if (hw_max > 0) {
           int64_t v[2] = {hw_min, hw_max};
           reqctrls.set(libcamera::controls::FrameDurationLimits,
-                       libcamera::Span<const int64_t, 2>(v));
+                       FrameDurationSpan(v));
         }
       }
       applied_frame_duration_generation_ = fd_gen;
@@ -790,7 +797,7 @@ std::pair<int64_t, int64_t> Camera::getFrameDurationLimitsHw() const {
   if (it == cmap.end()) return {0, 0};
   // The Raspberry Pi pipeline handler registers FrameDurationLimits with
   // scalar int64_t min/max bounds (despite the control type being
-  // Span<int64_t, 2>).
+  // a span of two int64_t).
   const libcamera::ControlInfo& info = it->second;
   return {info.min().get<int64_t>(), info.max().get<int64_t>()};
 }

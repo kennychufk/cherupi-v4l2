@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(camera_websocket_server)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # When ON, only tools/yuv420_convert.cpp is built. That tool has no libcamera

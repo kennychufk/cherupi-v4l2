@@ -98,7 +98,7 @@ Why raw: the ISP's temporal denoise correlates consecutive YUV frames, so stacki
 
 ## Build
 
-CMake 3.14+, C++17. Targets:
+CMake 3.14+, C++20 (libcamera's headers use `std::span` since the RPi `0.7.2+rpt20261009` package). Targets:
 - `camera_ws_server` — the server
 - `yuv420_convert` — standalone YUV420→image converter for saved frames
 - `unit_tests` / `hw_tests` — GoogleTest binaries (ctest labels `unit` / `hardware`); gated by `-DCHERUPI_BUILD_TESTS=ON` (default ON)
