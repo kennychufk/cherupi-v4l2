@@ -66,6 +66,10 @@ class Camera {
   // FrameDurationLimits, NaN (not 0) is the sentinel because 0 dioptres
   // (infinity) is a valid limit.
   LensPositionLimits getLensPositionLimitsHw() const;
+  // Returns the AnalogueGain range {min, max} from libcamera's ControlInfoMap,
+  // which configure() narrows to the sensor mode's (IMX708: min 1.1228, not
+  // 1.0). NaN if not advertised or the camera is not acquired.
+  std::pair<float, float> getAnalogueGainLimitsHw() const;
   // The fixed block of the output frame the IPA averages into the per-frame
   // FocusFoM metadata (see focus_region.hpp). Meaningful once configured.
   focus_region::Region getFocusFomRegion() const;

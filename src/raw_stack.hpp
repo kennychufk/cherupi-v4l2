@@ -91,6 +91,15 @@ float percentile(const cv::Mat& img, double q);
 bool exposureMatches(std::optional<int32_t> target_us, int32_t actual_us);
 bool gainMatches(std::optional<float> target, float actual);
 
+// A requested gain brought into the sensor's [min_gain, max_gain], as
+// libcamera will clamp it — so the settle check waits for a gain the sensor
+// can deliver. The IMX708's floor is 1.1228 (register 112), not 1.0: an
+// unclamped default of 1 never settled there. An unset target stays unset;
+// an infinite bound is no bound; a NaN or inverted range (cameras whose
+// ranges do not overlap) leaves the target as it is.
+std::optional<float> clampGain(std::optional<float> target, float min_gain,
+                               float max_gain);
+
 // Map a point in a 2x2-binned image to the full-resolution sensor frame:
 // binned pixel b covers sensor pixels 2b and 2b + 1, whose centre is 2b + 0.5.
 cv::Point2f binnedToFull(cv::Point2f p);

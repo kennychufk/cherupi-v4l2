@@ -815,6 +815,16 @@ LensPositionLimits Camera::getLensPositionLimitsHw() const {
   return {info.min().get<float>(), info.max().get<float>(), def};
 }
 
+std::pair<float, float> Camera::getAnalogueGainLimitsHw() const {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  if (!lcam_acquired_) return {nan, nan};
+  const auto& cmap = lcam->controls();
+  auto it = cmap.find(&libcamera::controls::AnalogueGain);
+  if (it == cmap.end()) return {nan, nan};
+  const libcamera::ControlInfo& info = it->second;
+  return {info.min().get<float>(), info.max().get<float>()};
+}
+
 void Camera::setLiveFrames(bool enabled) {
   if (live_frames_.exchange(enabled) && !enabled) {
     std::lock_guard<std::mutex> lock(latest_frame_mutex);

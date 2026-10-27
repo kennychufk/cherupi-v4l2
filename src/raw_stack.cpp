@@ -119,6 +119,14 @@ bool gainMatches(std::optional<float> target, float actual) {
   return std::fabs(actual - *target) <= 0.02f * *target + 0.01f;
 }
 
+std::optional<float> clampGain(std::optional<float> target, float min_gain,
+                               float max_gain) {
+  if (!target || std::isnan(min_gain) || std::isnan(max_gain) ||
+      min_gain > max_gain)
+    return target;
+  return std::clamp(*target, min_gain, max_gain);
+}
+
 cv::Point2f binnedToFull(cv::Point2f p) {
   return {2.f * p.x + 0.5f, 2.f * p.y + 0.5f};
 }

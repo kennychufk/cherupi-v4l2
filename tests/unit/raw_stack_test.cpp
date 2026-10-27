@@ -77,6 +77,19 @@ TEST(RawStackTest, SettingsMatchWithinQuantisation) {
   EXPECT_FALSE(raw_stack::gainMatches(1.0f, NAN));
 }
 
+TEST(RawStackTest, GainIsClampedToTheSensorsRange) {
+  // IMX708: libcamera reports a 1.1228 floor, and a pinned 1.0 comes back as it.
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(1.0f, 1.1228f, 16.f), 1.1228f);
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(32.f, 1.f, 22.26f), 22.26f);
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(4.f, 1.f, 16.f), 4.f);
+  EXPECT_FALSE(raw_stack::clampGain(std::nullopt, 1.1228f, 16.f));
+  // An unknown bound is no bound; a range the cameras do not share is ignored.
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(1.0f, 1.1228f, INFINITY), 1.1228f);
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(1.0f, -INFINITY, INFINITY), 1.0f);
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(1.0f, NAN, 16.f), 1.0f);
+  EXPECT_FLOAT_EQ(*raw_stack::clampGain(1.0f, 8.f, 4.f), 1.0f);
+}
+
 TEST(RawStackTest, BinnedPixelMapsToTheCentreOfItsQuad) {
   const cv::Point2f p = raw_stack::binnedToFull({10.f, 3.25f});
   EXPECT_FLOAT_EQ(p.x, 20.5f);

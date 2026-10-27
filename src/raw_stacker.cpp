@@ -129,7 +129,8 @@ void RawStacker::advance(CameraJob& job, const RawFrame& frame) {
       if (plan.analogue_gain) msg << " gain " << *plan.analogue_gain;
       msg << ", camera reports " << frame.exposure_time_us << " us gain "
           << frame.analogue_gain
-          << " (an exposure longer than a locked frame duration is clamped)";
+          << " (an exposure longer than a locked frame duration, or a gain "
+             "outside the sensor's range, is clamped)";
       job.error = msg.str();
       job.last = meta;
       job.phase = Phase::DONE;

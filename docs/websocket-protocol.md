@@ -583,7 +583,7 @@ Averages `num_frames` consecutive raw Bayer frames per camera into one image, ru
 | `camera_id` | integer | *(absent)* | Stack only this camera. Omitted ⇒ every running camera, each its own stack; the result comes when all are done. |
 | `num_frames` | integer 1..1024 | `16` | Frames summed per camera. |
 | `exposure_time` | integer µs, 1..10 000 000 | *(absent)* | Pin the exposure for the stack. Rejected if longer than a locked frame duration (`set_frame_duration`), which would clamp it. |
-| `analogue_gain` | number 1..64 | `1.0` with `exposure_time`, else *(absent)* | Pin the analogue gain for the stack. Defaults to 1 when only an exposure is given: left to the AGC, the gain would come back down to undo the longer exposure. |
+| `analogue_gain` | number 1..64 | `1.0` with `exposure_time`, else *(absent)* | Pin the analogue gain for the stack. Defaults to 1 when only an exposure is given: left to the AGC, the gain would come back down to undo the longer exposure. Clamped to the sensor mode's range as libcamera reports it (shared by all the stacked cameras), since libcamera would clamp it anyway and the stack would wait for a gain no frame reports: the IMX708's minimum is 1.1228, so the default of 1 stacks at 1.1228 there. `stack_result` reports the gain used. |
 | `skip_frames` | integer 0..100 | `0` | Frames to discard after the pinned settings have arrived, before summing. |
 | `send_image` | boolean | `true` | Whether each stacked image carries its pixels. `false` sends the header and detection block only (§5.9) — the corners without the 12 MB of float32. Independent of `set_header_only`. |
 

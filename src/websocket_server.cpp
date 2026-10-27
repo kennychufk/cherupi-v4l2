@@ -635,7 +635,22 @@ void WebSocketServer::handleStackCapture(Socket* ws, const json& msg) {
   const ProcessConfig& pc = frame_processor->getConfig();
   plan.num_frames = req.num_frames;
   plan.exposure_time_us = req.exposure_time_us;
-  plan.analogue_gain = req.analogue_gain;
+  // Clamp the gain to what the sensors can do, as libcamera would: the settle
+  // check otherwise waits for a gain no frame will report (IMX708's minimum
+  // is 1.1228, so the default of 1 never settled). One target serves every
+  // camera, so take the range they all share.
+  float min_gain = -std::numeric_limits<float>::infinity();
+  float max_gain = std::numeric_limits<float>::infinity();
+  for (uint32_t id : plan.camera_ids) {
+    const auto [lo, hi] = camera_manager->getCamera(id)->getAnalogueGainLimitsHw();
+    if (std::isfinite(lo)) min_gain = std::max(min_gain, lo);
+    if (std::isfinite(hi)) max_gain = std::min(max_gain, hi);
+  }
+  plan.analogue_gain = raw_stack::clampGain(req.analogue_gain, min_gain, max_gain);
+  if (plan.analogue_gain != req.analogue_gain)
+    LOG_INFO("WebSocketServer",
+             "Stack analogue_gain " + std::to_string(*req.analogue_gain) +
+                 " clamped to the sensor's " + std::to_string(*plan.analogue_gain));
   plan.skip_frames = req.skip_frames;
   plan.send_image = req.send_image;
   plan.detect.kind = isDetectorMode(pc.mode) ? pc.mode : ProcessMode::NONE;
