@@ -117,6 +117,15 @@ CameraConfig buildCameraConfig(const nlohmann::json& params);
 // pre-existing hardcoded behaviour).
 std::string buildSensorFilter(const nlohmann::json& params);
 
+// The sensor filter a discover should enumerate with, given the filter of the
+// cameras already discovered (`active_sensor`, lower-case; empty if none), or
+// std::nullopt to keep those cameras. With none discovered it is
+// buildSensorFilter's. After that only a `sensor` that differs
+// (case-insensitively) switches: an absent one keeps the cameras, so a client
+// that names no sensor never tears down another's.
+std::optional<std::string> sensorToDiscover(const nlohmann::json& params,
+                                            const std::string& active_sensor);
+
 // Convert a successful ProcessConfig build for a set_process_mode message. Returns
 // std::nullopt if the "mode" field is missing or unknown.
 std::optional<ProcessConfig> buildProcessConfig(const nlohmann::json& message);

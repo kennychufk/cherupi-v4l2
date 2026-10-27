@@ -10,51 +10,87 @@ CameraManager::CameraManager() {
 CameraManager::~CameraManager() {
   stopAll();
   cameras.clear();
+  pool_.clear();
   if (lcam_manager) lcam_manager->stop();
 }
 
+namespace {
+
+std::string toLower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+  return s;
+}
+
+}  // namespace
+
 size_t CameraManager::discoverCameras(const std::string& sensor) {
-  if (!cameras.empty()) {
+  const std::string sensor_lower = toLower(sensor);
+  if (!cameras.empty() && sensor_lower == active_sensor_) {
     LOG_INFO("CameraManager",
              "Cameras already discovered: " + std::to_string(cameras.size()));
     return cameras.size();
   }
-
-  if (lcam_manager->start() < 0) {
-    LOG_ERROR("CameraManager", "Failed to start libcamera CameraManager");
-    return 0;
+  for (Camera* camera : cameras) {
+    if (camera->getState() != CameraState::IDLE) {
+      LOG_ERROR("CameraManager",
+                "Cannot discover '" + sensor + "': camera " +
+                    std::to_string(camera->getId()) +
+                    " is configured; keeping the '" + active_sensor_ + "' cameras");
+      return cameras.size();
+    }
   }
 
-  // Convert to lower-case for comparison.
-  std::string sensor_lower = sensor;
-  std::transform(sensor_lower.begin(), sensor_lower.end(),
-                 sensor_lower.begin(), ::tolower);
+  if (!lcam_started_) {
+    if (lcam_manager->start() < 0) {
+      LOG_ERROR("CameraManager", "Failed to start libcamera CameraManager");
+      return 0;
+    }
+    lcam_started_ = true;
+  }
 
-  uint32_t id = 0;
+  std::vector<Camera*> found;
   for (auto& lcam : lcam_manager->cameras()) {
     // Filter to cameras whose sensor model matches the requested substring.
     auto model = lcam->properties().get(libcamera::properties::Model);
     if (!model) continue;
     std::string model_str(model->begin(), model->end());
-    // Convert to lower-case for comparison.
-    std::string lower = model_str;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find(sensor_lower) == std::string::npos) continue;
+    if (toLower(model_str).find(sensor_lower) == std::string::npos) continue;
 
-    LOG_INFO("CameraManager",
-             "Found camera: id=" + lcam->id() + " model=" + model_str);
+    const uint32_t id = static_cast<uint32_t>(found.size());
+    LOG_INFO("CameraManager", "Found camera: id=" + lcam->id() + " model=" +
+                                  model_str + " -> camera " + std::to_string(id));
 
-    auto cam = std::make_unique<Camera>(id, lcam, default_config, model_str);
-    if (stream_manager_notify) {
-      cam->setFrameAvailableCallback(stream_manager_notify);
+    std::unique_ptr<Camera>& cam = pool_[lcam->id()];
+    if (!cam) {
+      cam = std::make_unique<Camera>(id, lcam, default_config, model_str);
+      if (stream_manager_notify) {
+        cam->setFrameAvailableCallback(stream_manager_notify);
+      }
+    } else {
+      cam->setId(id);
     }
-    cameras.push_back(std::move(cam));
-    ++id;
+    found.push_back(cam.get());
+  }
+
+  {
+    std::unique_lock<std::shared_mutex> lock(cameras_mutex_);
+    cameras = std::move(found);
+    active_sensor_ = cameras.empty() ? std::string() : sensor_lower;
   }
 
   LOG_INFO("CameraManager",
            "Discovered " + std::to_string(cameras.size()) +
                " camera(s) matching sensor '" + sensor + "'");
+  return cameras.size();
+}
+
+std::string CameraManager::activeSensor() const {
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
+  return active_sensor_;
+}
+
+size_t CameraManager::getCameraCount() const {
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
   return cameras.size();
 }
 
@@ -130,14 +166,14 @@ bool CameraManager::unconfigureAll() {
 }
 
 Camera* CameraManager::getCamera(uint32_t camera_id) {
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
   if (camera_id >= cameras.size()) return nullptr;
-  return cameras[camera_id].get();
+  return cameras[camera_id];
 }
 
 std::vector<Camera*> CameraManager::getAllCameras() {
-  std::vector<Camera*> result;
-  for (auto& cam : cameras) result.push_back(cam.get());
-  return result;
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
+  return cameras;
 }
 
 void CameraManager::setFrameCallback(
@@ -156,12 +192,13 @@ void CameraManager::setLiveFrames(bool enabled) {
 
 void CameraManager::setStreamManagerNotify(std::function<void()> callback) {
   stream_manager_notify = callback;
-  for (auto& camera : cameras) camera->setFrameAvailableCallback(callback);
+  for (auto& [id, camera] : pool_) camera->setFrameAvailableCallback(callback);
 }
 
 std::vector<CameraManager::StalledCamera> CameraManager::pollStalledCameras() {
   std::vector<StalledCamera> stalled;
-  for (auto& camera : cameras) {
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
+  for (Camera* camera : cameras) {
     const uint64_t stalled_for = camera->captureStalledForUs();
     if (stalled_for == 0) continue;
     // markCaptureFailed() is the once-only gate: a camera already reported
@@ -173,7 +210,8 @@ std::vector<CameraManager::StalledCamera> CameraManager::pollStalledCameras() {
 }
 
 bool CameraManager::areAnyRunning() const {
-  for (const auto& camera : cameras) {
+  std::shared_lock<std::shared_mutex> lock(cameras_mutex_);
+  for (const Camera* camera : cameras) {
     if (camera->getState() == CameraState::RUNNING) return true;
   }
   return false;

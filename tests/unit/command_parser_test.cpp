@@ -140,6 +140,28 @@ TEST(CommandParserTest, BuildSensorFilterIgnoresNonStringSensor) {
   EXPECT_EQ(command_parser::buildSensorFilter(params), "imx519");
 }
 
+TEST(CommandParserTest, SensorToDiscoverFirstDiscoveryUsesTheFilter) {
+  EXPECT_EQ(command_parser::sensorToDiscover(nlohmann::json::object(), ""),
+            "imx519");
+  EXPECT_EQ(command_parser::sensorToDiscover(
+                nlohmann::json::parse(R"({"sensor":"imx708"})"), ""),
+            "imx708");
+}
+
+TEST(CommandParserTest, SensorToDiscoverKeepsTheCamerasUnlessAnotherIsNamed) {
+  using nlohmann::json;
+  // No sensor named, or the same one in any case: keep the cameras.
+  EXPECT_FALSE(command_parser::sensorToDiscover(json::object(), "imx708"));
+  EXPECT_FALSE(command_parser::sensorToDiscover(json::parse(R"({"sensor":123})"),
+                                                "imx708"));
+  EXPECT_FALSE(command_parser::sensorToDiscover(
+      json::parse(R"({"sensor":"IMX708"})"), "imx708"));
+  // Another sensor switches, as written.
+  EXPECT_EQ(command_parser::sensorToDiscover(
+                json::parse(R"({"sensor":"IMX477"})"), "imx708"),
+            "IMX477");
+}
+
 TEST(CommandParserTest, BuildProcessConfigAppliesMode) {
   auto msg = nlohmann::json::parse(R"({"mode":"batch","params":{"batch_size":7}})");
   auto cfg = command_parser::buildProcessConfig(msg);

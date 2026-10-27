@@ -139,6 +139,16 @@ bool StreamManager::stopStreamingCamera(uint32_t camera_id) {
   return removed;
 }
 
+void StreamManager::stopStreamingCamerasFrom(uint32_t camera_count) {
+  std::vector<uint32_t> gone;
+  {
+    std::lock_guard<std::mutex> lock(streaming_mutex);
+    for (const auto& [id, cs] : streaming_cameras)
+      if (id >= camera_count) gone.push_back(id);
+  }
+  for (uint32_t id : gone) stopStreamingCamera(id);
+}
+
 void StreamManager::stopAllStreaming() {
   LOG_INFO("StreamManager", tag() + "Stopping all streaming");
 

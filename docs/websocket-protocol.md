@@ -69,9 +69,9 @@ Commands rejected outside the required state return an `error` response but do n
 
 ### 3.1 State pushes
 
-Every transition is announced to **both** connected clients with an unsolicited `state` message — the same shape as the `get_state` reply (§4.2) — whose `cause` names the command that caused it (`configure`, `unconfigure`, `start_cameras`, `stop_cameras`). The same message is also pushed to a client when the *other* role connects or disconnects (`cause` = `commander_connected`, `commander_disconnected`, `observer_connected`, `observer_disconnected`), so an observer UI can show whether a commander is present.
+Every transition is announced to **both** connected clients with an unsolicited `state` message — the same shape as the `get_state` reply (§4.2) — whose `cause` names the command that caused it (`configure`, `unconfigure`, `start_cameras`, `stop_cameras`, or `discover` when it switched sensors and released the cameras, §4.1). The same message is also pushed to a client when the *other* role connects or disconnects (`cause` = `commander_connected`, `commander_disconnected`, `observer_connected`, `observer_disconnected`), so an observer UI can show whether a commander is present.
 
-The push follows the command's own `status` reply on the commander's socket. A client that issues `get_state` should match the reply by `cause: "query"` rather than by type alone.
+The push follows the command's own `status` reply on the commander's socket (except `discover`'s, which precedes the `discovery` reply). A client that issues `get_state` should match the reply by `cause: "query"` rather than by type alone.
 
 ```json
 {"type": "state", "state": "running", "cause": "start_cameras",
@@ -86,14 +86,27 @@ All requests have shape `{"cmd": "<name>", ...}`. All responses have shape `{"ty
 Enumerate cameras whose libcamera `properties::Model` contains `sensor` as a
 case-insensitive substring. Allowed in any state.
 
-Camera discovery is cached for the life of the server process, but only once
-it succeeds: the **first** `discover` call that matches at least one camera
-performs the actual libcamera enumeration/filtering and locks in that
-`sensor`, and every later call (even with a different `sensor`) just returns
-that same cached camera list. A `discover` call that matches zero cameras
-does **not** lock anything in — it re-runs the enumeration on the next call,
-so a client can retry with a corrected `sensor` (e.g. after a typo, or before
-the camera is attached) without restarting the server.
+Discovery is kept until a `discover` names a **different** sensor. The first
+`discover` that matches at least one camera enumerates libcamera and keeps
+that `sensor`. A later call with the same `sensor` (case-insensitive), or with
+none, returns the same cameras. A call that matches zero cameras keeps
+nothing, so the next call enumerates again (e.g. after a typo, or before the
+camera is attached).
+
+**Switching sensors.** A **commander**'s `discover` naming another sensor
+re-enumerates for it, from any state, with no server restart: if the current
+cameras are RUNNING they are stopped exactly as by `stop_cameras` (captures
+cancelled, a `buffer` mode flushed, the commander's subscriptions dropped),
+then unconfigured, and `state` is pushed to both clients with `cause:
+"discover"`. The reply then carries `"released"` — the state the previous
+cameras were in (`"running"` or `"configured"`). Ids are renumbered from 0
+over the new cameras; an observer's persistent subscriptions keep their ids
+(so now name the new cameras), and those at or past the new camera count are
+dropped. Camera settings (`set_lens_position`, `set_exposure_time`,
+`set_frame_duration`) belong to each camera, so the new cameras start from
+their own. Naming a sensor that matches nothing leaves no cameras. An
+**observer**'s `discover` never switches: once cameras are discovered it gets
+them, whatever `sensor` it names.
 
 **Request**
 ```json
@@ -113,6 +126,9 @@ sensor's reported model name works, e.g. `"imx477"`, `"ov5647"`.
   {"id": 1, "type": "imx519"}
 ]}
 ```
+
+When a switch released the previous cameras, the reply also has
+`"released": "running"` or `"configured"`.
 
 `id` is the stable index used by `start_stream`, `stop_stream`, and in binary frame headers. `type` is the matched camera's actual libcamera `properties::Model` string (not necessarily equal to the requested `sensor` substring). If no attached camera matches, `cameras` is an empty array — this is not an error.
 

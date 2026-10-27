@@ -142,6 +142,9 @@ class Camera {
   void setFrameAvailableCallback(std::function<void()> callback);
 
   uint32_t getId() const { return camera_id; }
+  // Renumber an IDLE camera: ids index the discovered set, which a discover
+  // for another sensor rebuilds from the same Camera objects.
+  void setId(uint32_t id) { camera_id = id; }
   // libcamera `properties::Model` string of the underlying sensor, e.g.
   // "imx519". Used to report the actual sensor type in the discover response.
   const std::string& getModel() const { return model; }
@@ -157,7 +160,9 @@ class Camera {
   }
 
  private:
-  uint32_t camera_id;
+  // Atomic: a streamer thread may still hold this camera while a rediscovery
+  // renumbers it.
+  std::atomic<uint32_t> camera_id;
   std::string model;
   std::shared_ptr<libcamera::Camera> lcam;
   std::unique_ptr<libcamera::CameraConfiguration> cam_config;

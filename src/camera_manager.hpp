@@ -1,8 +1,10 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -17,10 +19,17 @@ class CameraManager {
   ~CameraManager();
 
   // Enumerate libcamera cameras whose `properties::Model` contains `sensor`
-  // as a case-insensitive substring (e.g. "imx519", "imx477"). Cached after
-  // the first successful call — subsequent calls, even with a different
-  // `sensor`, return the same cameras discovered on the first call.
+  // as a case-insensitive substring (e.g. "imx519", "imx477"), numbered from
+  // 0. A call for the sensor already discovered returns the same cameras; a
+  // call for another one rebuilds the set, which requires every discovered
+  // camera to be IDLE (otherwise the current set is kept and an error
+  // logged). A Camera is created once per libcamera camera and kept for the
+  // manager's life, so a pointer from getCamera() never dangles — a streamer
+  // thread may hold one across a rediscovery. A sensor that matches nothing
+  // leaves no cameras and no sensor, so the next call enumerates again.
   size_t discoverCameras(const std::string& sensor = "imx519");
+  // The lower-cased sensor filter of the discovered cameras; empty if none.
+  std::string activeSensor() const;
 
   bool configureAll(const CameraConfig& config = {}, size_t buffer_count = 4);
 
@@ -33,7 +42,7 @@ class CameraManager {
   Camera* getCamera(uint32_t camera_id);
   std::vector<Camera*> getAllCameras();
 
-  size_t getCameraCount() const { return cameras.size(); }
+  size_t getCameraCount() const;
 
   void setFrameCallback(
       std::function<void(const std::shared_ptr<const FrameData>&)> callback);
@@ -85,7 +94,16 @@ class CameraManager {
 
  private:
   std::unique_ptr<libcamera::CameraManager> lcam_manager;
-  std::vector<std::unique_ptr<Camera>> cameras;
+  bool lcam_started_ = false;
+  // Every Camera ever discovered, by libcamera id; never shrinks.
+  std::map<std::string, std::unique_ptr<Camera>> pool_;
+  // The discovered set, indexed by camera id. Replaced only by
+  // discoverCameras (on the uWS loop thread); the streamer and watchdog
+  // threads read it, so they and the replacement take cameras_mutex_. The
+  // loop thread's own reads need no lock.
+  std::vector<Camera*> cameras;
+  std::string active_sensor_;
+  mutable std::shared_mutex cameras_mutex_;
   CameraConfig default_config;
   std::function<void()> stream_manager_notify;
 };

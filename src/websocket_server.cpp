@@ -358,12 +358,52 @@ void WebSocketServer::stop() {
 }
 
 void WebSocketServer::handleDiscover(Socket* ws, const json& params) {
-  std::string sensor = command_parser::buildSensorFilter(params);
-  size_t count = camera_manager->discoverCameras(sensor);
+  const std::string active = camera_manager->activeSensor();
+  std::optional<std::string> sensor =
+      command_parser::sensorToDiscover(params, active);
+  // An observer may make the first discovery but never switch the commander's
+  // cameras away: it gets the ones there are.
+  if (sensor && !active.empty() &&
+      sessionFor(ws).role != ClientRole::COMMANDER)
+    sensor.reset();
+
+  // A commander naming another sensor switches to it, from whatever state:
+  // the current cameras are stopped (as by stop_cameras: captures cancelled,
+  // a buffer flushed) and unconfigured first, so a client configured for the
+  // other camera needs no server restart.
+  std::string released;
+  if (sensor && system_state != CameraState::IDLE) {
+    released = stateName(system_state.load());
+    LOG_INFO("WebSocketServer", "Switching from the '" + active +
+                                    "' cameras (" + released + ") to '" +
+                                    *sensor + "'");
+    if (system_state == CameraState::RUNNING) {
+      const json stopped = stopCameras();
+      LOG_INFO("WebSocketServer", "Stopped for the switch: " + stopped.dump());
+    }
+    if (!camera_manager->unconfigureAll()) {
+      system_state = CameraState::CONFIGURED;
+      broadcastState("discover");
+      sendError(ws, "Failed to release the '" + active + "' cameras to discover '" +
+                        *sensor + "'");
+      return;
+    }
+    system_state = CameraState::IDLE;
+    broadcastState("discover");
+  }
+  const size_t count = sensor ? camera_manager->discoverCameras(*sensor)
+                              : camera_manager->getCameraCount();
+  // The observer's subscriptions persist and now name the new cameras; drop
+  // any whose id the new set does not reach.
+  if (sensor && observer_.stream)
+    observer_.stream->stopStreamingCamerasFrom(static_cast<uint32_t>(count));
 
   json response;
   response["type"] = Protocol::TYPE_DISCOVERY;
   response["cameras"] = json::array();
+  // The state the previous sensor's cameras were released from; only when a
+  // switch tore them down.
+  if (!released.empty()) response["released"] = released;
 
   for (size_t i = 0; i < count; i++) {
     json cam_info;
@@ -819,6 +859,11 @@ void WebSocketServer::handleStopCameras(Socket* ws) {
     return;
   }
 
+  ws->send(stopCameras().dump(), uWS::OpCode::TEXT);
+  broadcastState("stop_cameras");
+}
+
+json WebSocketServer::stopCameras() {
   LOG_INFO("WebSocketServer", "Stopping all cameras");
 
   // Before anything else, so it cannot mistake an orderly shutdown for a
@@ -869,9 +914,7 @@ void WebSocketServer::handleStopCameras(Socket* ws) {
                      frame_processor->getBacklogBudgetBytes()) +
                  " during this session");
   }
-
-  ws->send(status.dump(), uWS::OpCode::TEXT);
-  broadcastState("stop_cameras");
+  return status;
 }
 
 void WebSocketServer::handleResetFrameCounts(Socket* ws) {

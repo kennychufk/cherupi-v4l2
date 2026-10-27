@@ -100,6 +100,10 @@ class WebSocketServer {
   void handleStartStream(Socket* ws, const nlohmann::json& msg);
   void handleStopStream(Socket* ws, const nlohmann::json& msg);
   void handleStopCameras(Socket* ws);
+  // stop_cameras' work, RUNNING -> CONFIGURED: cancels captures, stops the
+  // cameras, flushes a buffer. Returns the status reply; the caller sends it
+  // (or not) and pushes the state.
+  nlohmann::json stopCameras();
   void handleResetFrameCounts(Socket* ws);
   void handleSetHeaderOnly(Socket* ws, const nlohmann::json& msg);
   void handleSetLensPosition(Socket* ws, const nlohmann::json& msg);

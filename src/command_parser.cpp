@@ -1,5 +1,7 @@
 #include "command_parser.hpp"
 
+#include <algorithm>
+
 namespace command_parser {
 
 using nlohmann::json;
@@ -159,6 +161,18 @@ std::string buildSensorFilter(const json& params) {
     return params["sensor"].get<std::string>();
   }
   return "imx519";
+}
+
+std::optional<std::string> sensorToDiscover(const json& params,
+                                            const std::string& active_sensor) {
+  if (active_sensor.empty()) return buildSensorFilter(params);
+  if (!params.contains("sensor") || !params["sensor"].is_string())
+    return std::nullopt;
+  std::string sensor = params["sensor"].get<std::string>();
+  std::string lower = sensor;
+  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+  if (lower == active_sensor) return std::nullopt;
+  return sensor;
 }
 
 std::variant<StreamRequest, std::string> buildStreamRequest(

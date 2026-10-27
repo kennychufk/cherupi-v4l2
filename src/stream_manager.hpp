@@ -90,6 +90,9 @@ class StreamManager {
   // made while they are stopped simply waits.
   bool startStreamingCamera(uint32_t camera_id, StreamOptions options = {});
   bool stopStreamingCamera(uint32_t camera_id);
+  // Unsubscribe every camera whose id is `camera_count` or above: after a
+  // discover for another sensor, ids past the new set name no camera.
+  void stopStreamingCamerasFrom(uint32_t camera_count);
   // Drop every subscription and stop the streaming thread; queued capture
   // frames go with it.
   void stopAllStreaming();
